@@ -1,11 +1,12 @@
 name: CI
 
-# CI runs on pull requests; a tag push runs the full pipeline (checks, image,
-# release) in a single run. Plain pushes to `main` do not trigger a run — open a
-# PR for checks, and tag to release.
+# Checks run on pushes to main and on pull requests. A tag additionally builds
+# and pushes the image and publishes the release. The image is built only on tags
+# (never twice for one commit) — push main and the tag separately for one run each.
 on:
   pull_request:
   push:
+    branches: [main]
     tags: ["v*"]
 
 permissions:
