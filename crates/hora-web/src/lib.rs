@@ -8,22 +8,25 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use askama::Template;
+use std::net::IpAddr;
+
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, Method, header};
+use axum::http::{HeaderName, HeaderValue, Method, Request, header};
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::future::join_all;
 use hora_core::SECONDS_PER_DAY;
-use hora_core::config::{Config, Monitor};
+use hora_core::config::{Config, Kind, Monitor};
 use hora_core::db::{self, DayRow, Latest, Point};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, watch};
 use tower_governor::GovernorLayer;
+use tower_governor::errors::GovernorError;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_governor::key_extractor::{KeyExtractor, SmartIpKeyExtractor};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -51,8 +54,8 @@ static OPENAPI_JSON: LazyLock<String> =
         title = "Hora API",
         description = "Read-only JSON API of a Hora uptime monitor."
     ),
-    paths(summary_json, latency_json, status_badge, uptime_badge, healthz),
-    components(schemas(Summary, MonitorView, DayCell, Point))
+    paths(summary_json, latency_json, push, status_badge, uptime_badge, healthz),
+    components(schemas(Summary, MonitorView, IncidentView, DayCell, Point))
 )]
 struct ApiDoc;
 
@@ -89,6 +92,48 @@ impl AppState {
     }
 }
 
+/// Rate-limit key extractor that trusts a configured header (e.g.
+/// `cf-connecting-ip` behind Cloudflare) for the client IP, falling back to the
+/// smart detection (x-forwarded-for / x-real-ip / forwarded / peer) when it is
+/// absent or unparseable.
+#[derive(Clone)]
+struct ConfiguredIp {
+    header: Option<HeaderName>,
+}
+
+impl KeyExtractor for ConfiguredIp {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        if let Some(header) = &self.header
+            && let Some(ip) = req
+                .headers()
+                .get(header)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|raw| raw.split(',').next())
+                .and_then(|first| first.trim().parse::<IpAddr>().ok())
+        {
+            return Ok(ip);
+        }
+        SmartIpKeyExtractor.extract(req)
+    }
+}
+
+impl ConfiguredIp {
+    /// Parse the configured header name once; an invalid name is ignored (with a
+    /// warning) and the extractor behaves like `SmartIpKeyExtractor`.
+    fn from_config(name: Option<&str>) -> Self {
+        let header = name.and_then(|name| {
+            name.parse::<HeaderName>()
+                .inspect_err(|_| {
+                    tracing::warn!("invalid server.client_ip_header {name:?}, ignoring");
+                })
+                .ok()
+        });
+        Self { header }
+    }
+}
+
 /// Build the axum router: page, rate-limited JSON API, `OpenAPI`, static assets,
 /// CORS, security headers and tracing.
 pub fn router(state: AppState) -> Router {
@@ -97,14 +142,17 @@ pub fn router(state: AppState) -> Router {
 
     let mut api = Router::new()
         .route("/api/summary", get(summary_json))
-        .route("/api/monitors/{id}/latency", get(latency_json));
+        .route("/api/monitors/{id}/latency", get(latency_json))
+        .route("/api/push/{id}", post(push));
 
     // Parameters are clamped to >= 1, so `finish` always succeeds; if it ever
     // did not, the API simply runs without a rate limit rather than panicking.
     if let Some(governor) = GovernorConfigBuilder::default()
         .per_second(config.server.rate_limit_refill_secs.max(1))
         .burst_size(config.server.rate_limit_burst.max(1))
-        .key_extractor(SmartIpKeyExtractor)
+        .key_extractor(ConfiguredIp::from_config(
+            config.server.client_ip_header.as_deref(),
+        ))
         .use_headers()
         .finish()
     {
@@ -257,6 +305,62 @@ async fn latency_json(
     Ok(Json(points))
 }
 
+#[derive(Debug, Deserialize)]
+struct PushQuery {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    msg: Option<String>,
+    #[serde(default)]
+    ping: Option<i64>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/push/{id}",
+    params(
+        ("id" = String, Path, description = "Push monitor id"),
+        ("token" = Option<String>, Query, description = "Push token, if the monitor sets one"),
+        ("status" = Option<String>, Query, description = "up (default), down or degraded"),
+        ("msg" = Option<String>, Query, description = "Optional detail recorded with the heartbeat"),
+        ("ping" = Option<i64>, Query, description = "Optional round-trip latency in ms")
+    ),
+    responses(
+        (status = 200, description = "Heartbeat recorded"),
+        (status = 401, description = "Missing or wrong token"),
+        (status = 404, description = "Unknown push monitor")
+    )
+)]
+async fn push(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<PushQuery>,
+) -> Result<&'static str, AppError> {
+    let config = state.config.borrow().clone();
+    let monitor = config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == id && monitor.kind == Kind::Push)
+        .ok_or(AppError::NotFound("unknown push monitor"))?;
+
+    // A configured token is required; without one, the id alone authorizes.
+    if let Some(expected) = &monitor.push_token
+        && query.token.as_deref() != Some(expected.as_str())
+    {
+        return Err(AppError::Unauthorized("invalid push token"));
+    }
+
+    let status = match query.status.as_deref() {
+        Some("down") => 0,
+        Some("degraded") => 2,
+        _ => 1,
+    };
+    db::insert_push(&state.pool, &id, status, query.ping, query.msg.as_deref()).await?;
+    Ok("ok")
+}
+
 #[utoipa::path(
     get,
     path = "/api/badge/{id}/status",
@@ -345,7 +449,19 @@ struct Summary {
     overall: &'static str,
     overall_label: &'static str,
     generated_at: String,
+    /// Human-readable UTC timestamp for the footer (the API uses `generated_at`).
+    #[serde(skip)]
+    updated_utc: String,
+    incidents: Vec<IncidentView>,
     monitors: Vec<MonitorView>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct IncidentView {
+    title: String,
+    body: String,
+    severity: &'static str,
+    at: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -359,6 +475,18 @@ struct MonitorView {
     uptime_permille: Option<i64>,
     #[serde(skip)]
     uptime_label: Option<String>,
+    #[serde(rename = "latency_p50_ms")]
+    p50_ms: Option<i64>,
+    #[serde(rename = "latency_p95_ms")]
+    p95_ms: Option<i64>,
+    #[serde(rename = "latency_p99_ms")]
+    p99_ms: Option<i64>,
+    #[serde(rename = "slo_latency_ms")]
+    slo_latency_ms: Option<i64>,
+    #[serde(skip)]
+    slo_state: &'static str,
+    /// Inside an active maintenance window (alerts muted).
+    maintenance: bool,
     #[serde(rename = "cert_expiry_days")]
     cert_days: Option<i64>,
     #[serde(skip)]
@@ -423,10 +551,12 @@ async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
         .iter()
         .zip(built)
         .map(|(monitor, result)| {
-            result.unwrap_or_else(|err| {
+            let mut view = result.unwrap_or_else(|err| {
                 tracing::warn!(monitor = %monitor.id, "failed to build monitor view: {err:#}");
                 unknown_view(monitor)
-            })
+            });
+            view.maintenance = config.in_maintenance(&monitor.id, now);
+            view
         })
         .collect();
 
@@ -434,11 +564,26 @@ async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
         .iter()
         .fold("up", |worst, m| worse(worst, m.status));
 
+    let incidents = config
+        .incidents
+        .iter()
+        .map(|incident| IncidentView {
+            title: incident.title.clone(),
+            body: incident.body.clone(),
+            severity: incident.severity.as_str(),
+            at: incident
+                .at
+                .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()),
+        })
+        .collect();
+
     Summary {
         title: config.page.title.clone(),
         overall,
         overall_label: overall_label(overall),
         generated_at: now.to_rfc3339(),
+        updated_utc: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        incidents,
         monitors,
     }
 }
@@ -453,6 +598,12 @@ fn unknown_view(monitor: &Monitor) -> MonitorView {
         last_checked: None,
         uptime_permille: None,
         uptime_label: None,
+        p50_ms: None,
+        p95_ms: None,
+        p99_ms: None,
+        slo_latency_ms: None,
+        slo_state: "none",
+        maintenance: false,
         cert_days: None,
         cert_label: None,
         cert_state: "none",
@@ -477,6 +628,9 @@ async fn build_monitor_view(
 
     let points = db::latency_series(pool, &monitor.id, ctx.since_24h).await?;
     let chart_svg = sparkline(&points, status);
+    // Percentiles come from the series we already fetched — no extra query.
+    let pct = percentiles(&points);
+    let slo_state = slo_state(monitor.slo_latency_ms, pct.map(|p| p.p95));
 
     let cert_days = db::cert_not_after(pool, &monitor.id)
         .await?
@@ -491,12 +645,58 @@ async fn build_monitor_view(
         last_checked: latest.and_then(|l| iso(l.time)),
         uptime_permille,
         uptime_label: uptime_permille.map(format_permille),
+        p50_ms: pct.map(|p| p.p50),
+        p95_ms: pct.map(|p| p.p95),
+        p99_ms: pct.map(|p| p.p99),
+        slo_latency_ms: monitor.slo_latency_ms,
+        slo_state,
+        // Overridden in `build_summary`, which has the live config and `now`.
+        maintenance: false,
         cert_days,
         cert_label: cert_days.map(cert_label),
         cert_state: cert_state_for(cert_days, ctx.cert_threshold),
         bar,
         chart_svg,
     })
+}
+
+/// 24h latency percentiles, derived from the latency series (empty → `None`).
+#[derive(Clone, Copy)]
+struct Percentiles {
+    p50: i64,
+    p95: i64,
+    p99: i64,
+}
+
+fn percentiles(points: &[Point]) -> Option<Percentiles> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<i64> = points.iter().map(|p| p.latency_ms).collect();
+    sorted.sort_unstable();
+    Some(Percentiles {
+        p50: nearest_rank(&sorted, 50),
+        p95: nearest_rank(&sorted, 95),
+        p99: nearest_rank(&sorted, 99),
+    })
+}
+
+/// Nearest-rank percentile (`percentile` in 1..=100) of a sorted, non-empty slice.
+fn nearest_rank(sorted: &[i64], percentile: i64) -> i64 {
+    let n = i64::try_from(sorted.len()).unwrap_or(i64::MAX);
+    // 1-based rank = ceil(percentile * n / 100), clamped into [1, n].
+    let rank = (percentile * n + 99) / 100;
+    let index = rank.clamp(1, n) - 1;
+    sorted[usize::try_from(index).unwrap_or(0)]
+}
+
+/// Whether the measured p95 meets the configured latency objective.
+fn slo_state(target: Option<i64>, p95: Option<i64>) -> &'static str {
+    match (target, p95) {
+        (Some(target), Some(p95)) if p95 <= target => "met",
+        (Some(_), Some(_)) => "breached",
+        _ => "none",
+    }
 }
 
 /// Current status from the recent checks (newest first): a single failure only
@@ -771,8 +971,21 @@ mod tests {
             .expect("pool");
         hora_core::db::migrator().run(&pool).await.expect("migrate");
         let config = hora_core::config::parse(
-            "[page]\n[server]\n[[monitors]]\nid = \"web\"\nname = \"Web\"\n\
-             target = \"https://example.com\"\ninterval_secs = 60\n",
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://example.com"
+            interval_secs = 60
+            [[monitors]]
+            id = "beat"
+            name = "Beat"
+            kind = "push"
+            interval_secs = 60
+            push_token = "s3cret"
+            "#,
         )
         .expect("config");
         let (_tx, rx) = watch::channel(Arc::new(config));
@@ -787,10 +1000,76 @@ mod tests {
             .expect("request")
     }
 
+    #[test]
+    fn configured_ip_prefers_header_then_falls_back() {
+        let extractor = ConfiguredIp::from_config(Some("cf-connecting-ip"));
+
+        // Header present: it wins over x-forwarded-for.
+        let with_header = Request::builder()
+            .header("cf-connecting-ip", "203.0.113.7")
+            .header("x-forwarded-for", "10.0.0.1")
+            .body(())
+            .expect("request");
+        assert_eq!(
+            extractor.extract(&with_header).unwrap(),
+            "203.0.113.7".parse::<IpAddr>().unwrap()
+        );
+
+        // Header absent: fall back to x-forwarded-for.
+        let without_header = Request::builder()
+            .header("x-forwarded-for", "10.0.0.1")
+            .body(())
+            .expect("request");
+        assert_eq!(
+            extractor.extract(&without_header).unwrap(),
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn healthz_is_ok() {
         let res = test_app().await.oneshot(get("/healthz")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    fn push(uri: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("x-forwarded-for", "1.2.3.4")
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn push_records_heartbeat_with_token() {
+        let res = test_app()
+            .await
+            .oneshot(push("/api/push/beat?token=s3cret&status=up"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn push_rejects_wrong_token() {
+        let res = test_app()
+            .await
+            .oneshot(push("/api/push/beat?token=wrong"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn push_to_non_push_monitor_is_404() {
+        // "web" exists but is an HTTP monitor, not a push target.
+        let res = test_app()
+            .await
+            .oneshot(push("/api/push/web?token=x"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -921,6 +1200,27 @@ mod tests {
         assert!(svg.starts_with("<svg"));
         assert!(svg.contains(">status<") && svg.contains(">up<"));
         assert!(svg.contains(status_color("up")));
+    }
+
+    #[test]
+    fn percentiles_nearest_rank() {
+        let points: Vec<Point> = (1..=100)
+            .map(|n| Point {
+                t: n,
+                latency_ms: n,
+            })
+            .collect();
+        let pct = percentiles(&points).expect("non-empty");
+        assert_eq!((pct.p50, pct.p95, pct.p99), (50, 95, 99));
+        assert!(percentiles(&[]).is_none());
+    }
+
+    #[test]
+    fn slo_state_compares_p95() {
+        assert_eq!(slo_state(Some(200), Some(150)), "met");
+        assert_eq!(slo_state(Some(200), Some(250)), "breached");
+        assert_eq!(slo_state(None, Some(150)), "none");
+        assert_eq!(slo_state(Some(200), None), "none");
     }
 
     #[test]

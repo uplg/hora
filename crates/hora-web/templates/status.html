@@ -262,10 +262,86 @@
       color: var(--down);
     }
 
+    .slo {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .slo.met {
+      color: var(--up);
+    }
+
+    .slo.breached {
+      color: var(--down);
+    }
+
     .empty-state {
       color: var(--muted);
       text-align: center;
       padding: 48px 0;
+    }
+
+    .incidents {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .incident {
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--card);
+    }
+
+    .incident.info {
+      border-left-color: var(--muted);
+    }
+
+    .incident.warning {
+      border-left-color: var(--degraded);
+    }
+
+    .incident.critical {
+      border-left-color: var(--down);
+    }
+
+    .incident.resolved {
+      border-left-color: var(--up);
+    }
+
+    .incident-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+    }
+
+    .incident-title {
+      font-weight: 600;
+    }
+
+    .incident-at {
+      color: var(--muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .incident-body {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .maint {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--degraded);
+      border: 1px solid var(--degraded);
+      border-radius: 4px;
+      padding: 1px 5px;
     }
 
     footer {
@@ -297,6 +373,20 @@
       </div>
     </div>
 
+    {% if !summary.incidents.is_empty() %}
+    <div class="incidents">
+      {% for incident in summary.incidents %}
+      <div class="incident {{ incident.severity }}">
+        <div class="incident-head">
+          <span class="incident-title">{{ incident.title }}</span>
+          {% if let Some(at) = incident.at %}<span class="incident-at">{{ at }}</span>{% endif %}
+        </div>
+        {% if !incident.body.is_empty() %}<p class="incident-body">{{ incident.body }}</p>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     {% if summary.monitors.is_empty() %}
     <p class="empty-state">No monitors configured yet.</p>
     {% else %}
@@ -306,6 +396,7 @@
         <div class="card-head">
           <span class="dot {{ monitor.status }}"></span>
           <span class="name">{{ monitor.name }}</span>
+          {% if monitor.maintenance %}<span class="maint" title="Maintenance — alerts muted">maintenance</span>{% endif %}
           <span class="meta">
             <span>{% if let Some(label) = monitor.uptime_label %}{{ label }}{% else %}—{% endif %}</span>
             <span><b>{% if let Some(ms) = monitor.last_latency_ms %}{{ ms }}ms{% else %}—{% endif %}</b></span>
@@ -320,8 +411,12 @@
 
         {{ monitor.chart_svg|safe }}
         <div class="caption">
-          <span>response · 24h</span>
+          <span>response · 24h{% if let Some(p95) = monitor.p95_ms %} · p95 {{ p95 }}ms{% endif %}{% if let
+            Some(p99) = monitor.p99_ms %} · p99 {{ p99 }}ms{% endif %}</span>
           <span>
+            {% if monitor.slo_state != "none" %}{% if let Some(target) = monitor.slo_latency_ms %}<span
+              class="slo {{ monitor.slo_state }}" title="24h p95 vs SLO objective">SLO {{ target }}ms</span> {% endif %}{%
+              endif %}
             {% if let Some(cert) = monitor.cert_label %}<span class="cert {{ monitor.cert_state }}">TLS {{ cert
               }}</span>{% endif %}
           </span>
@@ -332,7 +427,7 @@
     {% endif %}
 
     <footer>
-      Updated {{ summary.generated_at }} · Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
+      Updated {{ summary.updated_utc }} · Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
     </footer>
   </main>
 </body>

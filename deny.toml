@@ -13,6 +13,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "0BSD",
     "ISC",
     "CC0-1.0",
     "CDLA-Permissive-2.0",
@@ -32,6 +33,8 @@ skip = [
     { crate = "thiserror" },
     { crate = "thiserror-impl" },
     { crate = "windows-sys" },
+    # lettre (email parsing) pulls nom 8 while x509-parser is still on nom 7.
+    { crate = "nom" },
 ]
 
 [sources]

@@ -1,5 +1,8 @@
 # Hora configuration. Copy to config.toml and edit.
 # The path is resolved from $HORA_CONFIG (default: ./config.toml).
+#
+# Any `${VAR}` in this file is replaced with the environment variable at load,
+# so secrets can stay out of the file: token = "${HORA_TELEGRAM_TOKEN}".
 
 [page]
 # Title shown on the public status page and in the browser tab.
@@ -14,18 +17,51 @@ bind = "127.0.0.1:8787"
 database_path = "hora.db"
 # Browser origins allowed to call the JSON API (CORS). Empty = allow any (read-only, public data).
 allowed_origins = []
+# Trust this header for the client IP when rate limiting (e.g. behind Cloudflare).
+# Only safe if a proxy you control sets it and direct origin access is blocked.
+# Unset = smart detection (x-forwarded-for / x-real-ip / peer).
+# client_ip_header = "cf-connecting-ip"
 # Per-IP API rate limit (applied to /api/* only). One request slot is replenished
 # every `rate_limit_refill_secs` seconds, up to a burst of `rate_limit_burst`.
-# Behind a proxy the client IP is taken from X-Forwarded-For. Read once at startup.
 rate_limit_refill_secs = 1
 rate_limit_burst = 30
 
-# Notification channels. Each is independent; add more as they are implemented.
-[telegram]
-# Leave token/chat_id empty to disable the Telegram channel.
-# Overridable via $HORA_TELEGRAM_TOKEN / $HORA_TELEGRAM_CHAT_ID (recommended for secrets).
-token = ""
-chat_id = ""
+# --- Notification channels ------------------------------------------------
+# Each channel has a unique `name` and a `type`. Several channels may share a
+# type (e.g. two Discord webhooks). A monitor routes to specific channels with
+# its `notify = ["name", ...]` field; without it, every channel is used.
+# An empty secret (e.g. an unset ${VAR}) simply disables that channel.
+
+# [[channels]]
+# name = "ops-telegram"
+# type = "telegram"
+# token = "${HORA_TELEGRAM_TOKEN}"
+# chat_id = "123456"
+
+# [[channels]]
+# name = "alerts-discord"
+# type = "discord"
+# webhook_url = "${DISCORD_WEBHOOK}"
+
+# [[channels]]
+# name = "team-slack"
+# type = "slack"
+# webhook_url = "${SLACK_WEBHOOK}"
+
+# [[channels]]
+# name = "generic"
+# type = "webhook"        # POSTs { event, monitor, message?, days_left? } as JSON
+# url = "${WEBHOOK_URL}"
+
+# [[channels]]
+# name = "email-ops"
+# type = "email"
+# host = "smtp.example.com"
+# port = 587              # default; STARTTLS  (set implicit_tls = true for 465)
+# username = "hora@example.com"
+# password = "${SMTP_PASSWORD}"
+# from = "Hora <hora@example.com>"
+# to = "ops@example.com"
 
 # Alerting and retention policy, independent of any channel.
 [alerts]
@@ -36,10 +72,28 @@ cert_expiry_days = 14
 # Default history retention in days, overridable per monitor via `retention_days`.
 default_retention_days = 90
 
+# --- Scheduled maintenance ------------------------------------------------
+# Alerts are muted for the affected monitors during the window (checks still
+# recorded; the card shows a "maintenance" badge). `monitors` empty = all.
+# [[maintenance]]
+# title = "DB upgrade"
+# start = "2026-06-08T00:00:00Z"   # RFC 3339, quoted
+# end   = "2026-06-08T02:00:00Z"
+# monitors = ["database"]
+
+# --- Incidents / announcements --------------------------------------------
+# Shown as a banner at the top of the status page. Edit and reload to update.
+# [[incidents]]
+# title = "Investigating elevated latency"
+# body = "We are looking into reports of slow responses."
+# severity = "warning"             # info | warning | critical | resolved
+# at = "2026-06-07T12:00:00Z"      # optional, RFC 3339
+
 # --- Monitors -------------------------------------------------------------
-# kind = "http" (default) or "tcp".
+# kind = "http" (default), "tcp" or "push".
 # For http: target is a URL; up = 2xx (or expected_status if set).
 # For tcp:  target is "host:port"; up = TCP connect succeeds.
+# For push: no target; the job calls POST /api/push/{id} (see below).
 # TLS certificate expiry is checked automatically for https:// monitors.
 
 [[monitors]]
@@ -51,9 +105,12 @@ interval_secs = 60
 timeout_secs = 10
 # expected_status = 200   # optional; default: any 2xx counts as up
 # degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)
+# slo_latency_ms = 500    # optional; the 24h p95 is flagged met/breached against this
 # check_cert = false      # optional; override TLS expiry checking
 # retention_days = 30     # optional; override how long this monitor's history is kept
-# headers = { Accept = "text/html", Authorization = "Bearer ..." }  # optional; extra request headers
+# headers = { Accept = "text/html", Authorization = "Bearer ${TOKEN}" }  # optional
+# notify = ["alerts-discord"]   # optional; route alerts to specific channels
+# proxy = "socks5://127.0.0.1:9050"   # optional; route requests through a proxy
 
 [[monitors]]
 id = "api"
@@ -62,6 +119,11 @@ kind = "http"
 target = "https://api.example.com/health"
 interval_secs = 30
 timeout_secs = 10
+# Body assertions (http only):
+# keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
+# json_query = "$.status"   # JSONPath (RFC 9535) evaluated against a JSON body
+# json_expected = "ok"      # the queried value must equal this (omit = must match a node)
+# max_body_kb = 256         # cap on the body read for assertions (default 1024 = 1 MiB)
 
 [[monitors]]
 id = "database"
@@ -70,3 +132,14 @@ kind = "tcp"
 target = "db.example.com:5432"
 interval_secs = 60
 timeout_secs = 5
+
+# Heartbeat / push monitor: down if no ping arrives within `interval_secs`.
+# The job calls: curl -fsS -X POST \
+#   "https://status.example.com/api/push/nightly-backup?token=${BACKUP_TOKEN}"
+# Optional query: &status=down&msg=...&ping=<ms>
+[[monitors]]
+id = "nightly-backup"
+name = "Nightly backup"
+kind = "push"
+interval_secs = 90000        # max gap before "down" (~25h for a daily job)
+# push_token = "${BACKUP_TOKEN}"   # optional but recommended

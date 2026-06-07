@@ -168,16 +168,24 @@ pub fn spawn_watcher(pool: SqlitePool, config: watch::Receiver<Arc<Config>>, not
 
                         let expiring = days_left <= threshold_days;
                         let already_warned = warned.get(&monitor.id).copied().unwrap_or(false);
-                        if expiring && !already_warned {
-                            notifier
-                                .load_full()
-                                .dispatch(Event::CertExpiring {
-                                    monitor: &monitor.name,
-                                    days_left,
-                                })
-                                .await;
+                        // Mute (and don't record the warned state) during maintenance,
+                        // so the alert can still fire once the window ends.
+                        let muted = snapshot.in_maintenance(&monitor.id, chrono::Utc::now());
+                        if !muted {
+                            if expiring && !already_warned {
+                                notifier
+                                    .load_full()
+                                    .dispatch(
+                                        Event::CertExpiring {
+                                            monitor: &monitor.name,
+                                            days_left,
+                                        },
+                                        monitor.notify.as_deref(),
+                                    )
+                                    .await;
+                            }
+                            warned.insert(monitor.id.clone(), expiring);
                         }
-                        warned.insert(monitor.id.clone(), expiring);
                     }
                     Err(err) => warn!(monitor = %monitor.id, "cert check failed: {err:#}"),
                 }

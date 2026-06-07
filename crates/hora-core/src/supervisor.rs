@@ -67,7 +67,7 @@ async fn supervise(
     notifier: Notifiers,
 ) {
     let mut running: HashMap<String, Running> = HashMap::new();
-    reconcile(&mut running, &rx, &pool, &client, &notifier);
+    reconcile(&mut running, &rx, &pool, &notifier);
 
     let mut reloads = reload_signals(&config_path);
     while reloads.recv().await.is_some() {
@@ -79,7 +79,7 @@ async fn supervise(
                 if tx.send(Arc::clone(&config)).is_err() {
                     break;
                 }
-                reconcile(&mut running, &rx, &pool, &client, &notifier);
+                reconcile(&mut running, &rx, &pool, &notifier);
                 info!(
                     "configuration reloaded ({} monitors, {} channels)",
                     config.monitors.len(),
@@ -97,7 +97,6 @@ fn reconcile(
     running: &mut HashMap<String, Running>,
     rx: &watch::Receiver<Arc<Config>>,
     pool: &SqlitePool,
-    client: &Client,
     notifier: &Notifiers,
 ) {
     let config = rx.borrow().clone();
@@ -115,11 +114,20 @@ fn reconcile(
 
     for monitor in &config.monitors {
         if !running.contains_key(&monitor.id) {
+            // Each monitor gets its own client so it can carry its own proxy.
+            // The proxy URL is validated at config load, so this rarely fails.
+            let client = match crate::http::client(monitor.proxy.as_deref()) {
+                Ok(client) => client,
+                Err(err) => {
+                    warn!(monitor = %monitor.id, "monitor not started, bad proxy: {err:#}");
+                    continue;
+                }
+            };
             let task = scheduler::spawn_monitor(
                 monitor.clone(),
                 rx.clone(),
                 pool.clone(),
-                client.clone(),
+                client,
                 Arc::clone(notifier),
             );
             running.insert(

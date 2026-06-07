@@ -4,11 +4,8 @@
 //! supervisor (which owns the live config and notification channels), spawn the
 //! certificate watcher and pruner, and serve the status page and JSON API.
 
-use std::time::Duration;
-
 use anyhow::Context as _;
 use hora_core::config;
-use reqwest::Client;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -20,7 +17,9 @@ async fn main() -> anyhow::Result<()> {
     let pool = hora_core::db::connect(&initial.server.database_path)
         .await
         .context("opening database")?;
-    let client = build_http_client().context("building HTTP client")?;
+    // The notifier client (no proxy); per-monitor probe clients are built by the
+    // supervisor so each can carry its own proxy.
+    let client = hora_core::http::client(None).context("building HTTP client")?;
 
     // The supervisor owns the live config + notification channels and reconciles
     // monitor tasks on reload; other components read through its handles.
@@ -51,19 +50,6 @@ async fn main() -> anyhow::Result<()> {
 fn init_tracing() {
     let filter = EnvFilter::try_from_env("HORA_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
-}
-
-fn build_http_client() -> reqwest::Result<Client> {
-    Client::builder()
-        .user_agent(concat!("hora/", env!("CARGO_PKG_VERSION")))
-        // Backstop for requests that set no per-request timeout — notably the
-        // Telegram notifier, whose `dispatch().await` runs inline in each
-        // monitor loop: without this, a hung connection would stall that
-        // monitor's probing indefinitely. Probes override this per request with
-        // the monitor's own timeout.
-        .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(10))
-        .build()
 }
 
 /// Resolve when the process receives a shutdown signal. Listens for Ctrl-C on

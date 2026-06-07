@@ -104,6 +104,33 @@ pub async fn insert_check(
     Ok(())
 }
 
+/// Record a heartbeat pushed via the API (status: 0 down, 1 up, 2 degraded).
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn insert_push(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    status: i64,
+    latency_ms: Option<i64>,
+    message: Option<&str>,
+) -> sqlx::Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
+         VALUES (?, ?, ?, ?, NULL, ?)",
+    )
+    .bind(now)
+    .bind(monitor_id)
+    .bind(status)
+    .bind(latency_ms)
+    .bind(message)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// The last `limit` checks for a monitor, newest first. One query serves both the
 /// current status (from the statuses) and the latest sample (the first row).
 ///
@@ -123,6 +150,18 @@ pub async fn recent_checks(
     .bind(limit)
     .fetch_all(pool)
     .await
+}
+
+/// The timestamp of a monitor's most recent check, if any (push staleness).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn last_check_time(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(time) FROM checks WHERE monitor_id = ?")
+        .bind(monitor_id)
+        .fetch_one(pool)
+        .await
 }
 
 /// `(available, total)` check counts since `since`. Available = up or degraded.

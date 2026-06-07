@@ -18,7 +18,7 @@ serde.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tower-http.workspace = true
-tower_governor = "0.8.0"
+tower_governor = { version = "0.8.0", default-features = false, features = ["axum"] }
 tracing.workspace = true
 utoipa = "5.5.0"
 

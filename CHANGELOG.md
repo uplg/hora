@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-07
+
+A large feature release. **Breaking**: notification configuration moved to named
+channels — see _Changed_ and the migration note in the README.
+
+### Added
+
+- **Monitor types & checks** — HTTP body assertions (`keyword` / `keyword_invert`
+  and a `JSONPath` `json_query` / `json_expected`, with a configurable `max_body_kb`
+  cap); per-monitor HTTP/SOCKS `proxy`; and **push / heartbeat** monitors
+  (`kind = "push"`) that go down when a job stops calling `POST /api/push/{id}`.
+- **Notification channels** — Discord, Slack, a generic JSON webhook and SMTP
+  e-mail, in addition to Telegram. Channels are **named** (`[[channels]]` with a
+  `type`), so several can share a type, and each monitor can route to specific ones
+  with `notify = ["name", ...]`.
+- **Latency percentiles** — p50/p95/p99 over 24h on the page and API, with an
+  optional `slo_latency_ms` objective flagged met/breached.
+- **Scheduled maintenance windows** (`[[maintenance]]`) that mute alerts for the
+  affected monitors (checks are still recorded).
+- **Incidents / announcements** (`[[incidents]]`) shown as a banner on the page.
+- **`${VAR}` interpolation** in the config so secrets can come from the environment.
+- **`server.client_ip_header`** to trust a proxy header (e.g. `cf-connecting-ip`
+  behind Cloudflare) for rate-limit keying.
+- A human-readable UTC "last updated" timestamp in the footer.
+
+### Changed
+
+- **Breaking:** notification config moved from `[telegram]` / `[discord]` singletons
+  to named `[[channels]]`. Secrets now come through `${VAR}` interpolation; the fixed
+  `HORA_TELEGRAM_TOKEN` / `HORA_DISCORD_WEBHOOK_URL` overrides were removed
+  (`HORA_BIND` / `HORA_DATABASE_PATH` are unchanged).
+- `monitor.target` is now optional (it is unused for push monitors).
+
+### Removed
+
+- The transitive `tonic` (gRPC) dependency pulled in by the rate limiter.
+
 ## [0.1.1] - 2026-06-07
 
 A review, hardening and performance pass. No configuration changes required.
@@ -77,6 +114,7 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/uplg/hora/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/uplg/hora/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/uplg/hora/releases/tag/v0.1.0

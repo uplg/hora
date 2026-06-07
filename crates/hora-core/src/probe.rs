@@ -34,7 +34,7 @@ impl Outcome {
         }
     }
 
-    fn down(error: String) -> Self {
+    pub(crate) fn down(error: String) -> Self {
         Self {
             up: false,
             degraded: false,
@@ -51,6 +51,9 @@ pub async fn run(client: &Client, monitor: &Monitor) -> Outcome {
     match monitor.kind {
         Kind::Http => http(client, monitor).await,
         Kind::Tcp => tcp(monitor).await,
+        // Push monitors are evaluated from stored heartbeats by the scheduler,
+        // never actively probed; this arm is unreachable in practice.
+        Kind::Push => Outcome::down("push monitor has no active probe".to_owned()),
     }
 }
 
@@ -66,22 +69,39 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
     match result {
         Ok(response) => {
             let code = response.status().as_u16();
-            let up = match monitor.expected_status {
+            let status_ok = match monitor.expected_status {
                 Some(expected) => code == expected,
                 None => response.status().is_success(),
             };
-            let degraded = up && over_threshold(latency, monitor.degraded_over_ms);
-            let error = if up {
-                None
+            // Read the body only when we need it: to detail a failure, or to run
+            // a keyword/JSON assertion. Assertions get a larger budget.
+            let assertions = monitor.keyword.is_some() || monitor.json_query.is_some();
+            let body = if !status_ok || assertions {
+                let cap = if assertions {
+                    monitor.assertion_body_cap()
+                } else {
+                    MAX_BODY_SNIPPET
+                };
+                read_body(response, cap).await
             } else {
-                // Capture a bounded body snippet so the alert says *what* broke.
-                let snippet = body_snippet(response).await;
-                Some(if snippet.is_empty() {
+                Vec::new()
+            };
+
+            let (up, error) = if !status_ok {
+                let snippet = snippet(&body);
+                let detail = if snippet.is_empty() {
                     format!("HTTP {code}")
                 } else {
                     format!("HTTP {code}: {snippet}")
-                })
+                };
+                (false, Some(detail))
+            } else if let Some(failure) = check_assertions(monitor, &body) {
+                (false, Some(failure))
+            } else {
+                (true, None)
             };
+
+            let degraded = up && over_threshold(latency, monitor.degraded_over_ms);
             Outcome {
                 up,
                 degraded,
@@ -91,6 +111,59 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
             }
         }
         Err(err) => Outcome::down(describe(&err).to_owned()),
+    }
+}
+
+/// Run the configured keyword/JSON assertions against the body; the first that
+/// fails returns its reason. `None` means every assertion passed.
+fn check_assertions(monitor: &Monitor, body: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    if let Some(keyword) = &monitor.keyword {
+        let found = text.contains(keyword.as_str());
+        if found == monitor.keyword_invert {
+            return Some(if monitor.keyword_invert {
+                format!("keyword present: {keyword}")
+            } else {
+                format!("keyword missing: {keyword}")
+            });
+        }
+    }
+    if let Some(query) = &monitor.json_query {
+        return check_json(query, monitor.json_expected.as_deref(), &text);
+    }
+    None
+}
+
+/// Evaluate a `JSONPath` against the body. Returns a failure reason or `None`.
+fn check_json(query: &str, expected: Option<&str>, body: &str) -> Option<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Some("response is not valid JSON".to_owned());
+    };
+    // The query is validated at config load, so this should not fail.
+    let Ok(path) = serde_json_path::JsonPath::parse(query) else {
+        return Some(format!("invalid JSON query: {query}"));
+    };
+    let nodes = path.query(&value).all();
+    match expected {
+        None => nodes
+            .is_empty()
+            .then(|| format!("JSON query matched nothing: {query}")),
+        Some(expected) => {
+            let matched = nodes.iter().any(|node| json_value_eq(node, expected));
+            (!matched).then(|| format!("JSON query {query} != {expected}"))
+        }
+    }
+}
+
+/// Compare a queried JSON node to an expected string: strings match their inner
+/// value, everything else matches its compact JSON text (`true`, `42`, …).
+fn json_value_eq(value: &serde_json::Value, expected: &str) -> bool {
+    match value {
+        serde_json::Value::String(text) => text == expected,
+        other => {
+            let rendered = other.to_string();
+            rendered == expected
+        }
     }
 }
 
@@ -129,20 +202,25 @@ fn millis(elapsed: Duration) -> i64 {
     i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
 
-/// Read a bounded, single-line snippet of the response body (for failure detail).
-async fn body_snippet(mut response: reqwest::Response) -> String {
+/// Read the response body up to `cap` bytes (so a huge body can't exhaust memory).
+async fn read_body(mut response: reqwest::Response, cap: usize) -> Vec<u8> {
     let mut buf = Vec::new();
-    while buf.len() < MAX_BODY_SNIPPET {
+    while buf.len() < cap {
         match response.chunk().await {
             // Copy at most the remaining budget so one huge chunk can't blow the bound.
             Ok(Some(chunk)) => {
-                let take = (MAX_BODY_SNIPPET - buf.len()).min(chunk.len());
+                let take = (cap - buf.len()).min(chunk.len());
                 buf.extend_from_slice(&chunk[..take]);
             }
             _ => break,
         }
     }
-    String::from_utf8_lossy(&buf)
+    buf
+}
+
+/// Collapse a byte body into a bounded, single-line snippet for failure detail.
+fn snippet(body: &[u8]) -> String {
+    String::from_utf8_lossy(body)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -187,6 +265,56 @@ mod tests {
     fn status_value_mapping() {
         let down = Outcome::down("x".to_owned());
         assert_eq!(down.status_value(), 0);
+    }
+
+    fn http_monitor() -> Monitor {
+        Monitor {
+            id: "m".to_owned(),
+            name: "M".to_owned(),
+            kind: Kind::Http,
+            target: "https://example.com".to_owned(),
+            interval_secs: 60,
+            timeout_secs: 10,
+            expected_status: None,
+            degraded_over_ms: None,
+            slo_latency_ms: None,
+            headers: HashMap::new(),
+            keyword: None,
+            keyword_invert: false,
+            json_query: None,
+            json_expected: None,
+            max_body_kb: None,
+            notify: None,
+            proxy: None,
+            push_token: None,
+            check_cert: None,
+            retention_days: None,
+        }
+    }
+
+    #[test]
+    fn keyword_assertion() {
+        let mut monitor = http_monitor();
+        monitor.keyword = Some("OK".to_owned());
+        assert!(check_assertions(&monitor, b"all OK here").is_none());
+        assert!(check_assertions(&monitor, b"failure").is_some());
+
+        monitor.keyword_invert = true;
+        assert!(check_assertions(&monitor, b"failure").is_none());
+        assert!(check_assertions(&monitor, b"all OK").is_some());
+    }
+
+    #[test]
+    fn json_query_assertion() {
+        // Expected value, string and non-string.
+        assert!(check_json("$.status", Some("ok"), r#"{"status":"ok"}"#).is_none());
+        assert!(check_json("$.status", Some("ok"), r#"{"status":"bad"}"#).is_some());
+        assert!(check_json("$.healthy", Some("true"), r#"{"healthy":true}"#).is_none());
+        // No expected value: the query just has to match something.
+        assert!(check_json("$.data", None, r#"{"data":[1,2]}"#).is_none());
+        assert!(check_json("$.missing", None, r#"{"data":1}"#).is_some());
+        // Malformed JSON fails the assertion.
+        assert!(check_json("$.x", Some("1"), "not json").is_some());
     }
 
     #[tokio::test]

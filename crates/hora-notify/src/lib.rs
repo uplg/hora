@@ -1,15 +1,24 @@
 //! Notification abstraction.
 //!
 //! Alerting code emits an [`Event`]; each configured [`Notifier`] decides how
-//! to deliver it. [`Dispatcher`] fans an event out to every notifier. Telegram
-//! is the only built-in channel today; adding another means implementing the
-//! trait and registering it.
+//! to deliver it. [`Dispatcher`] holds the channels under their routing names
+//! and fans an event out to the matching ones. Telegram, Discord, Slack, a
+//! generic JSON webhook and SMTP e-mail are the built-in backends; adding
+//! another means implementing the trait and registering it.
 
+pub mod discord;
+pub mod email;
+pub mod slack;
 pub mod telegram;
+pub mod webhook;
 
 use async_trait::async_trait;
 
+pub use discord::DiscordNotifier;
+pub use email::{EmailConfig, EmailNotifier};
+pub use slack::SlackNotifier;
 pub use telegram::TelegramNotifier;
+pub use webhook::WebhookNotifier;
 
 /// An alertable event. Borrows its data so emitting one is allocation-free.
 #[derive(Debug, Clone, Copy)]
@@ -35,32 +44,45 @@ pub trait Notifier: Send + Sync {
     async fn notify(&self, event: Event<'_>);
 }
 
-/// Fans an event out to every registered notifier, in order.
+/// A registered channel: its routing name plus the delivery backend.
+struct Channel {
+    name: String,
+    notifier: Box<dyn Notifier>,
+}
+
+/// Holds the configured channels and fans events out to the matching ones.
 #[derive(Default)]
 pub struct Dispatcher {
-    notifiers: Vec<Box<dyn Notifier>>,
+    channels: Vec<Channel>,
 }
 
 impl Dispatcher {
     #[must_use]
-    pub fn new(notifiers: Vec<Box<dyn Notifier>>) -> Self {
-        Self { notifiers }
+    pub fn new(channels: Vec<(String, Box<dyn Notifier>)>) -> Self {
+        let channels = channels
+            .into_iter()
+            .map(|(name, notifier)| Channel { name, notifier })
+            .collect();
+        Self { channels }
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.notifiers.is_empty()
+        self.channels.is_empty()
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.notifiers.len()
+        self.channels.len()
     }
 
-    /// Deliver `event` to every notifier.
-    pub async fn dispatch(&self, event: Event<'_>) {
-        for notifier in &self.notifiers {
-            notifier.notify(event).await;
+    /// Deliver `event` to the matching channels: all of them when `only` is
+    /// `None`, otherwise just those whose name appears in the list.
+    pub async fn dispatch(&self, event: Event<'_>, only: Option<&[String]>) {
+        for channel in &self.channels {
+            if only.is_none_or(|names| names.iter().any(|name| name == &channel.name)) {
+                channel.notifier.notify(event).await;
+            }
         }
     }
 }
