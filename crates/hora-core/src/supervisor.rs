@@ -37,25 +37,35 @@ struct Running {
 pub struct Handle {
     pub config: watch::Receiver<Arc<Config>>,
     pub notifier: Notifiers,
+    /// The supervise task; await it on shutdown to drain the monitor tasks.
+    pub task: JoinHandle<()>,
 }
 
 /// Start supervising: build the notifier set, spawn the initial monitors and the
 /// reload loop, and return the handles every component reads.
 #[must_use]
-pub fn start(initial: Config, config_path: PathBuf, pool: SqlitePool, client: Client) -> Handle {
+pub fn start(
+    initial: Config,
+    config_path: PathBuf,
+    pool: SqlitePool,
+    client: Client,
+    shutdown: watch::Receiver<bool>,
+) -> Handle {
     let notifier = notifications::shared(&initial, &client);
     let (tx, rx) = watch::channel(Arc::new(initial));
-    tokio::spawn(supervise(
+    let task = tokio::spawn(supervise(
         tx,
         rx.clone(),
         config_path,
         pool,
         client,
         Arc::clone(&notifier),
+        shutdown,
     ));
     Handle {
         config: rx,
         notifier,
+        task,
     }
 }
 
@@ -66,9 +76,10 @@ async fn supervise(
     pool: SqlitePool,
     client: Client,
     notifier: Notifiers,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     let mut running: HashMap<String, Running> = HashMap::new();
-    reconcile(&mut running, &rx, &pool, &notifier);
+    reconcile(&mut running, &rx, &pool, &notifier, &shutdown);
 
     // The raw text last applied: a file event whose content is unchanged (a touch,
     // or a spurious event from some filesystems) is ignored, so a flapping watcher
@@ -76,7 +87,14 @@ async fn supervise(
     let mut last_raw = std::fs::read_to_string(&config_path).unwrap_or_default();
 
     let mut reloads = reload_signals(&config_path);
-    while reloads.recv().await.is_some() {
+    loop {
+        let signal = tokio::select! {
+            signal = reloads.recv() => signal,
+            _ = shutdown.changed() => break,
+        };
+        if signal.is_none() {
+            break;
+        }
         // Debounce: let a burst settle, then drain everything that piled up, so one
         // edit (which fires several events) becomes a single reload.
         tokio::time::sleep(RELOAD_DEBOUNCE).await;
@@ -102,7 +120,7 @@ async fn supervise(
                 if tx.send(Arc::clone(&config)).is_err() {
                     break;
                 }
-                reconcile(&mut running, &rx, &pool, &notifier);
+                reconcile(&mut running, &rx, &pool, &notifier, &shutdown);
                 info!(
                     "configuration reloaded ({} monitors, {} channels)",
                     config.monitors.len(),
@@ -111,6 +129,11 @@ async fn supervise(
             }
             Err(err) => warn!("config reload failed, keeping current config: {err:#}"),
         }
+    }
+
+    // On shutdown the monitor tasks observe the same signal and break; await them.
+    for (_, run) in running.drain() {
+        let _ = run.task.await;
     }
 }
 
@@ -125,6 +148,7 @@ fn reconcile(
     rx: &watch::Receiver<Arc<Config>>,
     pool: &SqlitePool,
     notifier: &Notifiers,
+    shutdown: &watch::Receiver<bool>,
 ) {
     let config = rx.borrow().clone();
 
@@ -156,6 +180,7 @@ fn reconcile(
                 pool.clone(),
                 client,
                 Arc::clone(notifier),
+                shutdown.clone(),
             );
             running.insert(
                 monitor.id.clone(),
@@ -213,8 +238,12 @@ fn spawn_sighup(tx: mpsc::Sender<()>) {
 fn spawn_sighup(_tx: mpsc::Sender<()>) {}
 
 fn file_watcher(config_path: &Path, tx: mpsc::Sender<()>) -> notify::Result<RecommendedWatcher> {
-    let watched_name = config_path.file_name().map(OsStr::to_owned);
-    let directory = config_path
+    // Resolve symlinks so we watch the real file's directory: a symlinked config
+    // would otherwise point the watcher at the link's directory and miss edits to
+    // the target. (Reads still go through the original path.)
+    let resolved = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
+    let watched_name = resolved.file_name().map(OsStr::to_owned);
+    let directory = resolved
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);

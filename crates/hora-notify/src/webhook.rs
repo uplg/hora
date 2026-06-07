@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
-use tracing::warn;
 
+use crate::util::post_json;
 use crate::{Event, Notifier};
 
 /// Posts each alert as a JSON object to an arbitrary HTTP endpoint.
@@ -61,17 +61,7 @@ impl Notifier for WebhookNotifier {
 
     async fn notify(&self, event: Event<'_>) {
         let payload = Self::payload(event);
-        match self.client.post(&self.url).json(&payload).send().await {
-            Ok(response) if !response.status().is_success() => {
-                warn!(status = %response.status(), "webhook rejected the request");
-            }
-            Ok(_) => {}
-            // The URL may embed a secret; strip it from any error.
-            Err(err) => warn!(
-                "webhook request failed: {}",
-                err.to_string().replace(&self.url, "<redacted>")
-            ),
-        }
+        post_json(&self.client, &self.url, &payload, "webhook", &self.url).await;
     }
 }
 

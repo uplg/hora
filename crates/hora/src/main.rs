@@ -4,8 +4,11 @@
 //! supervisor (which owns the live config and notification channels), spawn the
 //! certificate watcher and pruner, and serve the status page and JSON API.
 
+use std::time::Duration;
+
 use anyhow::Context as _;
 use hora_core::config;
+use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -21,11 +24,26 @@ async fn main() -> anyhow::Result<()> {
     // supervisor so each can carry its own proxy.
     let client = hora_core::http::client(None).context("building HTTP client")?;
 
+    // A shutdown signal lets the background tasks stop cleanly (finishing their
+    // current iteration) instead of being aborted when the runtime drops.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
     // The supervisor owns the live config + notification channels and reconciles
     // monitor tasks on reload; other components read through its handles.
-    let handle = hora_core::supervisor::start(initial, config_path, pool.clone(), client);
-    hora_core::cert::spawn_watcher(pool.clone(), handle.config.clone(), handle.notifier.clone());
-    hora_core::db::spawn_pruner(&pool, handle.config.clone());
+    let handle = hora_core::supervisor::start(
+        initial,
+        config_path,
+        pool.clone(),
+        client,
+        shutdown_rx.clone(),
+    );
+    let cert_task = hora_core::cert::spawn_watcher(
+        pool.clone(),
+        handle.config.clone(),
+        handle.notifier.clone(),
+        shutdown_rx.clone(),
+    );
+    let prune_task = hora_core::db::spawn_pruner(&pool, handle.config.clone(), shutdown_rx);
 
     let bind = handle.config.borrow().server.bind.clone();
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -44,11 +62,27 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("running HTTP server")?;
+
+    // The HTTP server has drained; now stop the background tasks and wait briefly
+    // for them to finish their current iteration before the runtime drops.
+    let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        let _ = tokio::join!(handle.task, cert_task, prune_task);
+    })
+    .await;
     Ok(())
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_env("HORA_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    // Distinguish "unset" (silent default) from "set but invalid" (warn, so a
+    // typo'd filter isn't silently ignored). Tracing isn't up yet, so use stderr.
+    let filter = match std::env::var("HORA_LOG") {
+        Ok(value) => EnvFilter::try_new(&value).unwrap_or_else(|err| {
+            eprintln!("warning: invalid HORA_LOG {value:?} ({err}); using info");
+            EnvFilter::new("info")
+        }),
+        Err(_) => EnvFilter::new("info"),
+    };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 

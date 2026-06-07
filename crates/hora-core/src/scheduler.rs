@@ -15,7 +15,8 @@ use crate::probe::Outcome;
 use crate::{db, probe};
 
 /// Spawn the probing loop for a single monitor. Aborting the returned handle
-/// stops the loop (used by the supervisor when a monitor is removed or changed).
+/// stops the loop (used by the supervisor when a monitor is removed or changed);
+/// a shutdown signal lets it finish the current tick and exit cleanly.
 #[must_use]
 pub fn spawn_monitor(
     monitor: Monitor,
@@ -23,8 +24,9 @@ pub fn spawn_monitor(
     pool: SqlitePool,
     client: Client,
     notifier: Notifiers,
+    shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
-    tokio::spawn(run(monitor, config, pool, client, notifier))
+    tokio::spawn(run(monitor, config, pool, client, notifier, shutdown))
 }
 
 async fn run(
@@ -33,6 +35,7 @@ async fn run(
     pool: SqlitePool,
     client: Client,
     notifier: Notifiers,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     // Fixed cadence: the tick interval does not drift by the probe duration.
     let mut ticker = tokio::time::interval(monitor.interval());
@@ -41,7 +44,10 @@ async fn run(
     let mut alerted_down = false;
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = shutdown.changed() => break,
+        }
         let outcome = if monitor.kind == Kind::Push {
             match heartbeat_outcome(&pool, &monitor).await {
                 Some(outcome) => outcome,

@@ -1,5 +1,6 @@
 //! `SQLite` persistence layer (sqlx). All timestamps are unix epoch seconds (UTC).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -89,8 +90,9 @@ pub async fn insert_check(
     outcome: &Outcome,
 ) -> sqlx::Result<()> {
     let now = chrono::Utc::now().timestamp();
+    // OR IGNORE: a same-second duplicate (UNIQUE monitor_id, time) is a no-op.
     sqlx::query(
-        "INSERT INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
+        "INSERT OR IGNORE INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
          VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(now)
@@ -118,7 +120,7 @@ pub async fn insert_push(
 ) -> sqlx::Result<()> {
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
+        "INSERT OR IGNORE INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
          VALUES (?, ?, ?, ?, NULL, ?)",
     )
     .bind(now)
@@ -263,34 +265,224 @@ pub async fn cert_not_after(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result
         .await
 }
 
+// --- Batch reads: one query for every monitor, used to build the summary ----
+// The status page batches the 24h/90d aggregates here (keyed by `monitor_id`)
+// instead of running them per monitor; the covering index serves every one.
+// `recent_checks` stays per-monitor: an indexed `LIMIT N` is already minimal and,
+// unlike a windowed batch, is correct for monitors checked less than once a day.
+
+/// `(available, total)` per monitor since `since`. Available = up or degraded.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn availability_all(
+    pool: &SqlitePool,
+    since: i64,
+) -> sqlx::Result<HashMap<String, (i64, i64)>> {
+    let rows = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT monitor_id, \
+            CAST(COALESCE(SUM(CASE WHEN status IN (1, 2) THEN 1 ELSE 0 END), 0) AS INTEGER), \
+            COUNT(*) \
+         FROM checks WHERE time >= ? GROUP BY monitor_id",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, available, total)| (id, (available, total)))
+        .collect())
+}
+
+/// Daily up/down/degraded aggregates per monitor since `since`, oldest first.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn daily_all(
+    pool: &SqlitePool,
+    since: i64,
+) -> sqlx::Result<HashMap<String, Vec<DayRow>>> {
+    let rows = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
+        "SELECT monitor_id, \
+            strftime('%Y-%m-%d', time, 'unixepoch') AS day, \
+            CAST(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS INTEGER), \
+            CAST(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS INTEGER), \
+            CAST(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS INTEGER) \
+         FROM checks WHERE time >= ? GROUP BY monitor_id, day ORDER BY monitor_id, day ASC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+
+    let mut map: HashMap<String, Vec<DayRow>> = HashMap::new();
+    for (id, day, up, down, degraded) in rows {
+        map.entry(id).or_default().push(DayRow {
+            day,
+            up,
+            down,
+            degraded,
+        });
+    }
+    Ok(map)
+}
+
+/// Latency samples per monitor since `since`, oldest first (NULLs skipped).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn latency_all(
+    pool: &SqlitePool,
+    since: i64,
+) -> sqlx::Result<HashMap<String, Vec<Point>>> {
+    let rows = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT monitor_id, time, latency_ms FROM checks \
+         WHERE time >= ? AND latency_ms IS NOT NULL ORDER BY monitor_id, time ASC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+
+    let mut map: HashMap<String, Vec<Point>> = HashMap::new();
+    for (id, t, latency_ms) in rows {
+        map.entry(id).or_default().push(Point { t, latency_ms });
+    }
+    Ok(map)
+}
+
+/// 24h latency percentiles (p50/p95/p99) per monitor, computed in SQL so the raw
+/// samples never have to be pulled into memory. The nearest-rank rule mirrors the
+/// former in-Rust computation: `rank = ceil(p * n / 100)`, clamped into `[1, n]`,
+/// and the value at that rank (oldest-to-largest order) is returned.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn latency_percentiles_all(
+    pool: &SqlitePool,
+    since: i64,
+) -> sqlx::Result<HashMap<String, (i64, i64, i64)>> {
+    let rows = sqlx::query_as::<_, (String, i64, i64, i64)>(
+        "WITH ranked AS ( \
+             SELECT monitor_id, latency_ms, \
+                    ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY latency_ms) AS rn, \
+                    COUNT(*)     OVER (PARTITION BY monitor_id)                     AS n \
+             FROM checks \
+             WHERE time >= ?1 AND latency_ms IS NOT NULL \
+         ) \
+         SELECT monitor_id, \
+                MAX(CASE WHEN rn = MAX(MIN((50 * n + 99) / 100, n), 1) THEN latency_ms END), \
+                MAX(CASE WHEN rn = MAX(MIN((95 * n + 99) / 100, n), 1) THEN latency_ms END), \
+                MAX(CASE WHEN rn = MAX(MIN((99 * n + 99) / 100, n), 1) THEN latency_ms END) \
+         FROM ranked \
+         GROUP BY monitor_id",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, p50, p95, p99)| (id, (p50, p95, p99)))
+        .collect())
+}
+
+/// Latency samples for the per-monitor sparkline, averaged into time buckets of
+/// `bucket_secs` (must be `>= 1`) so the series stays small however dense the
+/// checks are: one query, at most `window / bucket_secs` points per monitor,
+/// oldest first. This caps both the memory held and the size of the rendered SVG.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn latency_sparkline_all(
+    pool: &SqlitePool,
+    since: i64,
+    bucket_secs: i64,
+) -> sqlx::Result<HashMap<String, Vec<Point>>> {
+    let rows = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT monitor_id, MIN(time) AS t, CAST(AVG(latency_ms) AS INTEGER) AS latency_ms \
+         FROM checks \
+         WHERE time >= ?1 AND latency_ms IS NOT NULL \
+         GROUP BY monitor_id, (time - ?1) / ?2 \
+         ORDER BY monitor_id, t ASC",
+    )
+    .bind(since)
+    .bind(bucket_secs)
+    .fetch_all(pool)
+    .await?;
+
+    let mut map: HashMap<String, Vec<Point>> = HashMap::new();
+    for (id, t, latency_ms) in rows {
+        map.entry(id).or_default().push(Point { t, latency_ms });
+    }
+    Ok(map)
+}
+
+/// The stored certificate `not_after` for every monitor that has one.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn cert_all(pool: &SqlitePool) -> sqlx::Result<HashMap<String, i64>> {
+    let rows = sqlx::query_as::<_, (String, i64)>("SELECT monitor_id, not_after FROM certs")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Background task: periodically prune each monitor's history to its retention,
-/// and drop any data left behind by monitors removed from the config.
-pub fn spawn_pruner(pool: &SqlitePool, config: watch::Receiver<Arc<Config>>) {
+/// and drop any data left behind by monitors removed from the config. A shutdown
+/// signal lets it stop between ticks instead of being aborted.
+#[must_use]
+pub fn spawn_pruner(
+    pool: &SqlitePool,
+    config: watch::Receiver<Arc<Config>>,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
     let pool = pool.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(PRUNE_INTERVAL);
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = shutdown.changed() => break,
+            }
             let config = config.borrow().clone();
             if let Err(err) = prune(&pool, &config).await {
                 tracing::warn!("pruning failed: {err}");
             }
         }
-    });
+    })
 }
 
 async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
 
-    // Trim each configured monitor's history to its retention window.
+    // Trim each monitor's history to its retention window. Monitors are grouped
+    // by cutoff (most share the default), so this is one DELETE per distinct
+    // retention rather than one per monitor.
+    let mut ids_by_cutoff: HashMap<i64, Vec<&str>> = HashMap::new();
     for monitor in &config.monitors {
         let retention = i64::from(monitor.retention_days(config.alerts.default_retention_days));
         let cutoff = now - retention * SECONDS_PER_DAY;
-        sqlx::query("DELETE FROM checks WHERE monitor_id = ? AND time < ?")
-            .bind(&monitor.id)
-            .bind(cutoff)
-            .execute(pool)
-            .await?;
+        ids_by_cutoff
+            .entry(cutoff)
+            .or_default()
+            .push(monitor.id.as_str());
+    }
+    for (cutoff, ids) in ids_by_cutoff {
+        let ids = serde_json::to_string(&ids)?;
+        sqlx::query(
+            "DELETE FROM checks WHERE time < ? \
+             AND monitor_id IN (SELECT value FROM json_each(?))",
+        )
+        .bind(cutoff)
+        .bind(&ids)
+        .execute(pool)
+        .await?;
     }
 
     // Drop everything left behind by monitors removed from the config. The ids
@@ -373,6 +565,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latency_percentiles_match_nearest_rank() {
+        let pool = memory_pool().await;
+        // Latencies 10,20,..,100 (n=10) for "x"; a down check (no latency) is ignored.
+        let latencies = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        for (i, &latency) in latencies.iter().enumerate() {
+            insert(
+                &pool,
+                "x",
+                1000 + i64::try_from(i).unwrap(),
+                1,
+                Some(latency),
+            )
+            .await;
+        }
+        insert(&pool, "x", 2000, 0, None).await;
+        insert(&pool, "y", 1000, 1, Some(42)).await; // single sample
+
+        let pcts = latency_percentiles_all(&pool, 0).await.unwrap();
+        // rank = ceil(p*n/100): p50 -> 5th = 50, p95 & p99 -> 10th = 100.
+        assert_eq!(pcts["x"], (50, 100, 100));
+        // n = 1: every percentile is the only value.
+        assert_eq!(pcts["y"], (42, 42, 42));
+    }
+
+    #[tokio::test]
+    async fn latency_sparkline_buckets_and_averages() {
+        let pool = memory_pool().await;
+        insert(&pool, "m", 0, 1, Some(10)).await;
+        insert(&pool, "m", 50, 1, Some(30)).await; // same 100s bucket as t=0 -> avg 20
+        insert(&pool, "m", 150, 1, Some(80)).await; // next bucket
+        insert(&pool, "m", 120, 0, None).await; // no latency -> ignored
+
+        let spark = latency_sparkline_all(&pool, 0, 100).await.unwrap();
+        let points = &spark["m"];
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].latency_ms, 20); // (10 + 30) / 2
+        assert_eq!(points[1].latency_ms, 80);
+    }
+
+    #[tokio::test]
     async fn daily_aggregates_by_utc_day() {
         let pool = memory_pool().await;
         let day0 = 1_609_459_200; // 2021-01-01 00:00:00 UTC
@@ -396,6 +628,30 @@ mod tests {
         upsert_cert(&pool, "m", 1000, 1).await.unwrap();
         upsert_cert(&pool, "m", 2000, 2).await.unwrap();
         assert_eq!(cert_not_after(&pool, "m").await.unwrap(), Some(2000));
+    }
+
+    #[tokio::test]
+    async fn batch_reads_group_by_monitor() {
+        let pool = memory_pool().await;
+        insert(&pool, "a", 100, 1, Some(10)).await;
+        insert(&pool, "a", 200, 0, None).await; // down, no latency
+        insert(&pool, "b", 150, 1, Some(20)).await;
+        upsert_cert(&pool, "a", 5000, 1).await.unwrap();
+
+        let availability = availability_all(&pool, 0).await.unwrap();
+        assert_eq!(availability.get("a"), Some(&(1, 2))); // 1 up of 2
+        assert_eq!(availability.get("b"), Some(&(1, 1)));
+
+        let latency = latency_all(&pool, 0).await.unwrap();
+        assert_eq!(latency["a"].len(), 1); // the down check has no latency
+        assert_eq!(latency["b"][0].latency_ms, 20);
+
+        let daily = daily_all(&pool, 0).await.unwrap();
+        assert!(daily.contains_key("a") && daily.contains_key("b"));
+
+        let certs = cert_all(&pool).await.unwrap();
+        assert_eq!(certs.get("a"), Some(&5000));
+        assert!(!certs.contains_key("b"));
     }
 
     #[tokio::test]

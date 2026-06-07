@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use reqwest::{Client, RequestBuilder};
 use tokio::net::TcpStream;
 
-use crate::config::{Kind, Monitor};
+use crate::config::{Kind, Monitor, Secret};
 
 /// Maximum length (chars) of the response-body snippet kept on failure.
 const MAX_BODY_SNIPPET: usize = 300;
@@ -187,9 +187,9 @@ async fn tcp(monitor: &Monitor) -> Outcome {
 
 /// Apply every configured header to the request. reqwest *appends* headers, so
 /// each distinct header is kept - none overwrites another.
-fn with_headers(mut request: RequestBuilder, headers: &HashMap<String, String>) -> RequestBuilder {
+fn with_headers(mut request: RequestBuilder, headers: &HashMap<String, Secret>) -> RequestBuilder {
     for (name, value) in headers {
-        request = request.header(name, value);
+        request = request.header(name, value.as_ref());
     }
     request
 }
@@ -220,10 +220,17 @@ async fn read_body(mut response: reqwest::Response, cap: usize) -> Vec<u8> {
 
 /// Collapse a byte body into a bounded, single-line snippet for failure detail.
 fn snippet(body: &[u8]) -> String {
+    // Fold the whitespace-separated words straight into one string, so there is
+    // no intermediate `Vec<&str>` just to `join` it.
     String::from_utf8_lossy(body)
         .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+        .fold(String::new(), |mut acc, word| {
+            if !acc.is_empty() {
+                acc.push(' ');
+            }
+            acc.push_str(word);
+            acc
+        })
         .chars()
         .take(MAX_BODY_SNIPPET)
         .collect()
@@ -321,8 +328,8 @@ mod tests {
     async fn applies_every_configured_header() {
         let client = Client::new();
         let mut headers = HashMap::new();
-        headers.insert("Accept".to_owned(), "text/html".to_owned());
-        headers.insert("X-Token".to_owned(), "abc".to_owned());
+        headers.insert("Accept".to_owned(), Secret("text/html".to_owned()));
+        headers.insert("X-Token".to_owned(), Secret("abc".to_owned()));
 
         let request = with_headers(client.get("https://example.com"), &headers);
         let built = request.build().expect("request builds");

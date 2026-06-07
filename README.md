@@ -130,7 +130,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /` | The HTML status page. |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
-| `POST /api/push/{id}?token=…` | Record a heartbeat for a push monitor. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
+| `POST /api/push/{id}?token=…` | Record a heartbeat for a push monitor. The token may instead be sent as an `X-Push-Token` header, keeping it out of proxy access logs. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge for a monitor. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge for a monitor. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code (`utoipa`). |
@@ -143,7 +143,9 @@ headers; the badges and `/api/openapi.json` are not. The client IP is taken from
 it - a direct client could otherwise spoof it. Behind Cloudflare, set
 `server.client_ip_header = "cf-connecting-ip"` and lock the origin to Cloudflare.
 `allowed_origins` controls CORS (empty = allow any, since the data is read-only and
-public). Responses carry a strict CSP and `X-Content-Type-Options: nosniff`.
+public). Responses carry a strict CSP, `X-Content-Type-Options: nosniff` and
+`X-Frame-Options: DENY`, plus an `x-request-id` (an inbound one is honoured,
+otherwise a fresh id is minted) echoed on the response for log correlation.
 
 Point any client (Bruno, Insomnia, Scalar, Swagger Editor…) at `/api/openapi.json`.
 

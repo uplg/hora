@@ -10,9 +10,11 @@ pub mod discord;
 pub mod email;
 pub mod slack;
 pub mod telegram;
+mod util;
 pub mod webhook;
 
 use async_trait::async_trait;
+use futures_util::future::join_all;
 
 pub use discord::DiscordNotifier;
 pub use email::{EmailConfig, EmailNotifier};
@@ -21,7 +23,7 @@ pub use telegram::TelegramNotifier;
 pub use webhook::WebhookNotifier;
 
 /// An alertable event. Borrows its data so emitting one is allocation-free.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event<'a> {
     /// A monitor is confirmed down.
     Down {
@@ -76,13 +78,17 @@ impl Dispatcher {
         self.channels.len()
     }
 
-    /// Deliver `event` to the matching channels: all of them when `only` is
-    /// `None`, otherwise just those whose name appears in the list.
+    /// Deliver `event` to the matching channels concurrently: all of them when
+    /// `only` is `None`, otherwise just those whose name appears in the list. A
+    /// slow channel never holds up the others (or the monitor loop behind them).
     pub async fn dispatch(&self, event: Event<'_>, only: Option<&[String]>) {
-        for channel in &self.channels {
-            if only.is_none_or(|names| names.iter().any(|name| name == &channel.name)) {
-                channel.notifier.notify(event).await;
-            }
-        }
+        let deliveries = self
+            .channels
+            .iter()
+            .filter(|channel| {
+                only.is_none_or(|names| names.iter().any(|name| name == &channel.name))
+            })
+            .map(|channel| channel.notifier.notify(event));
+        join_all(deliveries).await;
     }
 }

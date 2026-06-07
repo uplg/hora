@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
-use tracing::warn;
 
+use crate::util::{cert_expiry_phrase, post_json};
 use crate::{Event, Notifier};
 
 // Embed accent colours, matching the status badges: red / green / orange.
@@ -44,20 +44,14 @@ impl DiscordNotifier {
                 description: None,
                 color: COLOR_UP,
             },
-            Event::CertExpiring { monitor, days_left } => {
-                let when = if days_left <= 0 {
-                    "has expired".to_owned()
-                } else if days_left == 1 {
-                    "expires in 1 day".to_owned()
-                } else {
-                    format!("expires in {days_left} days")
-                };
-                Embed {
-                    title: format!("\u{1F510} {monitor} TLS certificate {when}"),
-                    description: None,
-                    color: COLOR_CERT,
-                }
-            }
+            Event::CertExpiring { monitor, days_left } => Embed {
+                title: format!(
+                    "\u{1F510} {monitor} TLS certificate {}",
+                    cert_expiry_phrase(days_left)
+                ),
+                description: None,
+                color: COLOR_CERT,
+            },
         }
     }
 }
@@ -97,23 +91,14 @@ impl Notifier for DiscordNotifier {
                 color: embed.color,
             }],
         };
-        match self
-            .client
-            .post(&self.webhook_url)
-            .json(&payload)
-            .send()
-            .await
-        {
-            Ok(response) if !response.status().is_success() => {
-                warn!(status = %response.status(), "discord rejected the webhook");
-            }
-            Ok(_) => {}
-            // The webhook URL embeds a secret token; strip it from any error.
-            Err(err) => warn!(
-                "discord request failed: {}",
-                err.to_string().replace(&self.webhook_url, "<redacted>")
-            ),
-        }
+        post_json(
+            &self.client,
+            &self.webhook_url,
+            &payload,
+            "discord",
+            &self.webhook_url,
+        )
+        .await;
     }
 }
 

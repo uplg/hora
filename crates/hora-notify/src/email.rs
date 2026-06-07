@@ -1,5 +1,7 @@
 //! SMTP e-mail notifier (via `lettre`, rustls/aws-lc-rs).
 
+use std::time::Duration;
+
 use anyhow::Context as _;
 use async_trait::async_trait;
 use lettre::message::Mailbox;
@@ -51,7 +53,10 @@ impl EmailNotifier {
             AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
         }
         .context("building the SMTP relay")?
-        .port(config.port);
+        .port(config.port)
+        // Cap a stalled relay so it can't hang the dispatch (lettre's default is
+        // generous); the notifier client elsewhere has its own backstop.
+        .timeout(Some(Duration::from_secs(15)));
 
         let builder = if config.username.is_empty() {
             builder
@@ -77,13 +82,7 @@ impl EmailNotifier {
                 format!("{monitor} recovered."),
             ),
             Event::CertExpiring { monitor, days_left } => {
-                let when = if days_left <= 0 {
-                    "has expired".to_owned()
-                } else if days_left == 1 {
-                    "expires in 1 day".to_owned()
-                } else {
-                    format!("expires in {days_left} days")
-                };
+                let when = crate::util::cert_expiry_phrase(days_left);
                 (
                     format!("[TLS] {monitor} certificate {when}"),
                     format!("The TLS certificate for {monitor} {when}."),

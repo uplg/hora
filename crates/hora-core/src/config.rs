@@ -1,6 +1,7 @@
 //! Configuration: parsed from a TOML file, with environment overrides for secrets.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -138,20 +139,20 @@ pub struct Server {
 pub enum Channel {
     Telegram {
         name: String,
-        token: String,
+        token: Secret,
         chat_id: String,
     },
     Discord {
         name: String,
-        webhook_url: String,
+        webhook_url: Secret,
     },
     Slack {
         name: String,
-        webhook_url: String,
+        webhook_url: Secret,
     },
     Webhook {
         name: String,
-        url: String,
+        url: Secret,
     },
     Email {
         name: String,
@@ -161,7 +162,7 @@ pub enum Channel {
         #[serde(default)]
         username: String,
         #[serde(default)]
-        password: String,
+        password: Secret,
         from: String,
         to: String,
         /// Implicit TLS (port 465) instead of STARTTLS (the default, port 587).
@@ -212,23 +213,23 @@ impl std::fmt::Debug for Channel {
             } => f
                 .debug_struct("Telegram")
                 .field("name", name)
-                .field("token", &redacted(token))
+                .field("token", token)
                 .field("chat_id", chat_id)
                 .finish(),
             Self::Discord { name, webhook_url } => f
                 .debug_struct("Discord")
                 .field("name", name)
-                .field("webhook_url", &redacted(webhook_url))
+                .field("webhook_url", webhook_url)
                 .finish(),
             Self::Slack { name, webhook_url } => f
                 .debug_struct("Slack")
                 .field("name", name)
-                .field("webhook_url", &redacted(webhook_url))
+                .field("webhook_url", webhook_url)
                 .finish(),
             Self::Webhook { name, url } => f
                 .debug_struct("Webhook")
                 .field("name", name)
-                .field("url", &redacted(url))
+                .field("url", url)
                 .finish(),
             Self::Email {
                 name,
@@ -245,7 +246,7 @@ impl std::fmt::Debug for Channel {
                 .field("host", host)
                 .field("port", port)
                 .field("username", username)
-                .field("password", &redacted(password))
+                .field("password", password)
                 .field("from", from)
                 .field("to", to)
                 .field("implicit_tls", implicit_tls)
@@ -264,6 +265,33 @@ fn redacted(secret: &str) -> &'static str {
         "<unset>"
     } else {
         "<redacted>"
+    }
+}
+
+/// A configuration string that is redacted from `Debug` output, so a secret in a
+/// `Debug`-derived struct (e.g. a monitor's push token) never reaches the logs.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(redacted(&self.0))
+    }
+}
+
+// `AsRef`, not `Deref`: reading the secret must be explicit (`.as_ref()`), so it
+// can't be coerced into a `Display` context (e.g. `info!("{}", *secret)`) by
+// accident.
+impl AsRef<str> for Secret {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Secret {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -303,7 +331,7 @@ pub enum Kind {
     Push,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Monitor {
     pub id: String,
@@ -323,9 +351,10 @@ pub struct Monitor {
     /// Latency SLO objective in ms: the 24h p95 is flagged met/breached against it.
     #[serde(default)]
     pub slo_latency_ms: Option<i64>,
-    /// Extra HTTP request headers (e.g. `Accept`, `Authorization`). HTTP monitors only.
+    /// Extra HTTP request headers (e.g. `Accept`, `Authorization`). HTTP monitors
+    /// only. Values are redacted in `Debug` (a header may carry a credential).
     #[serde(default)]
-    pub headers: HashMap<String, String>,
+    pub headers: HashMap<String, Secret>,
     /// HTTP body assertion: the response body must contain this text.
     #[serde(default)]
     pub keyword: Option<String>,
@@ -354,13 +383,62 @@ pub struct Monitor {
     /// Push monitor only: secret required as `?token=` on `/api/push/{id}`.
     /// Unset = no token check (anyone who knows the id can heartbeat).
     #[serde(default)]
-    pub push_token: Option<String>,
+    pub push_token: Option<Secret>,
     /// Override TLS certificate checking. Defaults to on for `https://` HTTP monitors.
     #[serde(default)]
     pub check_cert: Option<bool>,
     /// Override how long this monitor's checks are kept before pruning.
     #[serde(default)]
     pub retention_days: Option<u16>,
+}
+
+// Manual `Debug` (rather than derived) so credentials never leak: `target` and
+// `proxy` may embed `user:pass@`, and `headers`/`push_token` are `Secret` (which
+// self-redact). A `{:?}` of a `Monitor` - or of the whole `Config`, which derives
+// `Debug` and holds a `Vec<Monitor>` - is therefore safe to log.
+impl std::fmt::Debug for Monitor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Monitor")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("target", &redact_url_credentials(&self.target))
+            .field("interval_secs", &self.interval_secs)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("expected_status", &self.expected_status)
+            .field("degraded_over_ms", &self.degraded_over_ms)
+            .field("slo_latency_ms", &self.slo_latency_ms)
+            .field("headers", &self.headers)
+            .field("keyword", &self.keyword)
+            .field("keyword_invert", &self.keyword_invert)
+            .field("json_query", &self.json_query)
+            .field("json_expected", &self.json_expected)
+            .field("max_body_kb", &self.max_body_kb)
+            .field("notify", &self.notify)
+            .field("proxy", &self.proxy.as_deref().map(redact_url_credentials))
+            .field("push_token", &self.push_token)
+            .field("check_cert", &self.check_cert)
+            .field("retention_days", &self.retention_days)
+            .finish()
+    }
+}
+
+/// Mask any `user:pass@` credentials in a URL-like string for `Debug`, keeping
+/// the host and path so logs stay useful. Inputs that don't parse as a URL (e.g.
+/// a TCP `host:port` target) or carry no credentials are returned unchanged.
+fn redact_url_credentials(raw: &str) -> std::borrow::Cow<'_, str> {
+    match reqwest::Url::parse(raw) {
+        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+            // These setters only fail for cannot-be-a-base URLs, which never
+            // carry credentials, so the guard above already excludes them.
+            let _ = url.set_username("***");
+            if url.password().is_some() {
+                let _ = url.set_password(Some("***"));
+            }
+            std::borrow::Cow::Owned(url.to_string())
+        }
+        _ => std::borrow::Cow::Borrowed(raw),
+    }
 }
 
 impl Monitor {
@@ -473,28 +551,58 @@ pub fn parse(toml_str: &str) -> anyhow::Result<Config> {
     Ok(config)
 }
 
-/// Substitute `${VAR}` occurrences with the environment value (empty if unset).
+/// Substitute `${VAR}` with the environment value (empty if unset). `$$` is a
+/// literal `$`, so `$${id}` yields a literal `${id}`.
 fn expand_env(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        if let Some(end) = after.find('}') {
-            let name = &after[..end];
-            if let Ok(value) = std::env::var(name) {
-                out.push_str(&value);
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        if let Some(stripped) = after.strip_prefix('$') {
+            out.push('$'); // `$$` escape.
+            rest = stripped;
+        } else if let Some(body) = after.strip_prefix('{') {
+            if let Some(end) = body.find('}') {
+                let name = &body[..end];
+                if let Ok(value) = std::env::var(name) {
+                    // Escape for a TOML basic string (the intended use is
+                    // `key = "${VAR}"`), so a value with a quote or newline
+                    // can't break parsing or inject config.
+                    out.push_str(&toml_escape(&value));
+                } else {
+                    tracing::warn!("config references unset environment variable {name:?}");
+                }
+                rest = &body[end + 1..];
             } else {
-                tracing::warn!("config references unset environment variable {name:?}");
+                out.push_str("${"); // No closing brace: emit literally.
+                rest = body;
             }
-            rest = &after[end + 1..];
         } else {
-            // No closing brace: emit the literal `${` and keep scanning.
-            out.push_str("${");
+            out.push('$'); // A lone `$`.
             rest = after;
         }
     }
     out.push_str(rest);
+    out
+}
+
+/// Escape a value so it is safe inside a TOML basic (double-quoted) string.
+fn toml_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
     out
 }
 
@@ -518,6 +626,20 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             "duplicate channel name: {}",
             channel.name()
         );
+        // Webhook-style channels carry a token in the URL; warn on cleartext http.
+        let url = match channel {
+            Channel::Discord { webhook_url, .. } | Channel::Slack { webhook_url, .. } => {
+                Some(webhook_url.as_ref())
+            }
+            Channel::Webhook { url, .. } => Some(url.as_ref()),
+            Channel::Telegram { .. } | Channel::Email { .. } => None,
+        };
+        if url.is_some_and(|url| url.starts_with("http://")) {
+            tracing::warn!(
+                "channel {}: webhook URL uses http:// - the token is sent in cleartext",
+                channel.name()
+            );
+        }
     }
 
     for window in &config.maintenance {
@@ -531,6 +653,16 @@ fn validate(config: &Config) -> anyhow::Result<()> {
     let mut seen = HashSet::new();
     for monitor in &config.monitors {
         anyhow::ensure!(!monitor.id.is_empty(), "monitor id must not be empty");
+        // The id appears in URLs (`/api/badge/{id}`, `/api/push/{id}`), so keep it
+        // URL-safe.
+        anyhow::ensure!(
+            monitor
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "monitor id {:?} must be alphanumeric, '-' or '_'",
+            monitor.id
+        );
         anyhow::ensure!(
             seen.insert(monitor.id.as_str()),
             "duplicate monitor id: {}",
@@ -568,6 +700,7 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             reqwest::Proxy::all(proxy)
                 .map_err(|err| anyhow::anyhow!("monitor {}: invalid proxy: {err}", monitor.id))?;
         }
+        validate_monitor_io(monitor)?;
         if let Some(routes) = &monitor.notify {
             for route in routes {
                 anyhow::ensure!(
@@ -577,6 +710,57 @@ fn validate(config: &Config) -> anyhow::Result<()> {
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// Validate a monitor's target, latency thresholds and headers (split out of
+/// [`validate`] to keep it small).
+fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
+    // Parse the target now, so a typo fails at load instead of at probe time.
+    match monitor.kind {
+        Kind::Http => anyhow::ensure!(
+            reqwest::Url::parse(&monitor.target)
+                .is_ok_and(|url| matches!(url.scheme(), "http" | "https")),
+            "monitor {}: target must be an http(s) URL",
+            monitor.id
+        ),
+        Kind::Tcp => anyhow::ensure!(
+            monitor
+                .target
+                .rsplit_once(':')
+                .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok()),
+            "monitor {}: tcp target must be host:port",
+            monitor.id
+        ),
+        Kind::Push => {}
+    }
+    // A negative latency threshold would mark every check degraded/breached.
+    for (label, value) in [
+        ("degraded_over_ms", monitor.degraded_over_ms),
+        ("slo_latency_ms", monitor.slo_latency_ms),
+    ] {
+        if let Some(ms) = value {
+            anyhow::ensure!(ms > 0, "monitor {}: {label} must be > 0", monitor.id);
+        }
+    }
+    anyhow::ensure!(
+        monitor.max_body_kb != Some(0),
+        "monitor {}: max_body_kb must be > 0",
+        monitor.id
+    );
+    // Catch header typos / CR-LF injection at load rather than at send time.
+    for (name, value) in &monitor.headers {
+        anyhow::ensure!(
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_ok(),
+            "monitor {}: invalid header name {name:?}",
+            monitor.id
+        );
+        anyhow::ensure!(
+            reqwest::header::HeaderValue::from_str(value.as_ref()).is_ok(),
+            "monitor {}: invalid value for header {name:?}",
+            monitor.id
+        );
     }
     Ok(())
 }
@@ -668,8 +852,8 @@ mod tests {
         "#,
         );
         let headers = &config.monitors[0].headers;
-        assert_eq!(headers.get("Accept").map(String::as_str), Some("text/html"));
-        assert_eq!(headers.get("X-Token").map(String::as_str), Some("abc"));
+        assert_eq!(headers.get("Accept").map(AsRef::as_ref), Some("text/html"));
+        assert_eq!(headers.get("X-Token").map(AsRef::as_ref), Some("abc"));
     }
 
     #[test]
@@ -716,7 +900,7 @@ mod tests {
     fn channel_debug_redacts_secrets() {
         let telegram = Channel::Telegram {
             name: "ops".to_owned(),
-            token: "supersecret".to_owned(),
+            token: Secret("supersecret".to_owned()),
             chat_id: "42".to_owned(),
         };
         let shown = format!("{telegram:?}");
@@ -726,7 +910,7 @@ mod tests {
 
         let discord = Channel::Discord {
             name: "web".to_owned(),
-            webhook_url: "https://discord.com/api/webhooks/123/supersecret".to_owned(),
+            webhook_url: Secret("https://discord.com/api/webhooks/123/supersecret".to_owned()),
         };
         let shown = format!("{discord:?}");
         assert!(!shown.contains("supersecret"), "webhook leaked: {shown}");
@@ -809,7 +993,10 @@ mod tests {
         );
         assert_eq!(config.monitors[0].kind, Kind::Push);
         assert!(config.monitors[0].target.is_empty());
-        assert_eq!(config.monitors[0].push_token.as_deref(), Some("secret"));
+        assert_eq!(
+            config.monitors[0].push_token.as_ref().map(AsRef::as_ref),
+            Some("secret")
+        );
         validate(&config).expect("push monitor valid without target");
     }
 
@@ -927,6 +1114,107 @@ mod tests {
         assert_eq!(config.incidents.len(), 1);
         assert_eq!(config.incidents[0].severity, Severity::Warning);
         assert!(config.incidents[0].at.is_some());
+    }
+
+    #[test]
+    fn rejects_non_url_safe_id() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "a/b"
+            name = "X"
+            target = "https://example.com"
+            interval_secs = 60
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("alphanumeric"), "got: {error}");
+    }
+
+    #[test]
+    fn secret_is_redacted_in_debug() {
+        assert_eq!(
+            format!("{:?}", Secret("supersecret".to_owned())),
+            "<redacted>"
+        );
+        assert_eq!(format!("{:?}", Secret(String::new())), "<unset>");
+    }
+
+    #[test]
+    fn monitor_debug_redacts_url_credentials() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://user:s3cret@example.com/health"
+            interval_secs = 60
+            proxy = "socks5://puser:ppass@proxy.internal:1080"
+        "#,
+        );
+        let dump = format!("{:?}", config.monitors[0]);
+        // Credentials gone, hosts kept (so logs stay useful).
+        assert!(!dump.contains("s3cret"), "target password leaked: {dump}");
+        assert!(!dump.contains("ppass"), "proxy password leaked: {dump}");
+        assert!(!dump.contains("puser"), "proxy username leaked: {dump}");
+        assert!(dump.contains("example.com"), "target host lost: {dump}");
+        assert!(dump.contains("proxy.internal"), "proxy host lost: {dump}");
+    }
+
+    #[test]
+    fn toml_escape_neutralises_special_chars() {
+        assert_eq!(toml_escape("plain-token_123"), "plain-token_123");
+        assert_eq!(toml_escape("a\"b"), "a\\\"b");
+        assert_eq!(toml_escape("line1\nline2"), "line1\\nline2");
+    }
+
+    #[test]
+    fn expand_env_dollar_escape() {
+        // `$$` is a literal `$`, so `$${id}` is a literal `${id}` (no env lookup).
+        assert_eq!(expand_env("$${id}"), "${id}");
+        assert_eq!(expand_env("a$$b"), "a$b");
+    }
+
+    #[test]
+    fn rejects_negative_latency_threshold() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "x"
+            name = "X"
+            target = "https://example.com"
+            interval_secs = 60
+            degraded_over_ms = -1
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(
+            error.contains("degraded_over_ms must be > 0"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_http_target() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "x"
+            name = "X"
+            target = "https//example.com"
+            interval_secs = 60
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("http(s) URL"), "got: {error}");
     }
 
     #[test]

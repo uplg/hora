@@ -2,6 +2,7 @@
 
 mod error;
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -11,12 +12,12 @@ use askama::Template;
 use std::net::IpAddr;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderName, HeaderValue, Method, Request, header};
-use axum::response::{Html, IntoResponse};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, TimeDelta, Utc};
-use futures_util::future::join_all;
 use hora_core::SECONDS_PER_DAY;
 use hora_core::config::{Config, Kind, Monitor};
 use hora_core::db::{self, DayRow, Latest, Point};
@@ -37,6 +38,13 @@ use crate::error::AppError;
 const SECONDS_PER_HOUR: i64 = 3_600;
 const MAX_LATENCY_HOURS: i64 = 24 * 30;
 const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(5);
+/// Cap on a pushed heartbeat message, so the endpoint can't bloat the database.
+const MAX_PUSH_MSG_CHARS: usize = 500;
+/// Cap on points returned by the latency endpoint (evenly downsampled beyond it).
+const MAX_LATENCY_POINTS: usize = 2000;
+/// Number of time buckets a 24h card sparkline is averaged into, so its size is
+/// fixed no matter the check frequency (the chart is `CHART_W`px wide).
+const SPARK_BUCKETS: i64 = 120;
 
 const FAVICON_SVG: &str = include_str!("../assets/favicon.svg");
 const FONT_WOFF2: &[u8] = include_bytes!("../assets/CalSans-SemiBold.woff2");
@@ -45,8 +53,12 @@ const FONT_WOFF2: &[u8] = include_bytes!("../assets/CalSans-SemiBold.woff2");
 const CSP: &str = "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; \
      img-src 'self' data:; font-src 'self'; base-uri 'none'; frame-ancestors 'none'";
 
-static OPENAPI_JSON: LazyLock<String> =
-    LazyLock::new(|| ApiDoc::openapi().to_pretty_json().unwrap_or_default());
+static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
+    ApiDoc::openapi().to_pretty_json().unwrap_or_else(|err| {
+        tracing::error!("failed to generate OpenAPI document: {err}");
+        String::new()
+    })
+});
 
 #[derive(OpenApi)]
 #[openapi(
@@ -186,12 +198,80 @@ pub fn router(state: AppState) -> Router {
             HeaderValue::from_static("nosniff"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
             header::REFERRER_POLICY,
             HeaderValue::from_static("no-referrer"),
         ))
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        // The trace span carries the request id so every log line emitted while
+        // handling a request can be correlated back to it.
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+        // Outermost: stamp each request with an id (honouring an inbound
+        // `x-request-id`) before any other layer runs, and echo it on the response.
+        .layer(middleware::from_fn(request_id))
         .with_state(state)
+}
+
+/// The header carrying the per-request correlation id.
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Stamp the request with a correlation id and echo it on the response. An
+/// inbound `x-request-id` (e.g. from a front proxy) is preserved; otherwise a
+/// fresh opaque id is minted. Runs outermost, so every inner layer - including
+/// the trace span - sees the id.
+async fn request_id(mut request: Request<axum::body::Body>, next: Next) -> Response {
+    let id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .cloned()
+        .unwrap_or_else(|| {
+            HeaderValue::from_str(&new_request_id())
+                .unwrap_or_else(|_| HeaderValue::from_static("unknown"))
+        });
+    request.headers_mut().insert(REQUEST_ID_HEADER, id.clone());
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(REQUEST_ID_HEADER, id);
+    response
+}
+
+/// Mint an opaque request id: a per-process random prefix (so ids never collide
+/// across restarts) followed by a monotonic counter. Uses only `std`, so no
+/// extra dependency just to generate an id.
+fn new_request_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    static PREFIX: LazyLock<u64> = LazyLock::new(|| {
+        // `RandomState` is seeded from the OS RNG; hashing nothing yields a value
+        // derived from that seed - a cheap source of per-process randomness.
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    });
+
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{:016x}{counter:016x}", *PREFIX)
+}
+
+/// Build the tracing span for a request, tagged with its `x-request-id` so log
+/// lines can be correlated. The id is always present: the request first passes
+/// through the [`request_id`] middleware, which is the outermost layer.
+fn make_request_span(request: &Request<axum::body::Body>) -> tracing::Span {
+    let request_id = request
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown");
+    tracing::info_span!(
+        "request",
+        method = %request.method(),
+        uri = %request.uri(),
+        request_id,
+    )
 }
 
 fn build_cors(origins: &[String]) -> CorsLayer {
@@ -201,7 +281,12 @@ fn build_cors(origins: &[String]) -> CorsLayer {
     }
     let parsed: Vec<HeaderValue> = origins
         .iter()
-        .filter_map(|origin| origin.parse().ok())
+        .filter_map(|origin| {
+            origin
+                .parse()
+                .map_err(|_| tracing::warn!("ignoring invalid allowed_origin {origin:?}"))
+                .ok()
+        })
         .collect();
     cors.allow_origin(parsed)
 }
@@ -231,11 +316,20 @@ async fn font() -> impl IntoResponse {
     )
 }
 
-async fn openapi() -> impl IntoResponse {
+async fn openapi() -> Response {
+    if OPENAPI_JSON.is_empty() {
+        // The document is static; an empty one means generation failed at startup.
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "OpenAPI generation failed",
+        )
+            .into_response();
+    }
     (
         [(header::CONTENT_TYPE, "application/json")],
         OPENAPI_JSON.as_str(),
     )
+        .into_response()
 }
 
 /// Fetch (or build) the cached summary from the request state. Infallible: a
@@ -302,7 +396,9 @@ async fn latency_json(
     let LatencyQuery { hours } = query;
     let since = Utc::now().timestamp() - hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
     let points = db::latency_series(&pool, &id, since).await?;
-    Ok(Json(points))
+    // Bound the response (a 10s-interval monitor over 720h is ~260k points); the
+    // shape is preserved by sampling evenly.
+    Ok(Json(downsample(points, MAX_LATENCY_POINTS)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -337,6 +433,7 @@ async fn push(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<PushQuery>,
+    headers: HeaderMap,
 ) -> Result<&'static str, AppError> {
     let config = state.config.borrow().clone();
     let monitor = config
@@ -345,11 +442,16 @@ async fn push(
         .find(|monitor| monitor.id == id && monitor.kind == Kind::Push)
         .ok_or(AppError::NotFound("unknown push monitor"))?;
 
-    // A configured token is required; without one, the id alone authorizes.
-    if let Some(expected) = &monitor.push_token
-        && query.token.as_deref() != Some(expected.as_str())
-    {
-        return Err(AppError::Unauthorized("invalid push token"));
+    // A configured token is required; without one, the id alone authorizes. Prefer
+    // the `X-Push-Token` header (kept out of access logs) over the `?token=` query.
+    if let Some(expected) = &monitor.push_token {
+        let provided = headers
+            .get("x-push-token")
+            .and_then(|value| value.to_str().ok())
+            .or(query.token.as_deref());
+        if !provided.is_some_and(|token| ct_eq(token, expected.as_ref())) {
+            return Err(AppError::Unauthorized("invalid push token"));
+        }
     }
 
     let status = match query.status.as_deref() {
@@ -357,7 +459,12 @@ async fn push(
         Some("degraded") => 2,
         _ => 1,
     };
-    db::insert_push(&state.pool, &id, status, query.ping, query.msg.as_deref()).await?;
+    // Bound the stored message so a buggy or hostile pusher can't bloat the DB.
+    let msg = query
+        .msg
+        .as_deref()
+        .map(|msg| msg.chars().take(MAX_PUSH_MSG_CHARS).collect::<String>());
+    db::insert_push(&state.pool, &id, status, query.ping, msg.as_deref()).await?;
     Ok("ok")
 }
 
@@ -520,7 +627,7 @@ struct StatusTemplate<'a> {
     summary: &'a Summary,
 }
 
-/// Shared, read-only inputs for building each monitor's view concurrently.
+/// Shared, read-only inputs for building each monitor's view.
 struct SummaryCtx {
     now: DateTime<Utc>,
     timestamp: i64,
@@ -544,24 +651,42 @@ async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
         history_days: config.page.history_days,
     };
 
-    // Build each monitor's view concurrently; a failed one degrades to an
-    // `unknown` card so a single flaky query never blacks out the whole page.
-    let built = join_all(
-        config
-            .monitors
-            .iter()
-            .map(|monitor| build_monitor_view(pool, monitor, &ctx)),
-    )
-    .await;
+    // The 24h/90d aggregates batch into one query each. A failed query degrades
+    // to empty data ("no data" cards) rather than blacking out the page.
+    let availability = or_empty(
+        db::availability_all(pool, ctx.since_24h).await,
+        "availability",
+    );
+    let daily = or_empty(db::daily_all(pool, ctx.since_history).await, "daily");
+    // Latency is summarised in SQL: exact percentiles, plus a bucket-averaged
+    // series for the sparkline. The raw 24h samples never enter memory or the
+    // page, so both stay bounded by the monitor count, not the check frequency.
+    let percentiles = percentile_map(or_empty(
+        db::latency_percentiles_all(pool, ctx.since_24h).await,
+        "latency percentiles",
+    ));
+    let bucket_secs = (SECONDS_PER_DAY / SPARK_BUCKETS).max(1);
+    let sparklines = or_empty(
+        db::latency_sparkline_all(pool, ctx.since_24h, bucket_secs).await,
+        "latency sparklines",
+    );
+    let certs = or_empty(db::cert_all(pool).await, "certificates");
+    let recent = recent_checks_map(pool, &config.monitors, ctx.threshold.max(1)).await;
+
+    let data = MonitorData {
+        recent: &recent,
+        availability: &availability,
+        daily: &daily,
+        percentiles: &percentiles,
+        sparklines: &sparklines,
+        certs: &certs,
+    };
+
     let monitors: Vec<MonitorView> = config
         .monitors
         .iter()
-        .zip(built)
-        .map(|(monitor, result)| {
-            let mut view = result.unwrap_or_else(|err| {
-                tracing::warn!(monitor = %monitor.id, "failed to build monitor view: {err:#}");
-                unknown_view(monitor)
-            });
+        .map(|monitor| {
+            let mut view = build_monitor_view(monitor, &ctx, &data);
             view.maintenance = config
                 .active_maintenance(&monitor.id, now)
                 .map(|window| window.title.clone());
@@ -628,56 +753,95 @@ async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
     }
 }
 
-/// A placeholder card for a monitor whose data could not be loaded this round.
-fn unknown_view(monitor: &Monitor) -> MonitorView {
-    MonitorView {
-        id: monitor.id.clone(),
-        name: monitor.name.clone(),
-        status: "unknown",
-        last_latency_ms: None,
-        last_checked: None,
-        uptime_permille: None,
-        uptime_label: None,
-        p50_ms: None,
-        p95_ms: None,
-        p99_ms: None,
-        slo_latency_ms: None,
-        slo_state: "none",
-        maintenance: None,
-        cert_days: None,
-        cert_label: None,
-        cert_state: "none",
-        bar: Vec::new(),
-        chart_svg: sparkline(&[], "unknown"),
-    }
+/// Unwrap a batch query, logging and using empty data on error so one failed
+/// query degrades to "no data" cards instead of failing the whole page.
+fn or_empty<T: Default>(result: sqlx::Result<T>, what: &str) -> T {
+    result.unwrap_or_else(|err| {
+        tracing::error!("summary: {what} query failed: {err:#}");
+        T::default()
+    })
 }
 
-async fn build_monitor_view(
+/// Convert the raw `(p50, p95, p99)` tuples from SQL into [`Percentiles`].
+fn percentile_map(raw: HashMap<String, (i64, i64, i64)>) -> HashMap<String, Percentiles> {
+    raw.into_iter()
+        .map(|(id, (p50, p95, p99))| (id, Percentiles { p50, p95, p99 }))
+        .collect()
+}
+
+/// Fetch each monitor's recent checks. Deliberately per-monitor: the query is an
+/// indexed `ORDER BY time DESC LIMIT N` (tiny), and unlike a single windowed query
+/// it is correct for any interval - a monitor checked less than once a day (e.g. a
+/// weekly push heartbeat) would be dropped by a 24h batch window and shown as
+/// "unknown". On embedded `SQLite` these N statements cost microseconds each, far
+/// less than scanning the whole history table to rank rows.
+async fn recent_checks_map(
     pool: &SqlitePool,
-    monitor: &Monitor,
-    ctx: &SummaryCtx,
-) -> anyhow::Result<MonitorView> {
-    let recent = db::recent_checks(pool, &monitor.id, ctx.threshold.max(1)).await?;
-    let status = derive_status(&recent, ctx.threshold);
+    monitors: &[Monitor],
+    limit: i64,
+) -> HashMap<String, Vec<Latest>> {
+    let mut recent: HashMap<String, Vec<Latest>> = HashMap::new();
+    for monitor in monitors {
+        let checks = or_empty(
+            db::recent_checks(pool, &monitor.id, limit).await,
+            "recent checks",
+        );
+        recent.insert(monitor.id.clone(), checks);
+    }
+    recent
+}
 
-    let (available, total) = db::availability(pool, &monitor.id, ctx.since_24h).await?;
-    let uptime_permille = (total > 0).then(|| available.saturating_mul(1000) / total);
+/// The pre-fetched batch maps a monitor's view is assembled from, keyed by
+/// monitor id. Grouped so [`build_monitor_view`] stays a small, pure function.
+struct MonitorData<'a> {
+    recent: &'a HashMap<String, Vec<Latest>>,
+    availability: &'a HashMap<String, (i64, i64)>,
+    daily: &'a HashMap<String, Vec<DayRow>>,
+    percentiles: &'a HashMap<String, Percentiles>,
+    sparklines: &'a HashMap<String, Vec<Point>>,
+    certs: &'a HashMap<String, i64>,
+}
 
-    let daily = db::daily(pool, &monitor.id, ctx.since_history).await?;
-    let bar = build_bar(&daily, ctx.now, ctx.history_days);
+/// Build a monitor's view from the pre-fetched batch maps. Pure: a monitor with
+/// no data simply renders an empty ("no data yet") card.
+fn build_monitor_view(monitor: &Monitor, ctx: &SummaryCtx, data: &MonitorData) -> MonitorView {
+    let recent = data
+        .recent
+        .get(&monitor.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let status = derive_status(recent, ctx.threshold);
 
-    let points = db::latency_series(pool, &monitor.id, ctx.since_24h).await?;
-    let chart_svg = sparkline(&points, status);
-    // Percentiles come from the series we already fetched - no extra query.
-    let pct = percentiles(&points);
+    let uptime_permille = data
+        .availability
+        .get(&monitor.id)
+        .and_then(|&(available, total)| {
+            (total > 0).then(|| available.saturating_mul(1000) / total)
+        });
+
+    let daily = data
+        .daily
+        .get(&monitor.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let bar = build_bar(daily, ctx.now, ctx.history_days);
+
+    let spark_points = data
+        .sparklines
+        .get(&monitor.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let chart_svg = sparkline(spark_points, status);
+    let pct = data.percentiles.get(&monitor.id).copied();
     let slo_state = slo_state(monitor.slo_latency_ms, pct.map(|p| p.p95));
 
-    let cert_days = db::cert_not_after(pool, &monitor.id)
-        .await?
-        .map(|not_after| (not_after - ctx.timestamp) / SECONDS_PER_DAY);
+    let cert_days = data
+        .certs
+        .get(&monitor.id)
+        .map(|&not_after| (not_after - ctx.timestamp) / SECONDS_PER_DAY);
 
     let latest = recent.first();
-    Ok(MonitorView {
+    MonitorView {
         id: monitor.id.clone(),
         name: monitor.name.clone(),
         status,
@@ -697,37 +861,16 @@ async fn build_monitor_view(
         cert_state: cert_state_for(cert_days, ctx.cert_threshold),
         bar,
         chart_svg,
-    })
+    }
 }
 
-/// 24h latency percentiles, derived from the latency series (empty → `None`).
+/// 24h latency percentiles for a monitor, computed in SQL by
+/// [`db::latency_percentiles_all`] (nearest-rank).
 #[derive(Clone, Copy)]
 struct Percentiles {
     p50: i64,
     p95: i64,
     p99: i64,
-}
-
-fn percentiles(points: &[Point]) -> Option<Percentiles> {
-    if points.is_empty() {
-        return None;
-    }
-    let mut sorted: Vec<i64> = points.iter().map(|p| p.latency_ms).collect();
-    sorted.sort_unstable();
-    Some(Percentiles {
-        p50: nearest_rank(&sorted, 50),
-        p95: nearest_rank(&sorted, 95),
-        p99: nearest_rank(&sorted, 99),
-    })
-}
-
-/// Nearest-rank percentile (`percentile` in 1..=100) of a sorted, non-empty slice.
-fn nearest_rank(sorted: &[i64], percentile: i64) -> i64 {
-    let n = i64::try_from(sorted.len()).unwrap_or(i64::MAX);
-    // 1-based rank = ceil(percentile * n / 100), clamped into [1, n].
-    let rank = (percentile * n + 99) / 100;
-    let index = rank.clamp(1, n) - 1;
-    sorted[usize::try_from(index).unwrap_or(0)]
 }
 
 /// Whether the measured p95 meets the configured latency objective.
@@ -804,6 +947,7 @@ fn cert_label(days: i64) -> String {
 
 /// Format permille (0..=1000) as a percentage with one decimal, e.g. `99.9%`.
 fn format_permille(permille: i64) -> String {
+    let permille = permille.clamp(0, 1000);
     format!("{}.{}%", permille / 10, permille % 10)
 }
 
@@ -813,8 +957,6 @@ fn iso(timestamp: i64) -> Option<String> {
 
 /// Build the daily uptime bar (oldest to newest), zero-filling missing days.
 fn build_bar(daily: &[DayRow], now: DateTime<Utc>, days: u16) -> Vec<DayCell> {
-    use std::collections::HashMap;
-
     let by_day: HashMap<&str, &DayRow> = daily.iter().map(|row| (row.day.as_str(), row)).collect();
     let mut cells = Vec::with_capacity(usize::from(days));
 
@@ -868,12 +1010,9 @@ const CHART_W: f64 = 680.0;
 const CHART_H: f64 = 120.0;
 const CHART_PAD: f64 = 8.0;
 
-fn coord(value: i64) -> f64 {
-    f64::from(i32::try_from(value).unwrap_or(i32::MAX))
-}
-
-fn coord_usize(value: usize) -> f64 {
-    f64::from(i32::try_from(value).unwrap_or(i32::MAX))
+/// Saturating conversion of any integer to an SVG coordinate (`f64`).
+fn coord<T: TryInto<i32>>(value: T) -> f64 {
+    f64::from(value.try_into().unwrap_or(i32::MAX))
 }
 
 /// Render the last-24h latency series as a self-contained inline SVG sparkline.
@@ -899,19 +1038,19 @@ fn sparkline(points: &[Point], status: &str) -> String {
     let span = coord((max - min).max(1));
     let plot_h = CHART_H - 2.0 * CHART_PAD;
     let step = if count > 1 {
-        (CHART_W - 2.0 * CHART_PAD) / (coord_usize(count) - 1.0)
+        (CHART_W - 2.0 * CHART_PAD) / (coord(count) - 1.0)
     } else {
         0.0
     };
 
     let mut line = String::new();
     for (index, point) in points.iter().enumerate() {
-        let x = CHART_PAD + step * coord_usize(index);
+        let x = CHART_PAD + step * coord(index);
         let y = CHART_PAD + plot_h * (1.0 - coord(point.latency_ms - min) / span);
         let _ = write!(line, "{}{x:.1} {y:.1} ", if index == 0 { 'M' } else { 'L' });
     }
 
-    let last_x = CHART_PAD + step * (coord_usize(count) - 1.0);
+    let last_x = CHART_PAD + step * (coord(count) - 1.0);
     let baseline = CHART_H - CHART_PAD;
     format!(
         "<svg viewBox=\"0 0 {CHART_W} {CHART_H}\" class=\"spark {status}\" preserveAspectRatio=\"none\">\
@@ -949,6 +1088,31 @@ fn uptime_color(permille: i64) -> &'static str {
     }
 }
 
+/// Sample a series down to at most `max` points, keeping its overall shape.
+fn downsample(points: Vec<Point>, max: usize) -> Vec<Point> {
+    if points.len() <= max || max == 0 {
+        return points;
+    }
+    let step = points.len().div_ceil(max);
+    points.into_iter().step_by(step).collect()
+}
+
+/// Constant-time string comparison so a wrong push token can't be brute-forced
+/// by timing. The length may leak (it is not the secret).
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Escape XML metacharacters for safe embedding in an SVG document.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn svg_response(svg: String) -> impl IntoResponse {
     (
         [
@@ -961,11 +1125,15 @@ fn svg_response(svg: String) -> impl IntoResponse {
 
 /// Render a flat shields-style badge: a grey label and a coloured message.
 fn badge(label: &str, message: &str, color: &str) -> String {
-    let label_w = coord_usize(label.chars().count()) * BADGE_CHAR_W + 2.0 * BADGE_PAD;
-    let message_w = coord_usize(message.chars().count()) * BADGE_CHAR_W + 2.0 * BADGE_PAD;
+    // Width uses the visible length; the text is XML-escaped before embedding so
+    // the inputs (today server-controlled) can never break out of the SVG.
+    let label_w = coord(label.chars().count()) * BADGE_CHAR_W + 2.0 * BADGE_PAD;
+    let message_w = coord(message.chars().count()) * BADGE_CHAR_W + 2.0 * BADGE_PAD;
     let total_w = label_w + message_w;
     let label_x = label_w / 2.0;
     let message_x = label_w + message_w / 2.0;
+    let label = xml_escape(label);
+    let message = xml_escape(message);
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total_w:.0}\" height=\"20\" role=\"img\" aria-label=\"{label}: {message}\">\
          <title>{label}: {message}</title>\
@@ -1142,6 +1310,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_carries_a_minted_request_id() {
+        let res = test_app().await.oneshot(get("/healthz")).await.unwrap();
+        let id = res
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("x-request-id present")
+            .to_str()
+            .expect("ascii");
+        // Minted ids are 32 hex chars (16-char random prefix + 16-char counter).
+        assert_eq!(id.len(), 32);
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn inbound_request_id_is_preserved() {
+        let request = Request::builder()
+            .uri("/healthz")
+            .header(REQUEST_ID_HEADER, "trace-from-proxy")
+            .body(Body::empty())
+            .expect("request");
+        let res = test_app().await.oneshot(request).await.unwrap();
+        assert_eq!(
+            res.headers().get(REQUEST_ID_HEADER).unwrap(),
+            "trace-from-proxy"
+        );
+    }
+
+    #[tokio::test]
     async fn openapi_and_page_render() {
         assert_eq!(
             test_app()
@@ -1242,19 +1438,6 @@ mod tests {
         assert!(svg.starts_with("<svg"));
         assert!(svg.contains(">status<") && svg.contains(">up<"));
         assert!(svg.contains(status_color("up")));
-    }
-
-    #[test]
-    fn percentiles_nearest_rank() {
-        let points: Vec<Point> = (1..=100)
-            .map(|n| Point {
-                t: n,
-                latency_ms: n,
-            })
-            .collect();
-        let pct = percentiles(&points).expect("non-empty");
-        assert_eq!((pct.p50, pct.p95, pct.p99), (50, 95, 99));
-        assert!(percentiles(&[]).is_none());
     }
 
     #[test]

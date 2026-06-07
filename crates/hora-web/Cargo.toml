@@ -12,7 +12,6 @@ arc-swap = "1.9.1"
 askama.workspace = true
 axum.workspace = true
 chrono.workspace = true
-futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
 hora-core.workspace = true
 serde.workspace = true
 sqlx.workspace = true

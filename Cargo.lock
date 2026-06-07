@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "hora"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "hora-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -990,26 +990,27 @@ dependencies = [
 
 [[package]]
 name = "hora-notify"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures-util",
  "lettre",
  "reqwest",
  "serde",
+ "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "hora-web"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "arc-swap",
  "askama",
  "axum",
  "chrono",
- "futures-util",
  "hora-core",
  "serde",
  "sqlx",

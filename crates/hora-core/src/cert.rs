@@ -68,18 +68,11 @@ impl ServerCertVerifier for ExtractOnly {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-        ]
+        // Delegate to the provider so new schemes (e.g. post-quantum) are picked
+        // up automatically instead of being hardcoded.
+        default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -129,7 +122,14 @@ fn host_port(target: &str) -> Option<(String, u16)> {
 }
 
 /// Spawn the certificate watcher: checks every HTTPS monitor every 12 hours.
-pub fn spawn_watcher(pool: SqlitePool, config: watch::Receiver<Arc<Config>>, notifier: Notifiers) {
+/// A shutdown signal lets it stop between ticks instead of being aborted.
+#[must_use]
+pub fn spawn_watcher(
+    pool: SqlitePool,
+    config: watch::Receiver<Arc<Config>>,
+    notifier: Notifiers,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let tls = match client_config() {
             Ok(tls) => tls,
@@ -143,7 +143,10 @@ pub fn spawn_watcher(pool: SqlitePool, config: watch::Receiver<Arc<Config>>, not
         let mut ticker = tokio::time::interval(CHECK_INTERVAL);
 
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = shutdown.changed() => break,
+            }
             let snapshot = config.borrow().clone();
             let threshold_days = i64::from(snapshot.alerts.cert_expiry_days);
             let now = chrono::Utc::now().timestamp();
@@ -191,5 +194,5 @@ pub fn spawn_watcher(pool: SqlitePool, config: watch::Receiver<Arc<Config>>, not
                 }
             }
         }
-    });
+    })
 }

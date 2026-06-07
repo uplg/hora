@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
-use tracing::warn;
 
+use crate::util::{cert_expiry_phrase, escape, post_json};
 use crate::{Event, Notifier};
 
 /// Sends alerts to a Telegram chat via the Bot API.
@@ -34,19 +34,11 @@ impl TelegramNotifier {
             Event::Recovered { monitor } => {
                 format!("\u{1F7E2} <b>{}</b> recovered", escape(monitor))
             }
-            Event::CertExpiring { monitor, days_left } => {
-                let when = if days_left <= 0 {
-                    "has expired".to_owned()
-                } else if days_left == 1 {
-                    "expires in 1 day".to_owned()
-                } else {
-                    format!("expires in {days_left} days")
-                };
-                format!(
-                    "\u{1F510} <b>{}</b> TLS certificate {when}",
-                    escape(monitor)
-                )
-            }
+            Event::CertExpiring { monitor, days_left } => format!(
+                "\u{1F510} <b>{}</b> TLS certificate {}",
+                escape(monitor),
+                cert_expiry_phrase(days_left)
+            ),
         }
     }
 }
@@ -66,43 +58,20 @@ impl Notifier for TelegramNotifier {
 
     async fn notify(&self, event: Event<'_>) {
         let text = Self::render(event);
+        // The URL embeds the bot token, so it is what we redact from errors.
         let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
         let body = SendMessage {
             chat_id: &self.chat_id,
             text: &text,
             parse_mode: "HTML",
         };
-        match self.client.post(url).json(&body).send().await {
-            Ok(response) if !response.status().is_success() => {
-                warn!(status = %response.status(), "telegram rejected the message");
-            }
-            Ok(_) => {}
-            // reqwest errors embed the request URL, which contains the bot token -
-            // strip it so it never reaches the logs.
-            Err(err) => warn!(
-                "telegram request failed: {}",
-                err.to_string().replace(&self.token, "<redacted>")
-            ),
-        }
+        post_json(&self.client, &url, &body, "telegram", &self.token).await;
     }
-}
-
-/// Escape the characters that are special in Telegram's HTML parse mode.
-fn escape(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn escapes_html() {
-        assert_eq!(escape("a<b>&c"), "a&lt;b&gt;&amp;c");
-    }
 
     #[test]
     fn renders_each_event() {

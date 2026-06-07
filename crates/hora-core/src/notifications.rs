@@ -30,18 +30,21 @@ pub fn build(config: &Config, client: &Client) -> Dispatcher {
             let notifier: Box<dyn Notifier> = match channel {
                 Channel::Telegram { token, chat_id, .. } => Box::new(TelegramNotifier::new(
                     client.clone(),
-                    token.clone(),
+                    token.as_ref().to_owned(),
                     chat_id.clone(),
                 )),
-                Channel::Discord { webhook_url, .. } => {
-                    Box::new(DiscordNotifier::new(client.clone(), webhook_url.clone()))
-                }
-                Channel::Slack { webhook_url, .. } => {
-                    Box::new(SlackNotifier::new(client.clone(), webhook_url.clone()))
-                }
-                Channel::Webhook { url, .. } => {
-                    Box::new(WebhookNotifier::new(client.clone(), url.clone()))
-                }
+                Channel::Discord { webhook_url, .. } => Box::new(DiscordNotifier::new(
+                    client.clone(),
+                    webhook_url.as_ref().to_owned(),
+                )),
+                Channel::Slack { webhook_url, .. } => Box::new(SlackNotifier::new(
+                    client.clone(),
+                    webhook_url.as_ref().to_owned(),
+                )),
+                Channel::Webhook { url, .. } => Box::new(WebhookNotifier::new(
+                    client.clone(),
+                    url.as_ref().to_owned(),
+                )),
                 Channel::Email {
                     host,
                     port,
@@ -55,7 +58,7 @@ pub fn build(config: &Config, client: &Client) -> Dispatcher {
                     host: host.clone(),
                     port: *port,
                     username: username.clone(),
-                    password: password.clone(),
+                    password: password.as_ref().to_owned(),
                     from: from.clone(),
                     to: to.clone(),
                     implicit_tls: *implicit_tls,

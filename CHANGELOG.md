@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-08
+
+A hardening and scalability release: no config changes required.
+
+### Security
+
+- Secrets are now a dedicated `Secret` type that redacts itself in `Debug`, so a
+  `{config:?}` in a log line or panic can never leak one. This covers channel
+  credentials (Telegram token, Discord/Slack/webhook URLs, SMTP password), a
+  monitor's request headers, and its push token.
+- A monitor's `target` and `proxy` are masked too: any `user:pass@` credentials
+  embedded in those URLs are redacted in `Debug`, keeping the host for debugging.
+- Push tokens can be sent as an `X-Push-Token` header instead of `?token=`, so
+  the secret stays out of proxy access logs, and the token is compared in
+  constant time.
+- Notification failures log a snippet of the provider's response with the secret
+  stripped out first.
+
+### Added
+
+- An `x-request-id` correlation id on every response (an inbound one is honoured,
+  otherwise a fresh opaque id is minted) and threaded through the request's trace
+  span, so log lines can be tied back to a single request.
+- Graceful shutdown: on `SIGTERM`/Ctrl-C the background tasks (supervisor,
+  per-monitor probes, certificate watcher, pruner) finish their current iteration
+  and exit cleanly instead of being aborted mid-write.
+- Notifications retry transient failures (a network error, HTTP 5xx, or 429) with
+  a short backoff, so one blip no longer silently drops an alert.
+
+### Changed
+
+- The status summary is built from batched queries (one per aggregate across all
+  monitors) instead of a few per monitor, and latency percentiles plus the card
+  sparklines are now computed in SQL. Memory use and page size are bounded by the
+  monitor count rather than the check frequency.
+- The `checks` table gained a primary key, a `UNIQUE (monitor_id, time)`
+  constraint and a `CHECK` on `status`; inserts are `INSERT OR IGNORE`. Existing
+  rows are de-duplicated by a migration. This prevents a retry or manual insert
+  from double-counting in the aggregates.
+- SMTP delivery has a 15s timeout; the certificate verifier advertises the
+  provider's signature schemes; `/api/openapi.json` returns 500 (not an empty
+  200) if generation ever fails; responses carry `X-Frame-Options: DENY`.
+
 ## [0.2.2] - 2026-06-07
 
 ### Fixed
@@ -139,7 +182,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/uplg/hora/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/uplg/hora/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/uplg/hora/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/uplg/hora/compare/v0.1.1...v0.2.0
