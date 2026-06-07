@@ -1,0 +1,200 @@
+//! Supervises monitor tasks and hot-reloads the configuration.
+//!
+//! The live config is shared through a [`watch`] channel every component reads.
+//! On SIGHUP or a change to the config file, the file is re-read and the running
+//! monitor tasks are reconciled: new monitors start, removed ones stop, changed
+//! ones restart — unchanged monitors keep running, so a reload never interrupts
+//! existing checks.
+//!
+//! `server.bind` and notification credentials are read once at startup; changing
+//! them still requires a restart. Everything else (monitors, intervals,
+//! thresholds, retention, the certificate window) reloads live.
+
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use reqwest::Client;
+use sqlx::SqlitePool;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
+use tracing::{info, warn};
+
+use crate::config::{self, Config, Monitor};
+use crate::notifications::{self, Notifiers};
+use crate::scheduler;
+
+struct Running {
+    monitor: Monitor,
+    task: JoinHandle<()>,
+}
+
+/// A handle to the running supervisor: the live config and the hot-swappable
+/// notifier set, both shared with the rest of the application.
+pub struct Handle {
+    pub config: watch::Receiver<Arc<Config>>,
+    pub notifier: Notifiers,
+}
+
+/// Start supervising: build the notifier set, spawn the initial monitors and the
+/// reload loop, and return the handles every component reads.
+#[must_use]
+pub fn start(initial: Config, config_path: PathBuf, pool: SqlitePool, client: Client) -> Handle {
+    let notifier = notifications::shared(&initial, &client);
+    let (tx, rx) = watch::channel(Arc::new(initial));
+    tokio::spawn(supervise(
+        tx,
+        rx.clone(),
+        config_path,
+        pool,
+        client,
+        Arc::clone(&notifier),
+    ));
+    Handle {
+        config: rx,
+        notifier,
+    }
+}
+
+async fn supervise(
+    tx: watch::Sender<Arc<Config>>,
+    rx: watch::Receiver<Arc<Config>>,
+    config_path: PathBuf,
+    pool: SqlitePool,
+    client: Client,
+    notifier: Notifiers,
+) {
+    let mut running: HashMap<String, Running> = HashMap::new();
+    reconcile(&mut running, &rx, &pool, &client, &notifier);
+
+    let mut reloads = reload_signals(&config_path);
+    while reloads.recv().await.is_some() {
+        match config::load_from(&config_path) {
+            Ok(config) => {
+                let config = Arc::new(config);
+                // Rebuild the channels too, so credential/channel changes apply live.
+                notifier.store(Arc::new(notifications::build(&config, &client)));
+                if tx.send(Arc::clone(&config)).is_err() {
+                    break;
+                }
+                reconcile(&mut running, &rx, &pool, &client, &notifier);
+                info!(
+                    "configuration reloaded ({} monitors, {} channels)",
+                    config.monitors.len(),
+                    notifier.load().len(),
+                );
+            }
+            Err(err) => warn!("config reload failed, keeping current config: {err:#}"),
+        }
+    }
+}
+
+/// Diff running tasks against the latest config: stop removed or changed
+/// monitors, start new or changed ones, leave unchanged ones untouched.
+fn reconcile(
+    running: &mut HashMap<String, Running>,
+    rx: &watch::Receiver<Arc<Config>>,
+    pool: &SqlitePool,
+    client: &Client,
+    notifier: &Notifiers,
+) {
+    let config = rx.borrow().clone();
+
+    let desired: HashMap<&str, &Monitor> =
+        config.monitors.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    running.retain(|id, run| match desired.get(id.as_str()) {
+        Some(monitor) if **monitor == run.monitor => true,
+        _ => {
+            run.task.abort();
+            false
+        }
+    });
+
+    for monitor in &config.monitors {
+        if !running.contains_key(&monitor.id) {
+            let task = scheduler::spawn_monitor(
+                monitor.clone(),
+                rx.clone(),
+                pool.clone(),
+                client.clone(),
+                Arc::clone(notifier),
+            );
+            running.insert(
+                monitor.id.clone(),
+                Running {
+                    monitor: monitor.clone(),
+                    task,
+                },
+            );
+        }
+    }
+}
+
+/// A channel that fires whenever the config should be reloaded: on SIGHUP, and
+/// whenever the config file changes on disk.
+fn reload_signals(config_path: &Path) -> mpsc::Receiver<()> {
+    let (tx, rx) = mpsc::channel(8);
+
+    spawn_sighup(tx.clone());
+
+    match file_watcher(config_path, tx) {
+        Ok(watcher) => {
+            // The watcher stops once dropped, so keep it alive for the process.
+            tokio::spawn(async move {
+                let _watcher = watcher;
+                std::future::pending::<()>().await;
+            });
+        }
+        Err(err) => warn!("config file watching disabled: {err}"),
+    }
+
+    rx
+}
+
+#[cfg(unix)]
+fn spawn_sighup(tx: mpsc::Sender<()>) {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    tokio::spawn(async move {
+        let mut hangup = match signal(SignalKind::hangup()) {
+            Ok(hangup) => hangup,
+            Err(err) => {
+                warn!("cannot listen for SIGHUP: {err}");
+                return;
+            }
+        };
+        while hangup.recv().await.is_some() {
+            if tx.send(()).await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_sighup(_tx: mpsc::Sender<()>) {}
+
+fn file_watcher(config_path: &Path, tx: mpsc::Sender<()>) -> notify::Result<RecommendedWatcher> {
+    let watched_name = config_path.file_name().map(OsStr::to_owned);
+    let directory = config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let Ok(event) = event else { return };
+        let touches_config = event
+            .paths
+            .iter()
+            .any(|path| path.file_name().map(OsStr::to_owned) == watched_name);
+        if touches_config {
+            // Runs on notify's own thread, so blocking here is fine.
+            let _ = tx.blocking_send(());
+        }
+    })?;
+    watcher.watch(&directory, RecursiveMode::NonRecursive)?;
+    Ok(watcher)
+}

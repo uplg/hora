@@ -1,0 +1,72 @@
+# Hora configuration. Copy to config.toml and edit.
+# The path is resolved from $HORA_CONFIG (default: ./config.toml).
+
+[page]
+# Title shown on the public status page and in the browser tab.
+title = "Hora — Status"
+# Number of days rendered in the daily uptime bar.
+history_days = 90
+
+[server]
+# Address the HTTP server binds to. Behind a reverse proxy, keep it on loopback.
+bind = "127.0.0.1:8787"
+# SQLite database file. Created if missing. In Docker, point this at a volume.
+database_path = "hora.db"
+# Browser origins allowed to call the JSON API (CORS). Empty = allow any (read-only, public data).
+allowed_origins = []
+# Per-IP API rate limit (applied to /api/* only). One request slot is replenished
+# every `rate_limit_refill_secs` seconds, up to a burst of `rate_limit_burst`.
+# Behind a proxy the client IP is taken from X-Forwarded-For. Read once at startup.
+rate_limit_refill_secs = 1
+rate_limit_burst = 30
+
+# Notification channels. Each is independent; add more as they are implemented.
+[telegram]
+# Leave token/chat_id empty to disable the Telegram channel.
+# Overridable via $HORA_TELEGRAM_TOKEN / $HORA_TELEGRAM_CHAT_ID (recommended for secrets).
+token = ""
+chat_id = ""
+
+# Alerting and retention policy, independent of any channel.
+[alerts]
+# Consecutive failed checks before a monitor is alerted as down. Kills flapping / false positives.
+fail_threshold = 3
+# Warn this many days before a TLS certificate expires.
+cert_expiry_days = 14
+# Default history retention in days, overridable per monitor via `retention_days`.
+default_retention_days = 90
+
+# --- Monitors -------------------------------------------------------------
+# kind = "http" (default) or "tcp".
+# For http: target is a URL; up = 2xx (or expected_status if set).
+# For tcp:  target is "host:port"; up = TCP connect succeeds.
+# TLS certificate expiry is checked automatically for https:// monitors.
+
+[[monitors]]
+id = "website"
+name = "Website"
+kind = "http"
+target = "https://example.com"
+interval_secs = 60
+timeout_secs = 10
+# expected_status = 200   # optional; default: any 2xx counts as up
+# degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)
+# check_cert = false      # optional; override TLS expiry checking
+# retention_days = 30     # optional; override how long this monitor's history is kept
+# headers = { Accept = "text/html", Authorization = "Bearer ..." }  # optional; extra request headers
+
+[[monitors]]
+id = "api"
+name = "API"
+kind = "http"
+target = "https://api.example.com/health"
+interval_secs = 30
+timeout_secs = 10
+
+[[monitors]]
+id = "database"
+name = "Database"
+kind = "tcp"
+target = "db.example.com:5432"
+interval_secs = 60
+timeout_secs = 5

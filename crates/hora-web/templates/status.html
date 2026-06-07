@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="refresh" content="30" />
+  <title>{{ summary.title }}</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="preload" href="/assets/CalSans-SemiBold.woff2" as="font" type="font/woff2" crossorigin />
+  <style>
+    @font-face {
+      font-family: "Cal Sans";
+      src: url("/assets/CalSans-SemiBold.woff2") format("woff2");
+      font-weight: 600;
+      font-display: swap;
+    }
+
+    :root {
+      --bg: #0b0e14;
+      --card: #11161f;
+      --border: #1d2430;
+      --text: #e6e8eb;
+      --muted: #8b93a1;
+      --up: #10b981;
+      --down: #ef4444;
+      --degraded: #f59e0b;
+      --unknown: #6b7280;
+      --empty: #232a36;
+      --brand: "Cal Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 40px 20px 56px;
+    }
+
+    .top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px 16px;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      font-family: var(--brand);
+      font-size: 24px;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: 0.01em;
+    }
+
+    .overall {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-left: auto;
+      padding: 8px 14px;
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: 999px;
+      background: var(--card);
+    }
+
+    .overall.up {
+      border-left-color: var(--up);
+    }
+
+    .overall.degraded {
+      border-left-color: var(--degraded);
+    }
+
+    .overall.down {
+      border-left-color: var(--down);
+    }
+
+    .overall.unknown {
+      border-left-color: var(--unknown);
+    }
+
+    .overall-label {
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      flex: none;
+    }
+
+    .dot.up {
+      background: var(--up);
+      box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+    }
+
+    .dot.degraded {
+      background: var(--degraded);
+      box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
+    }
+
+    .dot.down {
+      background: var(--down);
+      box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.16);
+    }
+
+    .dot.unknown {
+      background: var(--unknown);
+    }
+
+    .grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
+      padding: 13px 15px;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .name {
+      font-family: var(--brand);
+      font-weight: 600;
+      font-size: 15px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .meta {
+      margin-left: auto;
+      display: flex;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .meta b {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .uptime-bar {
+      display: flex;
+      gap: 1px;
+      height: 8px;
+      margin: 11px 0 8px;
+    }
+
+    .day {
+      flex: 1 1 0;
+      border-radius: 1px;
+      background: var(--empty);
+    }
+
+    .day.up {
+      background: var(--up);
+    }
+
+    .day.degraded {
+      background: var(--degraded);
+    }
+
+    .day.down {
+      background: var(--down);
+    }
+
+    .spark {
+      width: 100%;
+      height: 40px;
+      display: block;
+    }
+
+    .spark-line {
+      fill: none;
+      stroke-width: 2;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+
+    .spark-area {
+      stroke: none;
+      fill-opacity: 0.12;
+    }
+
+    .spark.up .spark-line {
+      stroke: var(--up);
+    }
+
+    .spark.up .spark-area {
+      fill: var(--up);
+    }
+
+    .spark.degraded .spark-line {
+      stroke: var(--degraded);
+    }
+
+    .spark.degraded .spark-area {
+      fill: var(--degraded);
+    }
+
+    .spark.down .spark-line {
+      stroke: var(--down);
+    }
+
+    .spark.down .spark-area {
+      fill: var(--down);
+    }
+
+    .spark.unknown .spark-line {
+      stroke: var(--unknown);
+    }
+
+    .spark.unknown .spark-area {
+      fill: var(--unknown);
+    }
+
+    .spark-empty {
+      fill: var(--muted);
+      font-size: 13px;
+    }
+
+    .caption {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 5px;
+    }
+
+    .cert.warn {
+      color: var(--degraded);
+    }
+
+    .cert.expired {
+      color: var(--down);
+    }
+
+    .empty-state {
+      color: var(--muted);
+      text-align: center;
+      padding: 48px 0;
+    }
+
+    footer {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      margin-top: 28px;
+    }
+
+    footer a {
+      color: var(--muted);
+      text-decoration: none;
+      border-bottom: 1px solid var(--border);
+    }
+
+    footer a:hover {
+      color: var(--text);
+    }
+  </style>
+</head>
+
+<body>
+  <main class="wrap">
+    <div class="top">
+      <h1>{{ summary.title }}</h1>
+      <div class="overall {{ summary.overall }}">
+        <span class="dot {{ summary.overall }}"></span>
+        <span class="overall-label">{{ summary.overall_label }}</span>
+      </div>
+    </div>
+
+    {% if summary.monitors.is_empty() %}
+    <p class="empty-state">No monitors configured yet.</p>
+    {% else %}
+    <div class="grid">
+      {% for monitor in summary.monitors %}
+      <section class="card">
+        <div class="card-head">
+          <span class="dot {{ monitor.status }}"></span>
+          <span class="name">{{ monitor.name }}</span>
+          <span class="meta">
+            <span>{% if let Some(label) = monitor.uptime_label %}{{ label }}{% else %}—{% endif %}</span>
+            <span><b>{% if let Some(ms) = monitor.last_latency_ms %}{{ ms }}ms{% else %}—{% endif %}</b></span>
+          </span>
+        </div>
+
+        <div class="uptime-bar">
+          {% for cell in monitor.bar %}
+          <span class="day {{ cell.state }}" title="{{ cell.title }}"></span>
+          {% endfor %}
+        </div>
+
+        {{ monitor.chart_svg|safe }}
+        <div class="caption">
+          <span>response · 24h</span>
+          <span>
+            {% if let Some(cert) = monitor.cert_label %}<span class="cert {{ monitor.cert_state }}">TLS {{ cert
+              }}</span>{% endif %}
+          </span>
+        </div>
+      </section>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <footer>
+      Updated {{ summary.generated_at }} · Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
+    </footer>
+  </main>
+</body>
+
+</html>

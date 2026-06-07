@@ -1,0 +1,8 @@
+/target
+/.git
+/.github
+*.db
+*.db-shm
+*.db-wal
+config.toml
+README.md

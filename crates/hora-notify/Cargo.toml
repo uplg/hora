@@ -1,0 +1,16 @@
+[package]
+name = "hora-notify"
+description = "Notification abstraction for Hora: a Notifier trait and built-in channels."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,40 @@
+# cargo-deny configuration. Run: cargo deny check
+
+[advisories]
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive (and public-domain-equivalent) licenses we accept. Crates offering
+# a choice (e.g. "Unlicense OR MIT") are satisfied via one of these.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+wildcards = "deny"
+allow-wildcard-paths = true
+# Fail on unexpected duplicate versions, but accept the few that the upstream
+# dependency tree pulls in transitively and we cannot deduplicate ourselves.
+multiple-versions = "deny"
+skip = [
+    { crate = "hashbrown" },
+    { crate = "thiserror" },
+    { crate = "thiserror-impl" },
+    { crate = "windows-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

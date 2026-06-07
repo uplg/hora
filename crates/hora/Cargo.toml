@@ -1,0 +1,20 @@
+[package]
+name = "hora"
+description = "Hora — a tiny self-hosted uptime monitor with a status page, JSON API and alerts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+hora-core.workspace = true
+hora-web.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

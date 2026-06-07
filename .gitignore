@@ -1,0 +1,7 @@
+/target
+
+# Local runtime config and database
+/config.toml
+*.db
+*.db-shm
+*.db-wal
