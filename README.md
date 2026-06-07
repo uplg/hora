@@ -12,7 +12,7 @@ JSON API. The Docker image is a static musl binary on Alpine - about 15 MB.
 
 Named after the **Horai**, the Greek goddesses of the hours.
 
-![Hora](./docs/screenshot.jpg)
+![Hora](./docs/screenshot-0.2.1.jpg)
 
 ## Features
 
