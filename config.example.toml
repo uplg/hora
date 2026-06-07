@@ -1,8 +1,8 @@
 # Hora configuration. Copy to config.toml and edit.
 # The path is resolved from $HORA_CONFIG (default: ./config.toml).
 #
-# Any `${VAR}` in this file is replaced with the environment variable at load,
-# so secrets can stay out of the file: token = "${HORA_TELEGRAM_TOKEN}".
+# Any `VAR` in this file is replaced with the environment variable at load,
+# so secrets can stay out of the file.
 
 [page]
 # Title shown on the public status page and in the browser tab.
@@ -30,7 +30,7 @@ rate_limit_burst = 30
 # Each channel has a unique `name` and a `type`. Several channels may share a
 # type (e.g. two Discord webhooks). A monitor routes to specific channels with
 # its `notify = ["name", ...]` field; without it, every channel is used.
-# An empty secret (e.g. an unset ${VAR}) simply disables that channel.
+# An empty secret (e.g. an unset VAR) simply disables that channel.
 
 # [[channels]]
 # name = "ops-telegram"
