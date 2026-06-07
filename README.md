@@ -1,7 +1,6 @@
 # Hora
 
 [![CI](https://github.com/uplg/hora/actions/workflows/ci.yml/badge.svg)](https://github.com/uplg/hora/actions/workflows/ci.yml)
-[![Docker](https://github.com/uplg/hora/actions/workflows/docker.yml/badge.svg)](https://github.com/uplg/hora/actions/workflows/docker.yml)
 [![Image](https://img.shields.io/badge/ghcr.io-uplg%2Fhora-2496ED?logo=docker&logoColor=white)](https://github.com/uplg/hora/pkgs/container/hora)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Rust edition 2024](https://img.shields.io/badge/rust-edition%202024-orange?logo=rust)
