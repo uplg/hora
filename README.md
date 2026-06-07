@@ -27,11 +27,12 @@ Named after the **Horai**, the Greek goddesses of the hours.
 - **JSON API** to read status and latency history from anywhere, with a generated
   **OpenAPI 3.1** document at `/api/openapi.json`.
 - **TLS certificate expiry monitoring** with advance warnings.
-- **Pluggable notifications** via a `Notifier` trait - **Telegram, Discord, Slack, a
-  generic JSON webhook and SMTP e-mail** built in. Channels are **named**, so you can
-  have several of the same type and **route each monitor** to specific ones
-  (`notify = [...]`). Alerts fire only after _N_ consecutive failures (so flapping
-  never wakes you up) and include a snippet of the failing response body.
+- **Pluggable notifications** via a `Notifier` trait - **Telegram, Discord, Slack,
+  Matrix, a generic JSON webhook, SMTP e-mail and Free Mobile SMS** built in. Channels
+  are **named**, so you can have several of the same type and **route each monitor** to
+  specific ones (`notify = [...]`). Delivery retries transient failures, and alerts fire
+  only after _N_ consecutive failures (so flapping never wakes you up) and include a
+  snippet of the failing response body.
 - **Scheduled maintenance windows** that mute alerts (per monitor or global).
 - **Per-IP API rate limiting** on the JSON endpoints, with a configurable trusted
   client-IP header (e.g. `cf-connecting-ip` behind Cloudflare).

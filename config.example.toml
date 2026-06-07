@@ -63,6 +63,19 @@ rate_limit_burst = 30
 # from = "Hora <hora@example.com>"
 # to = "ops@example.com"
 
+# [[channels]]
+# name = "ops-matrix"
+# type = "matrix"
+# homeserver = "https://matrix.org"
+# token = "${MATRIX_TOKEN}"        # access token of the sending (bot) user
+# room_id = "!abcdef:matrix.org"
+
+# [[channels]]
+# name = "oncall-sms"
+# type = "freemobile"              # texts your own Free Mobile number
+# user = "12345678"                # account id, from "Notifications par SMS"
+# pass = "${FREEMOBILE_PASS}"      # API key generated in that same option
+
 # Alerting and retention policy, independent of any channel.
 [alerts]
 # Consecutive failed checks before a monitor is alerted as down. Kills flapping / false positives.

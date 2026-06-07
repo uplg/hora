@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use hora_notify::{
-    DiscordNotifier, Dispatcher, EmailConfig, EmailNotifier, Notifier, SlackNotifier,
-    TelegramNotifier, WebhookNotifier,
+    DiscordNotifier, Dispatcher, EmailConfig, EmailNotifier, FreeMobileNotifier, MatrixNotifier,
+    Notifier, SlackNotifier, TelegramNotifier, WebhookNotifier,
 };
 use reqwest::Client;
 
@@ -44,6 +44,22 @@ pub fn build(config: &Config, client: &Client) -> Dispatcher {
                 Channel::Webhook { url, .. } => Box::new(WebhookNotifier::new(
                     client.clone(),
                     url.as_ref().to_owned(),
+                )),
+                Channel::Matrix {
+                    homeserver,
+                    token,
+                    room_id,
+                    ..
+                } => Box::new(MatrixNotifier::new(
+                    client.clone(),
+                    homeserver.clone(),
+                    token.as_ref().to_owned(),
+                    room_id.clone(),
+                )),
+                Channel::FreeMobile { user, pass, .. } => Box::new(FreeMobileNotifier::new(
+                    client.clone(),
+                    user.clone(),
+                    pass.as_ref().to_owned(),
                 )),
                 Channel::Email {
                     host,

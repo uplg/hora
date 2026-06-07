@@ -154,6 +154,22 @@ pub enum Channel {
         name: String,
         url: Secret,
     },
+    Matrix {
+        name: String,
+        /// Homeserver base URL, e.g. `https://matrix.org`.
+        homeserver: String,
+        /// Access token of the sending (bot) user.
+        token: Secret,
+        /// Target room id, e.g. `!abcdef:matrix.org`.
+        room_id: String,
+    },
+    FreeMobile {
+        name: String,
+        /// Free Mobile account identifier (the login from the SMS-notifications option).
+        user: String,
+        /// API key generated in the Free Mobile "Notifications par SMS" option.
+        pass: Secret,
+    },
     Email {
         name: String,
         host: String,
@@ -180,6 +196,8 @@ impl Channel {
             | Self::Discord { name, .. }
             | Self::Slack { name, .. }
             | Self::Webhook { name, .. }
+            | Self::Matrix { name, .. }
+            | Self::FreeMobile { name, .. }
             | Self::Email { name, .. } => name,
         }
     }
@@ -194,6 +212,13 @@ impl Channel {
                 !webhook_url.is_empty()
             }
             Self::Webhook { url, .. } => !url.is_empty(),
+            Self::Matrix {
+                homeserver,
+                token,
+                room_id,
+                ..
+            } => !homeserver.is_empty() && !token.is_empty() && !room_id.is_empty(),
+            Self::FreeMobile { user, pass, .. } => !user.is_empty() && !pass.is_empty(),
             Self::Email { host, from, to, .. } => {
                 !host.is_empty() && !from.is_empty() && !to.is_empty()
             }
@@ -230,6 +255,24 @@ impl std::fmt::Debug for Channel {
                 .debug_struct("Webhook")
                 .field("name", name)
                 .field("url", url)
+                .finish(),
+            Self::Matrix {
+                name,
+                homeserver,
+                token,
+                room_id,
+            } => f
+                .debug_struct("Matrix")
+                .field("name", name)
+                .field("homeserver", homeserver)
+                .field("token", token)
+                .field("room_id", room_id)
+                .finish(),
+            Self::FreeMobile { name, user, pass } => f
+                .debug_struct("FreeMobile")
+                .field("name", name)
+                .field("user", user)
+                .field("pass", pass)
                 .finish(),
             Self::Email {
                 name,
@@ -626,17 +669,19 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             "duplicate channel name: {}",
             channel.name()
         );
-        // Webhook-style channels carry a token in the URL; warn on cleartext http.
+        // These channels send credentials over the configured URL (in the URL
+        // itself, or - for Matrix - in a header); warn on cleartext http.
         let url = match channel {
             Channel::Discord { webhook_url, .. } | Channel::Slack { webhook_url, .. } => {
                 Some(webhook_url.as_ref())
             }
             Channel::Webhook { url, .. } => Some(url.as_ref()),
-            Channel::Telegram { .. } | Channel::Email { .. } => None,
+            Channel::Matrix { homeserver, .. } => Some(homeserver.as_str()),
+            Channel::Telegram { .. } | Channel::FreeMobile { .. } | Channel::Email { .. } => None,
         };
         if url.is_some_and(|url| url.starts_with("http://")) {
             tracing::warn!(
-                "channel {}: webhook URL uses http:// - the token is sent in cleartext",
+                "channel {}: URL uses http:// - credentials are sent in cleartext, use https",
                 channel.name()
             );
         }
@@ -1260,6 +1305,38 @@ mod tests {
         let notify = config.monitors[0].notify.as_ref().expect("notify set");
         assert_eq!(notify, &["web-discord", "ops"]);
         validate(&config).expect("valid config");
+    }
+
+    #[test]
+    fn parses_matrix_and_freemobile_channels() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+
+            [[channels]]
+            name = "ops-matrix"
+            type = "matrix"
+            homeserver = "https://matrix.example.org"
+            token = "syt_secret"
+            room_id = "!room:matrix.example.org"
+
+            [[channels]]
+            name = "oncall-sms"
+            type = "freemobile"
+            user = "12345678"
+            pass = "apikey"
+        "#,
+        );
+        assert_eq!(config.channels.len(), 2);
+        assert_eq!(config.channels[0].name(), "ops-matrix");
+        assert_eq!(config.channels[1].name(), "oncall-sms");
+        assert!(config.channels[0].is_configured() && config.channels[1].is_configured());
+        validate(&config).expect("valid");
+        // Neither secret may surface through Debug.
+        let dump = format!("{:?}", config.channels);
+        assert!(!dump.contains("syt_secret"), "matrix token leaked: {dump}");
+        assert!(!dump.contains("apikey"), "freemobile pass leaked: {dump}");
     }
 
     #[test]

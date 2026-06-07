@@ -2,12 +2,14 @@
 //!
 //! Alerting code emits an [`Event`]; each configured [`Notifier`] decides how
 //! to deliver it. [`Dispatcher`] holds the channels under their routing names
-//! and fans an event out to the matching ones. Telegram, Discord, Slack, a
-//! generic JSON webhook and SMTP e-mail are the built-in backends; adding
-//! another means implementing the trait and registering it.
+//! and fans an event out to the matching ones. Telegram, Discord, Slack, Matrix,
+//! a generic JSON webhook, SMTP e-mail and Free Mobile SMS are the built-in
+//! backends; adding another means implementing the trait and registering it.
 
 pub mod discord;
 pub mod email;
+pub mod freemobile;
+pub mod matrix;
 pub mod slack;
 pub mod telegram;
 mod util;
@@ -18,6 +20,8 @@ use futures_util::future::join_all;
 
 pub use discord::DiscordNotifier;
 pub use email::{EmailConfig, EmailNotifier};
+pub use freemobile::FreeMobileNotifier;
+pub use matrix::MatrixNotifier;
 pub use slack::SlackNotifier;
 pub use telegram::TelegramNotifier;
 pub use webhook::WebhookNotifier;

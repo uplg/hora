@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-06-08
+
+### Added
+
+- Two more notification channels: **Matrix** (posts to a room via the
+  client-server API, authenticating with a bot access token) and **Free Mobile
+  SMS** (texts your own number via the operator's API). Configure them like any
+  other named channel - see `config.example.toml`.
+
+### Changed
+
+- Internal: the `hora-web` crate's single large `lib.rs` was split into focused
+  modules (`routes`, `handlers`, `summary`, `render`) with tests colocated. No
+  behaviour change.
+
 ## [0.2.3] - 2026-06-08
 
 A hardening and scalability release: no config changes required.
@@ -182,7 +197,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/uplg/hora/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/uplg/hora/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/uplg/hora/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/uplg/hora/compare/v0.2.0...v0.2.1

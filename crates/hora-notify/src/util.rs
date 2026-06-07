@@ -1,6 +1,6 @@
 //! Shared helpers for the built-in notifiers.
 
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde::Serialize;
 use tracing::warn;
 
@@ -28,23 +28,22 @@ pub(crate) fn cert_expiry_phrase(days_left: i64) -> String {
 /// otherwise silently drop the notification.
 const MAX_ATTEMPTS: u32 = 3;
 
-/// POST `payload` as JSON and log (never panic) on failure. `secret` is stripped
-/// from any logged text so a token embedded in the URL never reaches the logs.
-/// On rejection, a bounded snippet of the response body is logged (it usually
-/// says *why*, e.g. "chat not found").
+/// Send a request and log (never panic) on failure. `build` produces a fresh
+/// request on each attempt, so it can be retried; `secret` is stripped from any
+/// logged text so a token in the URL or a header never reaches the logs. On
+/// rejection a bounded snippet of the response body is logged (it usually says
+/// *why*, e.g. "chat not found").
 ///
 /// Transient failures (a network error, an HTTP 5xx, or 429) are retried with a
 /// short backoff. Client errors (4xx other than 429) are permanent, so they are
-/// reported immediately without retrying.
-pub(crate) async fn post_json<T: Serialize>(
-    client: &Client,
-    url: &str,
-    payload: &T,
-    channel: &str,
-    secret: &str,
-) {
+/// reported immediately without retrying. Every notifier goes through here, so
+/// they all share one retry and redaction policy.
+pub(crate) async fn send_retrying<F>(build: F, channel: &str, secret: &str)
+where
+    F: Fn() -> RequestBuilder,
+{
     for attempt in 1..=MAX_ATTEMPTS {
-        match client.post(url).json(payload).send().await {
+        match build().send().await {
             Ok(response) if response.status().is_success() => return,
             Ok(response) => {
                 let status = response.status();
@@ -72,6 +71,17 @@ pub(crate) async fn post_json<T: Serialize>(
             }
         }
     }
+}
+
+/// POST `payload` as JSON, retrying transient failures (see [`send_retrying`]).
+pub(crate) async fn post_json<T: Serialize>(
+    client: &Client,
+    url: &str,
+    payload: &T,
+    channel: &str,
+    secret: &str,
+) {
+    send_retrying(|| client.post(url).json(payload), channel, secret).await;
 }
 
 /// Exponential backoff between delivery attempts: 200ms, then 400ms. Kept short
