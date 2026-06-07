@@ -14,7 +14,7 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, TimeDelta, Utc};
-use futures_util::future::try_join_all;
+use futures_util::future::join_all;
 use hora_core::SECONDS_PER_DAY;
 use hora_core::config::{Config, Monitor};
 use hora_core::db::{self, DayRow, Latest, Point};
@@ -190,8 +190,9 @@ async fn openapi() -> impl IntoResponse {
     )
 }
 
-/// Fetch (or build) the cached summary from the request state.
-async fn state_summary(state: AppState) -> anyhow::Result<Arc<Summary>> {
+/// Fetch (or build) the cached summary from the request state. Infallible: a
+/// failing monitor degrades to an `unknown` card rather than failing the page.
+async fn state_summary(state: AppState) -> Arc<Summary> {
     let AppState {
         pool,
         config,
@@ -202,7 +203,7 @@ async fn state_summary(state: AppState) -> anyhow::Result<Arc<Summary>> {
 }
 
 async fn page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
-    let summary = state_summary(state).await?;
+    let summary = state_summary(state).await;
     let html = StatusTemplate {
         summary: summary.as_ref(),
     }
@@ -215,8 +216,8 @@ async fn page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     path = "/api/summary",
     responses((status = 200, description = "Status of every monitor", body = Summary))
 )]
-async fn summary_json(State(state): State<AppState>) -> Result<Json<Arc<Summary>>, AppError> {
-    Ok(Json(state_summary(state).await?))
+async fn summary_json(State(state): State<AppState>) -> Json<Arc<Summary>> {
+    Json(state_summary(state).await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,7 +270,7 @@ async fn status_badge(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let summary = state_summary(state).await?;
+    let summary = state_summary(state).await;
     let monitor = summary
         .monitors
         .iter()
@@ -295,7 +296,7 @@ async fn uptime_badge(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let summary = state_summary(state).await?;
+    let summary = state_summary(state).await;
     let monitor = summary
         .monitors
         .iter()
@@ -312,26 +313,22 @@ async fn uptime_badge(
 
 /// Return a fresh-enough cached summary, or build exactly one (single-flight)
 /// and cache it. The cache busts immediately when the config is reloaded.
-async fn summary_for(
-    pool: &SqlitePool,
-    config: &Arc<Config>,
-    cache: &Cache,
-) -> anyhow::Result<Arc<Summary>> {
+async fn summary_for(pool: &SqlitePool, config: &Arc<Config>, cache: &Cache) -> Arc<Summary> {
     if let Some(fresh) = fresh_summary(cache, config) {
-        return Ok(fresh);
+        return fresh;
     }
     // Only one task builds at a time; the rest wait and reuse the result.
     let _build = cache.build.lock().await;
     if let Some(fresh) = fresh_summary(cache, config) {
-        return Ok(fresh);
+        return fresh;
     }
-    let summary = Arc::new(build_summary(pool, config).await?);
+    let summary = Arc::new(build_summary(pool, config).await);
     cache.value.store(Some(Arc::new(Cached {
         at: Instant::now(),
         config: Arc::clone(config),
         summary: Arc::clone(&summary),
     })));
-    Ok(summary)
+    summary
 }
 
 fn fresh_summary(cache: &Cache, config: &Arc<Config>) -> Option<Arc<Summary>> {
@@ -399,7 +396,7 @@ struct SummaryCtx {
     history_days: u16,
 }
 
-async fn build_summary(pool: &SqlitePool, config: &Config) -> anyhow::Result<Summary> {
+async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
     let now = Utc::now();
     let timestamp = now.timestamp();
     let ctx = SummaryCtx {
@@ -412,26 +409,56 @@ async fn build_summary(pool: &SqlitePool, config: &Config) -> anyhow::Result<Sum
         history_days: config.page.history_days,
     };
 
-    // Build every monitor's view concurrently; the roomy pool keeps them moving.
-    let monitors = try_join_all(
+    // Build each monitor's view concurrently; a failed one degrades to an
+    // `unknown` card so a single flaky query never blacks out the whole page.
+    let built = join_all(
         config
             .monitors
             .iter()
             .map(|monitor| build_monitor_view(pool, monitor, &ctx)),
     )
-    .await?;
+    .await;
+    let monitors: Vec<MonitorView> = config
+        .monitors
+        .iter()
+        .zip(built)
+        .map(|(monitor, result)| {
+            result.unwrap_or_else(|err| {
+                tracing::warn!(monitor = %monitor.id, "failed to build monitor view: {err:#}");
+                unknown_view(monitor)
+            })
+        })
+        .collect();
 
     let overall = monitors
         .iter()
         .fold("up", |worst, m| worse(worst, m.status));
 
-    Ok(Summary {
+    Summary {
         title: config.page.title.clone(),
         overall,
         overall_label: overall_label(overall),
         generated_at: now.to_rfc3339(),
         monitors,
-    })
+    }
+}
+
+/// A placeholder card for a monitor whose data could not be loaded this round.
+fn unknown_view(monitor: &Monitor) -> MonitorView {
+    MonitorView {
+        id: monitor.id.clone(),
+        name: monitor.name.clone(),
+        status: "unknown",
+        last_latency_ms: None,
+        last_checked: None,
+        uptime_permille: None,
+        uptime_label: None,
+        cert_days: None,
+        cert_label: None,
+        cert_state: "none",
+        bar: Vec::new(),
+        chart_svg: sparkline(&[], "unknown"),
+    }
 }
 
 async fn build_monitor_view(

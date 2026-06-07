@@ -191,8 +191,9 @@ fn file_watcher(config_path: &Path, tx: mpsc::Sender<()>) -> notify::Result<Reco
             .iter()
             .any(|path| path.file_name().map(OsStr::to_owned) == watched_name);
         if touches_config {
-            // Runs on notify's own thread, so blocking here is fine.
-            let _ = tx.blocking_send(());
+            // Non-blocking: a dropped redundant event is harmless (the next one
+            // triggers a reload), and this avoids any off-runtime blocking_send.
+            let _ = tx.try_send(());
         }
     })?;
     watcher.watch(&directory, RecursiveMode::NonRecursive)?;

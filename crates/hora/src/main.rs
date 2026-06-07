@@ -4,6 +4,8 @@
 //! supervisor (which owns the live config and notification channels), spawn the
 //! certificate watcher and pruner, and serve the status page and JSON API.
 
+use std::time::Duration;
+
 use anyhow::Context as _;
 use hora_core::config;
 use reqwest::Client;
@@ -54,12 +56,47 @@ fn init_tracing() {
 fn build_http_client() -> reqwest::Result<Client> {
     Client::builder()
         .user_agent(concat!("hora/", env!("CARGO_PKG_VERSION")))
+        // Backstop for requests that set no per-request timeout — notably the
+        // Telegram notifier, whose `dispatch().await` runs inline in each
+        // monitor loop: without this, a hung connection would stall that
+        // monitor's probing indefinitely. Probes override this per request with
+        // the monitor's own timeout.
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(10))
         .build()
 }
 
+/// Resolve when the process receives a shutdown signal. Listens for Ctrl-C on
+/// every platform and, on Unix, also `SIGTERM` — the signal `docker stop` and
+/// most init systems send — so the server drains in-flight requests cleanly
+/// instead of being killed after the grace period.
 async fn shutdown_signal() {
-    if let Err(err) = tokio::signal::ctrl_c().await {
-        tracing::error!("failed to listen for shutdown signal: {err}");
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!("failed to listen for Ctrl-C: {err}");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                sigterm.recv().await;
+            }
+            Err(err) => {
+                tracing::error!("failed to listen for SIGTERM: {err}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
     }
     tracing::info!("shutting down");
 }

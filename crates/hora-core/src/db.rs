@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tokio::sync::watch;
 
 use crate::SECONDS_PER_DAY;
@@ -54,12 +54,22 @@ pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
         .filename(database_path)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
-        .busy_timeout(Duration::from_secs(5));
+        // NORMAL is the recommended durability level under WAL: writes fsync only
+        // at checkpoint, not on every probe insert. Safe for this time series —
+        // at worst a power loss drops the last few checks.
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        // Keep the hot index pages resident across the 5s summary rebuilds
+        // (negative = KiB, so this is 16 MiB rather than the 2 MiB default).
+        .pragma("cache_size", "-16000");
 
     // WAL lets readers run while one writer (the scheduler) inserts, so a roomy
     // pool keeps the parallel summary queries from queueing.
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
+        // Fail fast under contention instead of the 30s default; a slow monitor
+        // query then degrades just that card, not the whole page.
+        .acquire_timeout(Duration::from_secs(10))
         .connect_with(options)
         .await?;
 

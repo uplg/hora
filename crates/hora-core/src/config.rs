@@ -47,13 +47,29 @@ pub struct Server {
 }
 
 /// Telegram channel credentials. Empty values disable the channel.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Telegram {
     #[serde(default)]
     pub token: String,
     #[serde(default)]
     pub chat_id: String,
+}
+
+// Manual `Debug` so the bot token never leaks: `Config` derives `Debug`, so any
+// `{config:?}` (a log line, a panic message) would otherwise print the token.
+impl std::fmt::Debug for Telegram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let token = if self.token.is_empty() {
+            "<unset>"
+        } else {
+            "<redacted>"
+        };
+        f.debug_struct("Telegram")
+            .field("token", &token)
+            .field("chat_id", &self.chat_id)
+            .finish()
+    }
 }
 
 /// Alerting and retention policy, independent of any notification channel.
@@ -240,6 +256,11 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             "monitor {} interval_secs must be > 0",
             monitor.id
         );
+        anyhow::ensure!(
+            monitor.timeout_secs > 0,
+            "monitor {} timeout_secs must be > 0",
+            monitor.id
+        );
     }
     Ok(())
 }
@@ -355,5 +376,35 @@ mod tests {
         );
         let error = validate(&config).unwrap_err().to_string();
         assert!(error.contains("duplicate monitor id"), "got: {error}");
+    }
+
+    #[test]
+    fn rejects_zero_timeout() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "x"
+            name = "X"
+            target = "https://example.com"
+            interval_secs = 60
+            timeout_secs = 0
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("timeout_secs"), "got: {error}");
+    }
+
+    #[test]
+    fn telegram_debug_redacts_token() {
+        let telegram = Telegram {
+            token: "supersecret".to_owned(),
+            chat_id: "42".to_owned(),
+        };
+        let shown = format!("{telegram:?}");
+        assert!(!shown.contains("supersecret"), "token leaked: {shown}");
+        assert!(shown.contains("<redacted>"));
+        assert!(shown.contains("42"));
     }
 }

@@ -134,11 +134,14 @@ async fn body_snippet(mut response: reqwest::Response) -> String {
     let mut buf = Vec::new();
     while buf.len() < MAX_BODY_SNIPPET {
         match response.chunk().await {
-            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            // Copy at most the remaining budget so one huge chunk can't blow the bound.
+            Ok(Some(chunk)) => {
+                let take = (MAX_BODY_SNIPPET - buf.len()).min(chunk.len());
+                buf.extend_from_slice(&chunk[..take]);
+            }
             _ => break,
         }
     }
-    buf.truncate(MAX_BODY_SNIPPET); // strict byte bound before the lossy decode
     String::from_utf8_lossy(&buf)
         .split_whitespace()
         .collect::<Vec<_>>()

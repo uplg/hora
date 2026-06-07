@@ -128,7 +128,7 @@ fn host_port(target: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
-/// Spawn the certificate watcher: checks every HTTPS monitor on a daily cycle.
+/// Spawn the certificate watcher: checks every HTTPS monitor every 12 hours.
 pub fn spawn_watcher(pool: SqlitePool, config: watch::Receiver<Arc<Config>>, notifier: Notifiers) {
     tokio::spawn(async move {
         let tls = match client_config() {
