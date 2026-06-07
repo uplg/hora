@@ -51,7 +51,7 @@ static OPENAPI_JSON: LazyLock<String> =
         title = "Hora API",
         description = "Read-only JSON API of a Hora uptime monitor."
     ),
-    paths(summary_json, latency_json, healthz),
+    paths(summary_json, latency_json, status_badge, uptime_badge, healthz),
     components(schemas(Summary, MonitorView, DayCell, Point))
 )]
 struct ApiDoc;
@@ -126,6 +126,8 @@ pub fn router(state: AppState) -> Router {
         .route("/favicon.svg", get(favicon))
         .route("/assets/CalSans-SemiBold.woff2", get(font))
         .route("/api/openapi.json", get(openapi))
+        .route("/api/badge/{id}/status", get(status_badge))
+        .route("/api/badge/{id}/uptime", get(uptime_badge))
         .merge(api)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
@@ -188,14 +190,19 @@ async fn openapi() -> impl IntoResponse {
     )
 }
 
-async fn page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+/// Fetch (or build) the cached summary from the request state.
+async fn state_summary(state: AppState) -> anyhow::Result<Arc<Summary>> {
     let AppState {
         pool,
         config,
         cache,
     } = state;
     let config = config.borrow().clone();
-    let summary = summary_for(&pool, &config, &cache).await?;
+    summary_for(&pool, &config, &cache).await
+}
+
+async fn page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+    let summary = state_summary(state).await?;
     let html = StatusTemplate {
         summary: summary.as_ref(),
     }
@@ -209,13 +216,7 @@ async fn page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     responses((status = 200, description = "Status of every monitor", body = Summary))
 )]
 async fn summary_json(State(state): State<AppState>) -> Result<Json<Arc<Summary>>, AppError> {
-    let AppState {
-        pool,
-        config,
-        cache,
-    } = state;
-    let config = config.borrow().clone();
-    Ok(Json(summary_for(&pool, &config, &cache).await?))
+    Ok(Json(state_summary(state).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +254,58 @@ async fn latency_json(
     let since = Utc::now().timestamp() - hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
     let points = db::latency_series(&pool, &id, since).await?;
     Ok(Json(points))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/badge/{id}/status",
+    params(("id" = String, Path, description = "Monitor id")),
+    responses(
+        (status = 200, description = "Status badge (SVG)"),
+        (status = 404, description = "Unknown monitor")
+    )
+)]
+async fn status_badge(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let summary = state_summary(state).await?;
+    let monitor = summary
+        .monitors
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| AppError::NotFound("unknown monitor"))?;
+    Ok(svg_response(badge(
+        "status",
+        monitor.status,
+        status_color(monitor.status),
+    )))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/badge/{id}/uptime",
+    params(("id" = String, Path, description = "Monitor id")),
+    responses(
+        (status = 200, description = "24h uptime badge (SVG)"),
+        (status = 404, description = "Unknown monitor")
+    )
+)]
+async fn uptime_badge(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let summary = state_summary(state).await?;
+    let monitor = summary
+        .monitors
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| AppError::NotFound("unknown monitor"))?;
+    let (message, color) = match monitor.uptime_permille {
+        Some(permille) => (format_permille(permille), uptime_color(permille)),
+        None => ("n/a".to_owned(), "#9f9f9f"),
+    };
+    Ok(svg_response(badge("uptime", &message, color)))
 }
 
 // --- Summary cache (lock-free read + single-flight build) ----------------
@@ -515,18 +568,28 @@ fn build_bar(daily: &[DayRow], now: DateTime<Utc>, days: u16) -> Vec<DayCell> {
     cells
 }
 
+/// A day's cell turns red only for a real outage; a brief blip stays amber.
+const DAY_OUTAGE_BELOW_PERMILLE: i64 = 990; // < 99% availability over the day
+
 fn day_cell(date: String, row: &DayRow) -> DayCell {
     let total = row.up + row.down + row.degraded;
-    let (state, title) = if total == 0 {
-        ("empty", format!("{date}: no data"))
-    } else if row.down == 0 && row.degraded == 0 {
-        ("up", format!("{date}: 100%"))
-    } else if row.down == 0 {
-        ("degraded", format!("{date}: degraded"))
+    if total == 0 {
+        let title = format!("{date}: no data");
+        return DayCell {
+            date,
+            state: "empty",
+            title,
+        };
+    }
+    let permille = (row.up + row.degraded).saturating_mul(1000) / total;
+    let state = if row.down == 0 && row.degraded == 0 {
+        "up"
+    } else if permille >= DAY_OUTAGE_BELOW_PERMILLE {
+        "degraded"
     } else {
-        let permille = (row.up + row.degraded).saturating_mul(1000) / total;
-        ("down", format!("{date}: {}", format_permille(permille)))
+        "down"
     };
+    let title = format!("{date}: {}", format_permille(permille));
     DayCell { date, state, title }
 }
 
@@ -587,6 +650,70 @@ fn sparkline(points: &[Point], status: &str) -> String {
          <path class=\"spark-area\" d=\"{line}L{last_x:.1} {baseline:.1} L{CHART_PAD:.1} {baseline:.1} Z\"/>\
          <path class=\"spark-line\" d=\"{line}\"/>\
          </svg>"
+    )
+}
+
+// --- SVG status / uptime badges (flat shields style) --------------------
+
+const BADGE_CHAR_W: f64 = 7.0;
+const BADGE_PAD: f64 = 6.0;
+
+fn status_color(status: &str) -> &'static str {
+    match status {
+        "up" => "#4c1",
+        "down" => "#e05d44",
+        "degraded" => "#fe7d37",
+        _ => "#9f9f9f",
+    }
+}
+
+fn uptime_color(permille: i64) -> &'static str {
+    if permille >= 999 {
+        "#4c1"
+    } else if permille >= 990 {
+        "#97ca00"
+    } else if permille >= 950 {
+        "#dfb317"
+    } else if permille >= 900 {
+        "#fe7d37"
+    } else {
+        "#e05d44"
+    }
+}
+
+fn svg_response(svg: String) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=60"),
+        ],
+        svg,
+    )
+}
+
+/// Render a flat shields-style badge: a grey label and a coloured message.
+fn badge(label: &str, message: &str, color: &str) -> String {
+    let label_w = coord_usize(label.chars().count()) * BADGE_CHAR_W + 2.0 * BADGE_PAD;
+    let message_w = coord_usize(message.chars().count()) * BADGE_CHAR_W + 2.0 * BADGE_PAD;
+    let total_w = label_w + message_w;
+    let label_x = label_w / 2.0;
+    let message_x = label_w + message_w / 2.0;
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total_w:.0}\" height=\"20\" role=\"img\" aria-label=\"{label}: {message}\">\
+         <title>{label}: {message}</title>\
+         <linearGradient id=\"g\" x2=\"0\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#bbb\" stop-opacity=\".1\"/><stop offset=\"1\" stop-opacity=\".1\"/></linearGradient>\
+         <clipPath id=\"r\"><rect width=\"{total_w:.0}\" height=\"20\" rx=\"3\" fill=\"#fff\"/></clipPath>\
+         <g clip-path=\"url(#r)\">\
+         <rect width=\"{label_w:.0}\" height=\"20\" fill=\"#555\"/>\
+         <rect x=\"{label_w:.0}\" width=\"{message_w:.0}\" height=\"20\" fill=\"{color}\"/>\
+         <rect width=\"{total_w:.0}\" height=\"20\" fill=\"url(#g)\"/>\
+         </g>\
+         <g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana,Geneva,DejaVu Sans,sans-serif\" font-size=\"11\">\
+         <text x=\"{label_x:.0}\" y=\"15\" fill=\"#010101\" fill-opacity=\".3\">{label}</text>\
+         <text x=\"{label_x:.0}\" y=\"14\">{label}</text>\
+         <text x=\"{message_x:.0}\" y=\"15\" fill=\"#010101\" fill-opacity=\".3\">{message}</text>\
+         <text x=\"{message_x:.0}\" y=\"14\">{message}</text>\
+         </g></svg>"
     )
 }
 
@@ -731,6 +858,19 @@ mod tests {
     }
 
     #[test]
+    fn day_cell_reds_only_real_outages() {
+        let row = |up, down| DayRow {
+            day: "2021-01-01".to_owned(),
+            up,
+            down,
+            degraded: 0,
+        };
+        assert_eq!(day_cell("d".to_owned(), &row(100, 0)).state, "up"); // 100%
+        assert_eq!(day_cell("d".to_owned(), &row(1439, 1)).state, "degraded"); // ~99.9% blip
+        assert_eq!(day_cell("d".to_owned(), &row(1400, 40)).state, "down"); // ~97% outage
+    }
+
+    #[test]
     fn sparkline_renders_svg_with_status_class() {
         assert!(sparkline(&[], "up").contains("no data"));
         let points = vec![
@@ -746,5 +886,41 @@ mod tests {
         let svg = sparkline(&points, "degraded");
         assert!(svg.contains("class=\"spark degraded\""));
         assert!(svg.contains("spark-line"));
+    }
+
+    #[test]
+    fn badge_has_label_message_and_color() {
+        let svg = badge("status", "up", status_color("up"));
+        assert!(svg.starts_with("<svg"));
+        assert!(svg.contains(">status<") && svg.contains(">up<"));
+        assert!(svg.contains(status_color("up")));
+    }
+
+    #[test]
+    fn uptime_color_tiers() {
+        assert_eq!(uptime_color(1000), "#4c1");
+        assert_eq!(uptime_color(995), "#97ca00");
+        assert_eq!(uptime_color(800), "#e05d44");
+    }
+
+    #[tokio::test]
+    async fn status_badge_is_svg() {
+        let res = test_app()
+            .await
+            .oneshot(get("/api/badge/web/status"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers().get("content-type").unwrap(), "image/svg+xml");
+    }
+
+    #[tokio::test]
+    async fn unknown_badge_is_404() {
+        let res = test_app()
+            .await
+            .oneshot(get("/api/badge/nope/uptime"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -16,10 +16,12 @@ Initial release.
 - **Monitors** — HTTP and TCP probes with per-monitor interval, timeout, expected
   status, a "degraded if slower than" threshold, and custom request headers.
 - **Status page** — server-rendered (no JS framework) compact, responsive grid:
-  daily uptime bars, an inline SVG 24h latency chart, auto-refresh, Cal Sans
-  branding and an SVG favicon.
+  daily uptime bars graded by severity, an inline SVG 24h latency chart,
+  auto-refresh, Cal Sans branding and an SVG favicon.
 - **JSON API** — `GET /api/summary` and `GET /api/monitors/{id}/latency`, plus a
   generated OpenAPI 3.1 document at `/api/openapi.json` (`utoipa`).
+- **Badges** — embeddable flat SVG status and uptime badges per monitor at
+  `/api/badge/{id}/status` and `/api/badge/{id}/uptime`.
 - **TLS certificate expiry monitoring** with advance warnings.
 - **Notifications** — a pluggable `Notifier` trait with a built-in Telegram
   channel; alerts fire only after _N_ consecutive failures (anti-flapping),
