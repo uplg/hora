@@ -7,22 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-07
+
+A status-page polish pass. No configuration changes.
+
+### Changed
+
+- The grid uses the full width on large displays instead of being capped at
+  ~1100px, so it is not stranded in the middle of a wide monitor.
+- The latency caption is less verbose and the SLO / TLS badges stack in a column.
+- A day's uptime bar stays amber as long as it was mostly up (down to 90%); it
+  only turns red for a real outage (majority down) instead of below 99%.
+- Active maintenance windows now show in a top banner with their reason and the
+  affected monitors; the card only gets a left-border accent, so a long reason
+  never changes a card's height or disturbs the grid.
+
 ## [0.2.0] - 2026-06-07
 
 A large feature release. **Breaking**: notification configuration moved to named
-channels — see _Changed_ and the migration note in the README.
+channels - see _Changed_ and the migration note in the README.
 
 ### Added
 
-- **Monitor types & checks** — HTTP body assertions (`keyword` / `keyword_invert`
+- **Monitor types & checks** - HTTP body assertions (`keyword` / `keyword_invert`
   and a `JSONPath` `json_query` / `json_expected`, with a configurable `max_body_kb`
   cap); per-monitor HTTP/SOCKS `proxy`; and **push / heartbeat** monitors
   (`kind = "push"`) that go down when a job stops calling `POST /api/push/{id}`.
-- **Notification channels** — Discord, Slack, a generic JSON webhook and SMTP
+- **Notification channels** - Discord, Slack, a generic JSON webhook and SMTP
   e-mail, in addition to Telegram. Channels are **named** (`[[channels]]` with a
   `type`), so several can share a type, and each monitor can route to specific ones
   with `notify = ["name", ...]`.
-- **Latency percentiles** — p50/p95/p99 over 24h on the page and API, with an
+- **Latency percentiles** - p50/p95/p99 over 24h on the page and API, with an
   optional `slo_latency_ms` objective flagged met/breached.
 - **Scheduled maintenance windows** (`[[maintenance]]`) that mute alerts for the
   affected monitors (checks are still recorded).
@@ -52,7 +67,7 @@ A review, hardening and performance pass. No configuration changes required.
 
 - A failing database query for one monitor no longer blanks out the whole status
   page or `/api/summary`; that monitor degrades to an `unknown` card instead.
-- `docker stop` now triggers a graceful shutdown — the server listens for
+- `docker stop` now triggers a graceful shutdown - the server listens for
   `SIGTERM` in addition to `Ctrl-C`/`SIGINT`.
 - The shared HTTP client now has request and connect timeouts, so a hung
   Telegram API connection can no longer stall a monitor's probing loop.
@@ -88,33 +103,34 @@ Initial release.
 
 ### Added
 
-- **Monitors** — HTTP and TCP probes with per-monitor interval, timeout, expected
+- **Monitors** - HTTP and TCP probes with per-monitor interval, timeout, expected
   status, a "degraded if slower than" threshold, and custom request headers.
-- **Status page** — server-rendered (no JS framework) compact, responsive grid:
+- **Status page** - server-rendered (no JS framework) compact, responsive grid:
   daily uptime bars graded by severity, an inline SVG 24h latency chart,
   auto-refresh, Cal Sans branding and an SVG favicon.
-- **JSON API** — `GET /api/summary` and `GET /api/monitors/{id}/latency`, plus a
+- **JSON API** - `GET /api/summary` and `GET /api/monitors/{id}/latency`, plus a
   generated OpenAPI 3.1 document at `/api/openapi.json` (`utoipa`).
-- **Badges** — embeddable flat SVG status and uptime badges per monitor at
+- **Badges** - embeddable flat SVG status and uptime badges per monitor at
   `/api/badge/{id}/status` and `/api/badge/{id}/uptime`.
 - **TLS certificate expiry monitoring** with advance warnings.
-- **Notifications** — a pluggable `Notifier` trait with a built-in Telegram
+- **Notifications** - a pluggable `Notifier` trait with a built-in Telegram
   channel; alerts fire only after _N_ consecutive failures (anti-flapping),
   include a snippet of the failing response body, and a recovery message.
-- **Storage** — SQLite (sqlx) with per-monitor retention and automatic pruning.
-- **Live configuration reload** — file-watch and `SIGHUP`: monitors, thresholds,
+- **Storage** - SQLite (sqlx) with per-monitor retention and automatic pruning.
+- **Live configuration reload** - file-watch and `SIGHUP`: monitors, thresholds,
   retention and notification channels are reconciled in place, with no downtime
   for unchanged monitors.
-- **API hardening** — per-IP rate limiting (`x-ratelimit-*` / `retry-after`
+- **API hardening** - per-IP rate limiting (`x-ratelimit-*` / `retry-after`
   headers), strict Content-Security-Policy, `X-Content-Type-Options` and
   `Referrer-Policy`.
-- **Performance** — a lock-free, single-flight summary cache (busted on config
+- **Performance** - a lock-free, single-flight summary cache (busted on config
   reload) and concurrent per-monitor queries keep responses fast under load.
-- **Packaging** — a static musl binary in a ~25 MB Alpine image (multi-arch
+- **Packaging** - a static musl binary in a ~25 MB Alpine image (multi-arch
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/uplg/hora/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/uplg/hora/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/uplg/hora/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/uplg/hora/releases/tag/v0.1.0

@@ -2,7 +2,7 @@ name: CI
 
 # Checks run on pushes to main and on pull requests. A tag additionally builds
 # and pushes the image and publishes the release. The image is built only on tags
-# (never twice for one commit) — push main and the tag separately for one run each.
+# (never twice for one commit) - push main and the tag separately for one run each.
 on:
   pull_request:
   push:
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
 
-  # Build & publish the image once checks pass — tags only, so it builds once.
+  # Build & publish the image once checks pass - tags only, so it builds once.
   docker:
     needs: [check, deny]
     if: startsWith(github.ref, 'refs/tags/v')

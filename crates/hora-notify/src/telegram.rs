@@ -77,7 +77,7 @@ impl Notifier for TelegramNotifier {
                 warn!(status = %response.status(), "telegram rejected the message");
             }
             Ok(_) => {}
-            // reqwest errors embed the request URL, which contains the bot token —
+            // reqwest errors embed the request URL, which contains the bot token -
             // strip it so it never reaches the logs.
             Err(err) => warn!(
                 "telegram request failed: {}",

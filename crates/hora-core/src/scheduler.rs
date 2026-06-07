@@ -110,7 +110,7 @@ async fn run(
 
 /// Evaluate a push monitor from its stored heartbeats: down (and record it) when
 /// none arrived within the interval, up when one did. `None` means no heartbeat
-/// yet (or a read error) — the loop skips this tick, leaving the status unknown.
+/// yet (or a read error) - the loop skips this tick, leaving the status unknown.
 async fn heartbeat_outcome(pool: &SqlitePool, monitor: &Monitor) -> Option<Outcome> {
     let last = match db::last_check_time(pool, &monitor.id).await {
         Ok(Some(last)) => last,
@@ -134,7 +134,7 @@ async fn heartbeat_outcome(pool: &SqlitePool, monitor: &Monitor) -> Option<Outco
         }
         Some(outcome)
     } else {
-        // Recent heartbeat — up, already recorded by the endpoint.
+        // Recent heartbeat - up, already recorded by the endpoint.
         Some(Outcome {
             up: true,
             degraded: false,

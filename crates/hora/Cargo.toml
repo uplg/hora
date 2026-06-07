@@ -1,6 +1,6 @@
 [package]
 name = "hora"
-description = "Hora — a tiny self-hosted uptime monitor with a status page, JSON API and alerts."
+description = "Hora - a tiny self-hosted uptime monitor with a status page, JSON API and alerts."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

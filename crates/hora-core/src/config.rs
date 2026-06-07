@@ -29,15 +29,21 @@ pub struct Config {
 }
 
 impl Config {
-    /// Whether `monitor_id` is inside an active maintenance window at `now`
-    /// (alerts are muted). A window with no `monitors` list covers all of them.
+    /// The maintenance window covering `monitor_id` at `now`, if any. A window
+    /// with no `monitors` list covers all of them.
     #[must_use]
-    pub fn in_maintenance(&self, monitor_id: &str, now: DateTime<Utc>) -> bool {
-        self.maintenance.iter().any(|window| {
+    pub fn active_maintenance(&self, monitor_id: &str, now: DateTime<Utc>) -> Option<&Maintenance> {
+        self.maintenance.iter().find(|window| {
             now >= window.start
                 && now <= window.end
                 && (window.monitors.is_empty() || window.monitors.iter().any(|id| id == monitor_id))
         })
+    }
+
+    /// Whether `monitor_id` is inside an active maintenance window (alerts muted).
+    #[must_use]
+    pub fn in_maintenance(&self, monitor_id: &str, now: DateTime<Utc>) -> bool {
+        self.active_maintenance(monitor_id, now).is_some()
     }
 }
 
@@ -113,7 +119,7 @@ pub struct Server {
     pub allowed_origins: Vec<String>,
     /// Trust this request header for the client IP when rate limiting (e.g.
     /// `cf-connecting-ip` behind Cloudflare). Only safe when a proxy you control
-    /// sets it and direct access to the origin is blocked — otherwise clients can
+    /// sets it and direct access to the origin is blocked - otherwise clients can
     /// forge it. Unset = smart detection (x-forwarded-for / x-real-ip / peer).
     #[serde(default)]
     pub client_ip_header: Option<String>,
@@ -177,8 +183,8 @@ impl Channel {
         }
     }
 
-    /// Whether the channel's required secret is present (an empty one — e.g. an
-    /// unset `${VAR}` — disables the channel rather than erroring at send time).
+    /// Whether the channel's required secret is present (an empty one - e.g. an
+    /// unset `${VAR}` - disables the channel rather than erroring at send time).
     #[must_use]
     pub fn is_configured(&self) -> bool {
         match self {

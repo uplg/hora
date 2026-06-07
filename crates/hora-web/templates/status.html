@@ -43,9 +43,17 @@
     }
 
     .wrap {
-      max-width: 1100px;
+      width: 100%;
+      max-width: 1500px;
       margin: 0 auto;
       padding: 40px 20px 56px;
+    }
+
+    /* On large displays, use the width instead of stranding the grid in the middle. */
+    @media (min-width: 1700px) {
+      .wrap {
+        max-width: 92vw;
+      }
     }
 
     .top {
@@ -254,6 +262,13 @@
       margin-top: 5px;
     }
 
+    .caption-badges {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+    }
+
     .cert.warn {
       color: var(--degraded);
     }
@@ -334,14 +349,14 @@
       font-size: 13px;
     }
 
-    .maint {
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: .04em;
-      color: var(--degraded);
-      border: 1px solid var(--degraded);
-      border-radius: 4px;
-      padding: 1px 5px;
+    /* Maintenance only accents the card border (no height change → grid stays
+       uniform); the reason is shown in the top banner. */
+    .card.under-maint {
+      border-left: 3px solid var(--degraded);
+    }
+
+    .incident.maintenance {
+      border-left-color: var(--degraded);
     }
 
     footer {
@@ -387,19 +402,31 @@
     </div>
     {% endif %}
 
+    {% if !summary.maintenances.is_empty() %}
+    <div class="incidents">
+      {% for m in summary.maintenances %}
+      <div class="incident maintenance">
+        <div class="incident-head">
+          <span class="incident-title">Maintenance{% if !m.reason.is_empty() %} · {{ m.reason }}{% endif %}</span>
+          <span class="incident-at">{{ m.monitors }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     {% if summary.monitors.is_empty() %}
     <p class="empty-state">No monitors configured yet.</p>
     {% else %}
     <div class="grid">
       {% for monitor in summary.monitors %}
-      <section class="card">
+      <section class="card{% if monitor.maintenance.is_some() %} under-maint{% endif %}">
         <div class="card-head">
           <span class="dot {{ monitor.status }}"></span>
           <span class="name">{{ monitor.name }}</span>
-          {% if monitor.maintenance %}<span class="maint" title="Maintenance — alerts muted">maintenance</span>{% endif %}
           <span class="meta">
-            <span>{% if let Some(label) = monitor.uptime_label %}{{ label }}{% else %}—{% endif %}</span>
-            <span><b>{% if let Some(ms) = monitor.last_latency_ms %}{{ ms }}ms{% else %}—{% endif %}</b></span>
+            <span>{% if let Some(label) = monitor.uptime_label %}{{ label }}{% else %}-{% endif %}</span>
+            <span><b>{% if let Some(ms) = monitor.last_latency_ms %}{{ ms }}ms{% else %}-{% endif %}</b></span>
           </span>
         </div>
 
@@ -411,12 +438,11 @@
 
         {{ monitor.chart_svg|safe }}
         <div class="caption">
-          <span>response · 24h{% if let Some(p95) = monitor.p95_ms %} · p95 {{ p95 }}ms{% endif %}{% if let
-            Some(p99) = monitor.p99_ms %} · p99 {{ p99 }}ms{% endif %}</span>
-          <span>
+          <span>24h{% if let Some(p95) = monitor.p95_ms %} · p95 {{ p95 }}ms{% endif %}{% if let Some(p99) =
+            monitor.p99_ms %} · p99 {{ p99 }}ms{% endif %}</span>
+          <span class="caption-badges">
             {% if monitor.slo_state != "none" %}{% if let Some(target) = monitor.slo_latency_ms %}<span
-              class="slo {{ monitor.slo_state }}" title="24h p95 vs SLO objective">SLO {{ target }}ms</span> {% endif %}{%
-              endif %}
+              class="slo {{ monitor.slo_state }}" title="24h p95 vs {{ target }}ms SLO">SLO</span>{% endif %}{% endif %}
             {% if let Some(cert) = monitor.cert_label %}<span class="cert {{ monitor.cert_state }}">TLS {{ cert
               }}</span>{% endif %}
           </span>

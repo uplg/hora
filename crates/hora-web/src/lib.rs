@@ -55,7 +55,7 @@ static OPENAPI_JSON: LazyLock<String> =
         description = "Read-only JSON API of a Hora uptime monitor."
     ),
     paths(summary_json, latency_json, push, status_badge, uptime_badge, healthz),
-    components(schemas(Summary, MonitorView, IncidentView, DayCell, Point))
+    components(schemas(Summary, MonitorView, IncidentView, MaintenanceView, DayCell, Point))
 )]
 struct ApiDoc;
 
@@ -453,6 +453,7 @@ struct Summary {
     #[serde(skip)]
     updated_utc: String,
     incidents: Vec<IncidentView>,
+    maintenances: Vec<MaintenanceView>,
     monitors: Vec<MonitorView>,
 }
 
@@ -462,6 +463,12 @@ struct IncidentView {
     body: String,
     severity: &'static str,
     at: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct MaintenanceView {
+    reason: String,
+    monitors: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -485,8 +492,8 @@ struct MonitorView {
     slo_latency_ms: Option<i64>,
     #[serde(skip)]
     slo_state: &'static str,
-    /// Inside an active maintenance window (alerts muted).
-    maintenance: bool,
+    /// Active maintenance window title (alerts muted); `None` outside a window.
+    maintenance: Option<String>,
     #[serde(rename = "cert_expiry_days")]
     cert_days: Option<i64>,
     #[serde(skip)]
@@ -555,7 +562,9 @@ async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
                 tracing::warn!(monitor = %monitor.id, "failed to build monitor view: {err:#}");
                 unknown_view(monitor)
             });
-            view.maintenance = config.in_maintenance(&monitor.id, now);
+            view.maintenance = config
+                .active_maintenance(&monitor.id, now)
+                .map(|window| window.title.clone());
             view
         })
         .collect();
@@ -577,6 +586,36 @@ async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
         })
         .collect();
 
+    // Active maintenance windows shown as a top banner (so a long reason never
+    // changes a card's height and disturbs the grid).
+    let maintenances = config
+        .maintenance
+        .iter()
+        .filter(|window| now >= window.start && now <= window.end)
+        .map(|window| {
+            let monitors = if window.monitors.is_empty() {
+                "all monitors".to_owned()
+            } else {
+                window
+                    .monitors
+                    .iter()
+                    .map(|id| {
+                        config
+                            .monitors
+                            .iter()
+                            .find(|monitor| &monitor.id == id)
+                            .map_or(id.as_str(), |monitor| monitor.name.as_str())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            MaintenanceView {
+                reason: window.title.clone(),
+                monitors,
+            }
+        })
+        .collect();
+
     Summary {
         title: config.page.title.clone(),
         overall,
@@ -584,6 +623,7 @@ async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
         generated_at: now.to_rfc3339(),
         updated_utc: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         incidents,
+        maintenances,
         monitors,
     }
 }
@@ -603,7 +643,7 @@ fn unknown_view(monitor: &Monitor) -> MonitorView {
         p99_ms: None,
         slo_latency_ms: None,
         slo_state: "none",
-        maintenance: false,
+        maintenance: None,
         cert_days: None,
         cert_label: None,
         cert_state: "none",
@@ -628,7 +668,7 @@ async fn build_monitor_view(
 
     let points = db::latency_series(pool, &monitor.id, ctx.since_24h).await?;
     let chart_svg = sparkline(&points, status);
-    // Percentiles come from the series we already fetched — no extra query.
+    // Percentiles come from the series we already fetched - no extra query.
     let pct = percentiles(&points);
     let slo_state = slo_state(monitor.slo_latency_ms, pct.map(|p| p.p95));
 
@@ -651,7 +691,7 @@ async fn build_monitor_view(
         slo_latency_ms: monitor.slo_latency_ms,
         slo_state,
         // Overridden in `build_summary`, which has the live config and `now`.
-        maintenance: false,
+        maintenance: None,
         cert_days,
         cert_label: cert_days.map(cert_label),
         cert_state: cert_state_for(cert_days, ctx.cert_threshold),
@@ -795,8 +835,9 @@ fn build_bar(daily: &[DayRow], now: DateTime<Utc>, days: u16) -> Vec<DayCell> {
     cells
 }
 
-/// A day's cell turns red only for a real outage; a brief blip stays amber.
-const DAY_OUTAGE_BELOW_PERMILLE: i64 = 990; // < 99% availability over the day
+/// A day stays amber as long as it was mostly up; it only turns red once the day
+/// was a real outage (majority down).
+const DAY_OUTAGE_BELOW_PERMILLE: i64 = 900; // < 90% availability over the day
 
 fn day_cell(date: String, row: &DayRow) -> DayCell {
     let total = row.up + row.down + row.degraded;
@@ -1173,7 +1214,8 @@ mod tests {
         };
         assert_eq!(day_cell("d".to_owned(), &row(100, 0)).state, "up"); // 100%
         assert_eq!(day_cell("d".to_owned(), &row(1439, 1)).state, "degraded"); // ~99.9% blip
-        assert_eq!(day_cell("d".to_owned(), &row(1400, 40)).state, "down"); // ~97% outage
+        assert_eq!(day_cell("d".to_owned(), &row(1400, 40)).state, "degraded"); // ~97% - mostly up
+        assert_eq!(day_cell("d".to_owned(), &row(800, 640)).state, "down"); // ~56% - real outage
     }
 
     #[test]

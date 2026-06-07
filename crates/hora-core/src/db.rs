@@ -55,7 +55,7 @@ pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         // NORMAL is the recommended durability level under WAL: writes fsync only
-        // at checkpoint, not on every probe insert. Safe for this time series —
+        // at checkpoint, not on every probe insert. Safe for this time series -
         // at worst a power loss drops the last few checks.
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5))
@@ -295,7 +295,7 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
 
     // Drop everything left behind by monitors removed from the config. The ids
     // to keep travel as a single JSON array, expanded by SQLite's `json_each`
-    // and matched with a `NOT EXISTS` anti-join — one static statement per
+    // and matched with a `NOT EXISTS` anti-join - one static statement per
     // table, with no `IN`-list size limit.
     let keep: Vec<&str> = config.monitors.iter().map(|m| m.id.as_str()).collect();
     let keep = serde_json::to_string(&keep)?;

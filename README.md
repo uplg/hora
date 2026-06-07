@@ -8,7 +8,7 @@
 A tiny, self-hosted uptime monitor written in Rust. One small binary probes your
 services, stores history in SQLite, alerts you when something breaks (or a TLS
 certificate is about to expire), and serves a server-rendered status page plus a
-JSON API. The Docker image is a static musl binary on Alpine — about 15 MB.
+JSON API. The Docker image is a static musl binary on Alpine - about 15 MB.
 
 Named after the **Horai**, the Greek goddesses of the hours.
 
@@ -16,18 +16,18 @@ Named after the **Horai**, the Greek goddesses of the hours.
 
 ## Features
 
-- **HTTP, TCP, push & assertion probes** — per-monitor interval, timeout, expected
+- **HTTP, TCP, push & assertion probes** - per-monitor interval, timeout, expected
   status and a "degraded if slower than" threshold. HTTP monitors can assert a
   **keyword** in the body or a **JSONPath** (`json_query` / `json_expected`), route
   through an HTTP/SOCKS **proxy**, and send custom headers. **Push** (heartbeat)
   monitors flip to down when a job stops pinging `/api/push/{id}`.
 - **Server-rendered status page** (no JavaScript framework): a compact, responsive
-  grid — daily uptime bars, an inline SVG latency chart, **p95/p99 latency** with an
+  grid - daily uptime bars, an inline SVG latency chart, **p95/p99 latency** with an
   optional **latency SLO** indicator, plus an **incidents/announcements** banner.
 - **JSON API** to read status and latency history from anywhere, with a generated
   **OpenAPI 3.1** document at `/api/openapi.json`.
 - **TLS certificate expiry monitoring** with advance warnings.
-- **Pluggable notifications** via a `Notifier` trait — **Telegram, Discord, Slack, a
+- **Pluggable notifications** via a `Notifier` trait - **Telegram, Discord, Slack, a
   generic JSON webhook and SMTP e-mail** built in. Channels are **named**, so you can
   have several of the same type and **route each monitor** to specific ones
   (`notify = [...]`). Alerts fire only after _N_ consecutive failures (so flapping
@@ -36,7 +36,7 @@ Named after the **Horai**, the Greek goddesses of the hours.
 - **Per-IP API rate limiting** on the JSON endpoints, with a configurable trusted
   client-IP header (e.g. `cf-connecting-ip` behind Cloudflare).
 - **Live config reload**: edit `config.toml` (or send `SIGHUP`) and monitors,
-  thresholds, retention _and notification channels_ are reconciled in place —
+  thresholds, retention _and notification channels_ are reconciled in place -
   existing checks never pause, so there is no blind window.
 - **Per-monitor retention** with automatic pruning; the database does not grow
   forever.
@@ -57,7 +57,7 @@ docker run -d --name hora --restart unless-stopped \
 ```
 
 The status page is at `http://localhost:8787/`. Put it behind your reverse proxy
-on whatever domain you like — Hora is self-contained and assumes nothing about who
+on whatever domain you like - Hora is self-contained and assumes nothing about who
 consumes it.
 
 Secrets are best kept in the environment: any `${VAR}` in the config is replaced
@@ -116,10 +116,10 @@ To add, remove or change a monitor **without downtime**, just edit the config:
 
 - **Bare metal / mounted directory:** Hora watches the file and reloads
   automatically.
-- **Anywhere:** `kill -HUP <pid>` — or in Docker, `docker kill -s HUP hora`.
+- **Anywhere:** `kill -HUP <pid>` - or in Docker, `docker kill -s HUP hora`.
 
 On reload, unchanged monitors keep running untouched; only new/removed/changed
-ones are started or stopped, and the notification channels are rebuilt — so
+ones are started or stopped, and the notification channels are rebuilt - so
 adding a Telegram token takes effect live too. Only `server.bind` and the API
 rate-limit settings are read once at startup and still require a restart.
 
@@ -140,7 +140,7 @@ The `/api/*` endpoints (summary, latency, push) are **rate-limited per client IP
 (configurable; read once at startup) and send `x-ratelimit-*` / `retry-after`
 headers; the badges and `/api/openapi.json` are not. The client IP is taken from
 `X-Forwarded-For` / `X-Real-IP` by default, so run Hora behind a proxy that sets
-it — a direct client could otherwise spoof it. Behind Cloudflare, set
+it - a direct client could otherwise spoof it. Behind Cloudflare, set
 `server.client_ip_header = "cf-connecting-ip"` and lock the origin to Cloudflare.
 `allowed_origins` controls CORS (empty = allow any, since the data is read-only and
 public). Responses carry a strict CSP and `X-Content-Type-Options: nosniff`.
@@ -163,14 +163,14 @@ incidents, red for an outage. A 404 is returned for an unknown id.
 
 A small Cargo workspace:
 
-- **`hora-notify`** — the `Notifier` trait, `Event` type, `Dispatcher`, and the
+- **`hora-notify`** - the `Notifier` trait, `Event` type, `Dispatcher`, and the
   Telegram / Discord / Slack / webhook / SMTP implementations. Add a channel by
   implementing the trait.
-- **`hora-core`** — configuration, probing, SQLite storage, TLS-expiry checks, the
+- **`hora-core`** - configuration, probing, SQLite storage, TLS-expiry checks, the
   per-monitor scheduler, and the supervisor that owns live config + reconciles
   monitor tasks on reload.
-- **`hora-web`** — the axum router, view model and Askama status page template.
-- **`hora`** — the binary that wires it all together.
+- **`hora-web`** - the axum router, view model and Askama status page template.
+- **`hora`** - the binary that wires it all together.
 
 ## Development
 
@@ -189,8 +189,8 @@ Requires a C toolchain + `cmake` (for `aws-lc-rs`, the rustls crypto provider).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
 
 The status page embeds the [Cal Sans](https://github.com/calcom/font) font, used
-under the SIL Open Font License — see
+under the SIL Open Font License - see
 [`crates/hora-web/assets/OFL.txt`](crates/hora-web/assets/OFL.txt).

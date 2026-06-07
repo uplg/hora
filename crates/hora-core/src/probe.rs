@@ -186,7 +186,7 @@ async fn tcp(monitor: &Monitor) -> Outcome {
 }
 
 /// Apply every configured header to the request. reqwest *appends* headers, so
-/// each distinct header is kept — none overwrites another.
+/// each distinct header is kept - none overwrites another.
 fn with_headers(mut request: RequestBuilder, headers: &HashMap<String, String>) -> RequestBuilder {
     for (name, value) in headers {
         request = request.header(name, value);

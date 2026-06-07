@@ -1,4 +1,4 @@
-//! Hora — a tiny self-hosted uptime monitor.
+//! Hora - a tiny self-hosted uptime monitor.
 //!
 //! Wires the pieces together: load config, open the database, start the
 //! supervisor (which owns the live config and notification channels), spawn the
@@ -53,8 +53,8 @@ fn init_tracing() {
 }
 
 /// Resolve when the process receives a shutdown signal. Listens for Ctrl-C on
-/// every platform and, on Unix, also `SIGTERM` — the signal `docker stop` and
-/// most init systems send — so the server drains in-flight requests cleanly
+/// every platform and, on Unix, also `SIGTERM` - the signal `docker stop` and
+/// most init systems send - so the server drains in-flight requests cleanly
 /// instead of being killed after the grace period.
 async fn shutdown_signal() {
     let ctrl_c = async {

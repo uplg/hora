@@ -3,7 +3,7 @@
 //! The live config is shared through a [`watch`] channel every component reads.
 //! On SIGHUP or a change to the config file, the file is re-read and the running
 //! monitor tasks are reconciled: new monitors start, removed ones stop, changed
-//! ones restart — unchanged monitors keep running, so a reload never interrupts
+//! ones restart - unchanged monitors keep running, so a reload never interrupts
 //! existing checks.
 //!
 //! `server.bind` and notification credentials are read once at startup; changing

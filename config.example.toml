@@ -6,7 +6,7 @@
 
 [page]
 # Title shown on the public status page and in the browser tab.
-title = "Hora — Status"
+title = "Hora - Status"
 # Number of days rendered in the daily uptime bar.
 history_days = 90
 
