@@ -14,8 +14,9 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::Client;
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
@@ -69,10 +70,32 @@ async fn supervise(
     let mut running: HashMap<String, Running> = HashMap::new();
     reconcile(&mut running, &rx, &pool, &notifier);
 
+    // The raw text last applied: a file event whose content is unchanged (a touch,
+    // or a spurious event from some filesystems) is ignored, so a flapping watcher
+    // can never spin the supervisor.
+    let mut last_raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+
     let mut reloads = reload_signals(&config_path);
     while reloads.recv().await.is_some() {
-        match config::load_from(&config_path) {
+        // Debounce: let a burst settle, then drain everything that piled up, so one
+        // edit (which fires several events) becomes a single reload.
+        tokio::time::sleep(RELOAD_DEBOUNCE).await;
+        while reloads.try_recv().is_ok() {}
+
+        let raw = match std::fs::read_to_string(&config_path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                warn!("config reload skipped, cannot read file: {err:#}");
+                continue;
+            }
+        };
+        if raw == last_raw {
+            continue; // Content unchanged: nothing to do.
+        }
+
+        match config::parse(&raw) {
             Ok(config) => {
+                last_raw = raw;
                 let config = Arc::new(config);
                 // Rebuild the channels too, so credential/channel changes apply live.
                 notifier.store(Arc::new(notifications::build(&config, &client)));
@@ -90,6 +113,10 @@ async fn supervise(
         }
     }
 }
+
+/// How long to wait after the first file event before reloading, so a burst of
+/// events (and any self-triggered ones) collapse into a single reload.
+const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Diff running tasks against the latest config: stop removed or changed
 /// monitors, start new or changed ones, leave unchanged ones untouched.
@@ -194,6 +221,11 @@ fn file_watcher(config_path: &Path, tx: mpsc::Sender<()>) -> notify::Result<Reco
 
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else { return };
+        // Ignore access (read) events: reading the file - including our own reload
+        // read - must never trigger a reload, or the watcher feeds itself forever.
+        if matches!(event.kind, EventKind::Access(_)) {
+            return;
+        }
         let touches_config = event
             .paths
             .iter()

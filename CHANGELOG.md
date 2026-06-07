@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-07
+
+### Fixed
+
+- A config file event whose content is unchanged (a `touch`, or a spurious event
+  that some filesystems and Docker bind mounts emit) no longer triggers a reload.
+  The watcher could otherwise feed itself in a tight loop - reloading thousands of
+  times a second and pinning a CPU core. Reloads are now debounced, ignore read
+  (access) events, and only run when the file content actually changed.
+
 ## [0.2.1] - 2026-06-07
 
 A status-page polish pass. No configuration changes.
@@ -129,7 +139,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/uplg/hora/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/uplg/hora/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/uplg/hora/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/uplg/hora/compare/v0.1.0...v0.1.1
