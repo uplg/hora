@@ -10,7 +10,9 @@ services, stores history in SQLite, alerts you when something breaks (or a TLS
 certificate is about to expire), and serves a server-rendered status page plus a
 JSON API. The Docker image is a static musl binary on Alpine — about 15 MB.
 
-Named after the **Horai** — the Greek goddesses of the hours.
+Named after the **Horai**, the Greek goddesses of the hours.
+
+![Hora](./docs/screenshot.jpg)
 
 ## Features
 
