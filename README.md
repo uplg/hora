@@ -95,17 +95,32 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /` | The HTML status page. |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), cert days left, daily history. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
+| `GET /api/badge/{id}/status` | Embeddable SVG status badge for a monitor. |
+| `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge for a monitor. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code (`utoipa`). |
 | `GET /healthz` | Liveness probe. |
 
-The `/api/*` routes are **rate-limited per client IP** (configurable; the limit is
-read once at startup) and send `x-ratelimit-*` / `retry-after` headers. The client
-IP comes from `X-Forwarded-For`, so run Hora behind a proxy that sets it — a direct
-client could otherwise spoof it. `allowed_origins` controls CORS (empty = allow any,
-since the data is read-only and public). Responses carry a strict CSP and
-`X-Content-Type-Options: nosniff`.
+The data endpoints (`/api/summary` and `/api/monitors/{id}/latency`) are
+**rate-limited per client IP** (configurable; the limit is read once at startup)
+and send `x-ratelimit-*` / `retry-after` headers; the badges and
+`/api/openapi.json` are not. The client IP comes from `X-Forwarded-For`, so run
+Hora behind a proxy that sets it — a direct client could otherwise spoof it.
+`allowed_origins` controls CORS (empty = allow any, since the data is read-only and
+public). Responses carry a strict CSP and `X-Content-Type-Options: nosniff`.
 
 Point any client (Bruno, Insomnia, Scalar, Swagger Editor…) at `/api/openapi.json`.
+
+### Badges
+
+Embed a monitor's live status and 24h uptime in a README, by its config `id`:
+
+```md
+![status](https://status.example.com/api/badge/web/status)
+![uptime](https://status.example.com/api/badge/web/uptime)
+```
+
+Flat shields-style SVGs: green when up / uptime is high, amber for minor
+incidents, red for an outage. A 404 is returned for an unknown id.
 
 ## Architecture
 
