@@ -7,12 +7,21 @@ use reqwest::Client;
 use sqlx::SqlitePool;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::{Config, Kind, Monitor};
 use crate::notifications::Notifiers;
 use crate::probe::Outcome;
 use crate::{db, probe};
+
+/// The level a monitor was most recently alerted at, so we never re-alert the
+/// same state and can detect transitions (escalation, recovery).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlertLevel {
+    Healthy,
+    Degraded,
+    Down,
+}
 
 /// Spawn the probing loop for a single monitor. Aborting the returned handle
 /// stops the loop (used by the supervisor when a monitor is removed or changed);
@@ -40,8 +49,9 @@ async fn run(
     // Fixed cadence: the tick interval does not drift by the probe duration.
     let mut ticker = tokio::time::interval(monitor.interval());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut consecutive_failures: u32 = 0;
-    let mut alerted_down = false;
+    let mut consecutive_down: u32 = 0;
+    let mut consecutive_degraded: u32 = 0;
+    let mut alerted = AlertLevel::Healthy;
 
     loop {
         tokio::select! {
@@ -67,11 +77,12 @@ async fn run(
         // Read live: a maintenance window mutes alerts; a reloaded threshold
         // applies immediately.
         let now = chrono::Utc::now();
-        let (muted, threshold) = {
+        let (muted, threshold, alert_on_degraded) = {
             let snapshot = config.borrow();
             (
                 snapshot.in_maintenance(&monitor.id, now),
                 snapshot.alerts.fail_threshold.max(1),
+                snapshot.alerts.alert_on_degraded,
             )
         };
         if muted {
@@ -79,25 +90,13 @@ async fn run(
             continue;
         }
 
-        if outcome.up {
-            if alerted_down {
-                info!(monitor = %monitor.id, "recovered");
-                notifier
-                    .load_full()
-                    .dispatch(
-                        Event::Recovered {
-                            monitor: &monitor.name,
-                        },
-                        monitor.notify.as_deref(),
-                    )
-                    .await;
-                alerted_down = false;
-            }
-            consecutive_failures = 0;
-        } else {
-            consecutive_failures = consecutive_failures.saturating_add(1);
-            if consecutive_failures >= threshold && !alerted_down {
-                error!(monitor = %monitor.id, failures = consecutive_failures, "confirmed down");
+        if !outcome.up {
+            // Down resets degraded tracking; alert once `threshold` consecutive
+            // failures confirm it (escalating from healthy or degraded).
+            consecutive_down = consecutive_down.saturating_add(1);
+            consecutive_degraded = 0;
+            if consecutive_down >= threshold && alerted != AlertLevel::Down {
+                error!(monitor = %monitor.id, failures = consecutive_down, "confirmed down");
                 notifier
                     .load_full()
                     .dispatch(
@@ -108,7 +107,42 @@ async fn run(
                         monitor.notify.as_deref(),
                     )
                     .await;
-                alerted_down = true;
+                alerted = AlertLevel::Down;
+            }
+        } else if outcome.degraded && alert_on_degraded {
+            // Up but slow: same anti-flap threshold as down, separate state.
+            consecutive_degraded = consecutive_degraded.saturating_add(1);
+            consecutive_down = 0;
+            if consecutive_degraded >= threshold && alerted != AlertLevel::Degraded {
+                warn!(monitor = %monitor.id, latency_ms = ?outcome.latency_ms, "degraded");
+                notifier
+                    .load_full()
+                    .dispatch(
+                        Event::Degraded {
+                            monitor: &monitor.name,
+                            latency_ms: outcome.latency_ms,
+                        },
+                        monitor.notify.as_deref(),
+                    )
+                    .await;
+                alerted = AlertLevel::Degraded;
+            }
+        } else {
+            // Fully healthy (or degraded with the option off, treated as up).
+            consecutive_down = 0;
+            consecutive_degraded = 0;
+            if alerted != AlertLevel::Healthy {
+                info!(monitor = %monitor.id, "recovered");
+                notifier
+                    .load_full()
+                    .dispatch(
+                        Event::Recovered {
+                            monitor: &monitor.name,
+                        },
+                        monitor.notify.as_deref(),
+                    )
+                    .await;
+                alerted = AlertLevel::Healthy;
             }
         }
     }

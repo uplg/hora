@@ -26,18 +26,31 @@ impl WebhookNotifier {
                 monitor,
                 message: error,
                 days_left: None,
+                latency_ms: None,
+            },
+            Event::Degraded {
+                monitor,
+                latency_ms,
+            } => Payload {
+                event: "degraded",
+                monitor,
+                message: None,
+                days_left: None,
+                latency_ms,
             },
             Event::Recovered { monitor } => Payload {
                 event: "recovered",
                 monitor,
                 message: None,
                 days_left: None,
+                latency_ms: None,
             },
             Event::CertExpiring { monitor, days_left } => Payload {
                 event: "cert_expiring",
                 monitor,
                 message: None,
                 days_left: Some(days_left),
+                latency_ms: None,
             },
         }
     }
@@ -51,6 +64,8 @@ struct Payload<'a> {
     message: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     days_left: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<i64>,
 }
 
 #[async_trait]
@@ -85,5 +100,12 @@ mod tests {
         });
         assert_eq!(cert.event, "cert_expiring");
         assert_eq!(cert.days_left, Some(5));
+
+        let degraded = WebhookNotifier::payload(Event::Degraded {
+            monitor: "API",
+            latency_ms: Some(1234),
+        });
+        assert_eq!(degraded.event, "degraded");
+        assert_eq!(degraded.latency_ms, Some(1234));
     }
 }

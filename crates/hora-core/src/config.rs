@@ -345,6 +345,11 @@ pub struct Alerts {
     /// Consecutive failed checks before a monitor is alerted as down.
     #[serde(default = "default_threshold")]
     pub fail_threshold: u32,
+    /// Also alert when a monitor is *degraded* - up, but slower than its
+    /// `degraded_over_ms` - not only when it is down. Uses the same
+    /// `fail_threshold` (consecutive degraded checks). Off by default.
+    #[serde(default)]
+    pub alert_on_degraded: bool,
     /// Warn this many days before a TLS certificate expires.
     #[serde(default = "default_cert_expiry_days")]
     pub cert_expiry_days: u16,
@@ -357,6 +362,7 @@ impl Default for Alerts {
     fn default() -> Self {
         Self {
             fail_threshold: default_threshold(),
+            alert_on_degraded: false,
             cert_expiry_days: default_cert_expiry_days(),
             default_retention_days: default_retention_days(),
         }
@@ -1337,6 +1343,15 @@ mod tests {
         let dump = format!("{:?}", config.channels);
         assert!(!dump.contains("syt_secret"), "matrix token leaked: {dump}");
         assert!(!dump.contains("apikey"), "freemobile pass leaked: {dump}");
+    }
+
+    #[test]
+    fn alert_on_degraded_defaults_off_and_parses() {
+        let off = parse("[page]\n[server]\n");
+        assert!(!off.alerts.alert_on_degraded);
+
+        let on = parse("[page]\n[server]\n[alerts]\nalert_on_degraded = true\n");
+        assert!(on.alerts.alert_on_degraded);
     }
 
     #[test]

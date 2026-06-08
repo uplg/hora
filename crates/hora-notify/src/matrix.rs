@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, send_retrying};
+use crate::util::{cert_expiry_phrase, latency_suffix, send_retrying};
 use crate::{Event, Notifier};
 
 /// Posts alerts to a Matrix room as the bot whose access token is configured.
@@ -50,6 +50,10 @@ impl MatrixNotifier {
                 "\u{1F534} {monitor} is DOWN\n{}",
                 error.unwrap_or("no response")
             ),
+            Event::Degraded {
+                monitor,
+                latency_ms,
+            } => format!("\u{1F7E0} {monitor} is slow{}", latency_suffix(latency_ms)),
             Event::Recovered { monitor } => format!("\u{1F7E2} {monitor} recovered"),
             Event::CertExpiring { monitor, days_left } => format!(
                 "\u{1F510} {monitor} TLS certificate {}",

@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 
-use crate::util::{cert_expiry_phrase, send_retrying};
+use crate::util::{cert_expiry_phrase, latency_suffix, send_retrying};
 use crate::{Event, Notifier};
 
 const ENDPOINT: &str = "https://smsapi.free-mobile.fr/sendmsg";
@@ -33,6 +33,10 @@ impl FreeMobileNotifier {
             Event::Down { monitor, error } => {
                 format!("DOWN: {monitor} - {}", error.unwrap_or("no response"))
             }
+            Event::Degraded {
+                monitor,
+                latency_ms,
+            } => format!("SLOW: {monitor}{}", latency_suffix(latency_ms)),
             Event::Recovered { monitor } => format!("UP: {monitor} recovered"),
             Event::CertExpiring { monitor, days_left } => {
                 format!("CERT: {monitor} {}", cert_expiry_phrase(days_left))

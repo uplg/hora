@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, escape, post_json};
+use crate::util::{cert_expiry_phrase, escape, latency_suffix, post_json};
 use crate::{Event, Notifier};
 
 /// Posts alerts to a Slack channel through an incoming webhook.
@@ -29,6 +29,14 @@ impl SlackNotifier {
                 escape(monitor),
                 // Neutralise backticks so the error can't break out of the block.
                 escape(error.unwrap_or("no response")).replace('`', "'"),
+            ),
+            Event::Degraded {
+                monitor,
+                latency_ms,
+            } => format!(
+                ":large_orange_circle: *{}* is slow{}",
+                escape(monitor),
+                latency_suffix(latency_ms)
             ),
             Event::Recovered { monitor } => {
                 format!(":large_green_circle: *{}* recovered", escape(monitor))

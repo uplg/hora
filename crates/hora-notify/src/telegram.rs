@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, escape, post_json};
+use crate::util::{cert_expiry_phrase, escape, latency_suffix, post_json};
 use crate::{Event, Notifier};
 
 /// Sends alerts to a Telegram chat via the Bot API.
@@ -30,6 +30,14 @@ impl TelegramNotifier {
                 "\u{1F534} <b>{}</b> is DOWN\n<code>{}</code>",
                 escape(monitor),
                 escape(error.unwrap_or("no response")),
+            ),
+            Event::Degraded {
+                monitor,
+                latency_ms,
+            } => format!(
+                "\u{1F7E0} <b>{}</b> is slow{}",
+                escape(monitor),
+                latency_suffix(latency_ms)
             ),
             Event::Recovered { monitor } => {
                 format!("\u{1F7E2} <b>{}</b> recovered", escape(monitor))
@@ -83,6 +91,12 @@ mod tests {
 
         let recovered = TelegramNotifier::render(Event::Recovered { monitor: "API" });
         assert!(recovered.contains("recovered"));
+
+        let degraded = TelegramNotifier::render(Event::Degraded {
+            monitor: "API",
+            latency_ms: Some(1234),
+        });
+        assert!(degraded.contains("slow") && degraded.contains("1234ms"));
 
         let cert = TelegramNotifier::render(Event::CertExpiring {
             monitor: "API",

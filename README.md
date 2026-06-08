@@ -32,7 +32,8 @@ Named after the **Horai**, the Greek goddesses of the hours.
   are **named**, so you can have several of the same type and **route each monitor** to
   specific ones (`notify = [...]`). Delivery retries transient failures, and alerts fire
   only after _N_ consecutive failures (so flapping never wakes you up) and include a
-  snippet of the failing response body.
+  snippet of the failing response body. Optionally alert on _degraded_ too
+  (`alert_on_degraded` - up, but slower than the monitor's `degraded_over_ms`).
 - **Scheduled maintenance windows** that mute alerts (per monitor or global).
 - **Per-IP API rate limiting** on the JSON endpoints, with a configurable trusted
   client-IP header (e.g. `cf-connecting-ip` behind Cloudflare).

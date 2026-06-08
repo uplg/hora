@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `alerts.alert_on_degraded` (default off): also alert when a monitor is
+  *degraded* - up, but slower than its `degraded_over_ms` - not only when it is
+  down. Uses the same `fail_threshold`, sends a new `degraded` event to every
+  channel, and recovers when the monitor is fully healthy again. (A monitor with
+  no `degraded_over_ms` is never degraded, so this is a no-op for it.)
+
 ## [0.2.4] - 2026-06-08
 
 ### Added

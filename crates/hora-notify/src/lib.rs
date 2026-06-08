@@ -34,7 +34,12 @@ pub enum Event<'a> {
         monitor: &'a str,
         error: Option<&'a str>,
     },
-    /// A previously-down monitor recovered.
+    /// A monitor is up but degraded: slower than its `degraded_over_ms` budget.
+    Degraded {
+        monitor: &'a str,
+        latency_ms: Option<i64>,
+    },
+    /// A previously-down (or degraded) monitor is fully healthy again.
     Recovered { monitor: &'a str },
     /// A monitor's TLS certificate is within the warning window (or expired).
     CertExpiring { monitor: &'a str, days_left: i64 },

@@ -77,6 +77,16 @@ impl EmailNotifier {
                 format!("[DOWN] {monitor}"),
                 format!("{monitor} is DOWN\n\n{}", error.unwrap_or("no response")),
             ),
+            Event::Degraded {
+                monitor,
+                latency_ms,
+            } => (
+                format!("[SLOW] {monitor}"),
+                format!(
+                    "{monitor} is up but responding slowly{}.",
+                    crate::util::latency_suffix(latency_ms)
+                ),
+            ),
             Event::Recovered { monitor } => (
                 format!("[OK] {monitor} recovered"),
                 format!("{monitor} recovered."),

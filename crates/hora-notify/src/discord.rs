@@ -4,13 +4,14 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, post_json};
+use crate::util::{cert_expiry_phrase, latency_suffix, post_json};
 use crate::{Event, Notifier};
 
 // Embed accent colours, matching the status badges: red / green / orange.
 const COLOR_DOWN: u32 = 0x00E0_5D44;
 const COLOR_UP: u32 = 0x0044_CC11;
 const COLOR_CERT: u32 = 0x00FE_7D37;
+const COLOR_DEGRADED: u32 = 0x00DF_B317;
 
 /// Posts alerts to a Discord channel through an incoming webhook.
 pub struct DiscordNotifier {
@@ -38,6 +39,14 @@ impl DiscordNotifier {
                 )),
                 title: format!("\u{1F534} {monitor} is DOWN"),
                 color: COLOR_DOWN,
+            },
+            Event::Degraded {
+                monitor,
+                latency_ms,
+            } => Embed {
+                title: format!("\u{1F7E0} {monitor} is slow{}", latency_suffix(latency_ms)),
+                description: None,
+                color: COLOR_DEGRADED,
             },
             Event::Recovered { monitor } => Embed {
                 title: format!("\u{1F7E2} {monitor} recovered"),
@@ -127,6 +136,13 @@ mod tests {
         });
         assert!(cert.title.contains("expires in 3 days"));
         assert_eq!(cert.color, COLOR_CERT);
+
+        let degraded = DiscordNotifier::embed(Event::Degraded {
+            monitor: "API",
+            latency_ms: Some(1234),
+        });
+        assert!(degraded.title.contains("slow") && degraded.title.contains("1234ms"));
+        assert_eq!(degraded.color, COLOR_DEGRADED);
     }
 
     #[test]

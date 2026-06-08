@@ -12,6 +12,12 @@ pub(crate) fn escape(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// `" (1234ms)"` for a known latency, empty otherwise - appended to a degraded
+/// alert so the message says *how* slow the monitor got.
+pub(crate) fn latency_suffix(latency_ms: Option<i64>) -> String {
+    latency_ms.map_or_else(String::new, |ms| format!(" ({ms}ms)"))
+}
+
 /// Human phrasing for a certificate-expiry event.
 pub(crate) fn cert_expiry_phrase(days_left: i64) -> String {
     if days_left <= 0 {

@@ -80,6 +80,10 @@ rate_limit_burst = 30
 [alerts]
 # Consecutive failed checks before a monitor is alerted as down. Kills flapping / false positives.
 fail_threshold = 3
+# Also alert when a monitor is *degraded* (up, but slower than its `degraded_over_ms`),
+# not only when it is down. Uses the same fail_threshold. Requires `degraded_over_ms`
+# set on the monitor - without it, a monitor is never degraded. Default: false.
+# alert_on_degraded = false
 # Warn this many days before a TLS certificate expires.
 cert_expiry_days = 14
 # Default history retention in days, overridable per monitor via `retention_days`.
