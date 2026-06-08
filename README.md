@@ -12,15 +12,22 @@ JSON API. The Docker image is a static musl binary on Alpine - about 15 MB.
 
 Named after the **Horai**, the Greek goddesses of the hours.
 
-![Hora](./docs/screenshot-0.2.1.jpg)
+![Hora](./docs/screenshot-0.3.0.jpg)
 
 ## Features
 
-- **HTTP, TCP, push & assertion probes** - per-monitor interval, timeout, expected
-  status and a "degraded if slower than" threshold. HTTP monitors can assert a
-  **keyword** in the body or a **JSONPath** (`json_query` / `json_expected`), route
-  through an HTTP/SOCKS **proxy**, and send custom headers. **Push** (heartbeat)
-  monitors flip to down when a job stops pinging `/api/push/{id}`.
+- **HTTP, TCP, ICMP, push & assertion probes** - per-monitor interval, timeout,
+  expected status and a "degraded if slower than" threshold. HTTP monitors can assert
+  a **keyword** in the body or a **JSONPath** (`json_query` / `json_expected`), route
+  through an HTTP/SOCKS **proxy**, and send custom headers. **ICMP** (ping) monitors
+  use an unprivileged datagram socket - no `CAP_NET_RAW`, rootless-Docker friendly,
+  IPv4 and IPv6. **Push** (heartbeat) monitors flip to down when a job stops pinging
+  `/api/push/{id}`.
+- **Dependency-aware topology** - cluster monitors into named **groups** on the status
+  page, and declare upstreams with `depends_on`. When a monitor goes down its alert is
+  annotated with root cause vs. symptom: _"caused by X"_ when an upstream it depends on
+  is also down, or _"impacts: A, B, C"_ (the blast radius) when its upstreams are all
+  healthy and it is the root cause. The dependency graph is validated acyclic at load.
 - **Server-rendered status page** (no JavaScript framework): a compact, responsive
   grid - daily uptime bars, an inline SVG latency chart, **p95/p99 latency** with an
   optional **latency SLO** indicator, plus an **incidents/announcements** banner.
