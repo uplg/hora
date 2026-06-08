@@ -302,6 +302,12 @@
       margin: 32px 0 12px;
     }
 
+    /* The "ungrouped" section has no heading, so it would butt against the group
+       above it; an adjacent grid (only ever the ungrouped one) gets top spacing. */
+    .grid + .grid {
+      margin-top: 32px;
+    }
+
     .peer-out {
       color: var(--muted);
       border: 1px solid var(--border);
@@ -463,13 +469,6 @@
           </span>
         </div>
 
-        {% if let Some(cause) = monitor.cause %}
-        <div class="topology cause">caused by {{ cause }}</div>
-        {% endif %}
-        {% if !monitor.impacted.is_empty() %}
-        <div class="topology impacted">impacts: {{ monitor.impacted.join(", ") }}</div>
-        {% endif %}
-
         <div class="uptime-bar">
           {% for cell in monitor.bar %}
           <span class="day {{ cell.state }}" title="{{ cell.title }}"></span>
@@ -487,6 +486,13 @@
               }}</span>{% endif %}
           </span>
         </div>
+
+        {% if let Some(cause) = monitor.cause %}
+        <div class="topology cause">caused by {{ cause }}</div>
+        {% endif %}
+        {% if !monitor.impacted.is_empty() %}
+        <div class="topology impacted">impacts: {{ monitor.impacted.join(", ") }}</div>
+        {% endif %}
       </section>
       {% endfor %}
     </div>

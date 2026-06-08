@@ -62,6 +62,14 @@ The status page is at `http://localhost:8787/`. Put it behind your reverse proxy
 on whatever domain you like - Hora is self-contained and assumes nothing about who
 consumes it.
 
+**ICMP (`kind = "icmp"`) monitors** use an unprivileged datagram socket, so they
+need no extra capability as long as the container's group id is within the
+kernel's `net.ipv4.ping_group_range` - Docker's default (`0 2147483647`) already
+covers the image's `10001` user, **including rootless Docker**. If your host
+narrows that range, either widen it
+(`--sysctl net.ipv4.ping_group_range="0 2147483647"`) or grant `--cap-add NET_RAW`;
+otherwise `icmp` monitors simply report down with a clear reason.
+
 Secrets are best kept in the environment: any `${VAR}` in the config is replaced
 from the environment at load. So in the file:
 

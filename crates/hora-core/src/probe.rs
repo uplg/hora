@@ -1,9 +1,14 @@
 //! Probing logic: turn a monitor into a single [`Outcome`].
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use reqwest::{Client, RequestBuilder};
+use socket2::Type;
+use surge_ping::{
+    Client as PingClient, Config as PingConfig, ICMP, PingIdentifier, PingSequence, SurgeError,
+};
 use tokio::net::TcpStream;
 
 use crate::config::{Kind, Monitor, Secret};
@@ -51,6 +56,7 @@ pub async fn run(client: &Client, monitor: &Monitor) -> Outcome {
     match monitor.kind {
         Kind::Http => http(client, monitor).await,
         Kind::Tcp => tcp(monitor).await,
+        Kind::Icmp => icmp(monitor).await,
         // Push monitors are evaluated from stored heartbeats by the scheduler,
         // never actively probed; this arm is unreachable in practice.
         Kind::Push => Outcome::down("push monitor has no active probe".to_owned()),
@@ -183,6 +189,63 @@ async fn tcp(monitor: &Monitor) -> Outcome {
         Ok(Err(err)) => Outcome::down(err.to_string()),
         Err(_elapsed) => Outcome::down("connection timed out".to_owned()),
     }
+}
+
+/// ICMP echo (ping). Uses a per-probe unprivileged datagram socket (no
+/// `CAP_NET_RAW`), so it works in rootless Docker; one socket per probe avoids
+/// datagram identifier collisions between concurrent monitors. The address family
+/// (IPv4/IPv6) follows the resolved address.
+async fn icmp(monitor: &Monitor) -> Outcome {
+    let Some(addr) = resolve(&monitor.target).await else {
+        return Outcome::down("could not resolve host".to_owned());
+    };
+
+    let kind = if addr.is_ipv4() { ICMP::V4 } else { ICMP::V6 };
+    let config = PingConfig::builder()
+        .kind(kind)
+        .sock_type_hint(Type::DGRAM)
+        .build();
+    let client = match PingClient::new(&config) {
+        Ok(client) => client,
+        // Usually a missing privilege: no unprivileged-ping permission and no
+        // CAP_NET_RAW. Surface it clearly rather than as a generic failure.
+        Err(err) => {
+            return Outcome::down(format!(
+                "icmp socket unavailable ({err}); needs net.ipv4.ping_group_range or CAP_NET_RAW"
+            ));
+        }
+    };
+
+    let mut pinger = client.pinger(addr, PingIdentifier(0)).await;
+    pinger.timeout(monitor.timeout());
+    match pinger.ping(PingSequence(0), &[0u8; 16]).await {
+        Ok((_packet, rtt)) => {
+            let latency = millis(rtt);
+            Outcome {
+                up: true,
+                degraded: over_threshold(latency, monitor.degraded_over_ms),
+                latency_ms: Some(latency),
+                status_code: None,
+                error: None,
+            }
+        }
+        Err(SurgeError::Timeout { .. }) => Outcome::down("request timed out".to_owned()),
+        Err(err) => Outcome::down(format!("icmp error: {err}")),
+    }
+}
+
+/// Resolve an ICMP target to a single IP: an IP literal is used directly,
+/// otherwise DNS is consulted and the first address is taken (so an IPv4-only or
+/// IPv6-only host resolves to the family it actually has).
+async fn resolve(target: &str) -> Option<IpAddr> {
+    if let Ok(ip) = target.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    tokio::net::lookup_host((target, 0u16))
+        .await
+        .ok()?
+        .next()
+        .map(|addr| addr.ip())
 }
 
 /// Apply every configured header to the request. reqwest *appends* headers, so
@@ -345,6 +408,19 @@ mod tests {
         assert_eq!(
             built.headers().get("x-token").unwrap().to_str().unwrap(),
             "abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_parses_ip_literals() {
+        // IP literals short-circuit before any DNS lookup (no network in tests).
+        assert_eq!(
+            resolve("127.0.0.1").await,
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert_eq!(
+            resolve("2606:4700:4700::1111").await,
+            Some("2606:4700:4700::1111".parse().unwrap())
         );
     }
 }

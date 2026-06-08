@@ -107,9 +107,13 @@ default_retention_days = 90
 # at = "2026-06-07T12:00:00Z"      # optional, RFC 3339
 
 # --- Monitors -------------------------------------------------------------
-# kind = "http" (default), "tcp" or "push".
+# kind = "http" (default), "tcp", "icmp" or "push".
 # For http: target is a URL; up = 2xx (or expected_status if set).
 # For tcp:  target is "host:port"; up = TCP connect succeeds.
+# For icmp: target is a host or IP (no port); up = ICMP echo reply. Uses an
+#           unprivileged datagram socket, so it works in rootless Docker without
+#           CAP_NET_RAW (the kernel net.ipv4.ping_group_range, Docker's default,
+#           must cover the process). IPv4 and IPv6 are both supported.
 # For push: no target; the job calls POST /api/push/{id} (see below).
 # TLS certificate expiry is checked automatically for https:// monitors.
 #
@@ -162,6 +166,17 @@ target = "db.example.com:5432"
 interval_secs = 60
 timeout_secs = 5
 group = "infra"
+
+# ICMP echo (ping) to a host or IP. No port; up = an echo reply within timeout.
+[[monitors]]
+id = "gateway"
+name = "Gateway"
+kind = "icmp"
+target = "192.0.2.1"             # or a hostname, or an IPv6 address
+interval_secs = 30
+timeout_secs = 5
+group = "infra"
+# degraded_over_ms = 200         # optional; flag slow round-trips as degraded
 
 # Heartbeat / push monitor: down if no ping arrives within `interval_secs`.
 # The job calls: curl -fsS -X POST \

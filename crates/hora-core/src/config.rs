@@ -493,6 +493,11 @@ pub enum Kind {
     #[default]
     Http,
     Tcp,
+    /// ICMP echo (ping). Target is a host or IP (no port). Uses an unprivileged
+    /// datagram socket, so it works in rootless Docker without `CAP_NET_RAW`
+    /// (the kernel's `net.ipv4.ping_group_range` must cover the process, which is
+    /// the Docker default). IPv4 and IPv6 are both supported.
+    Icmp,
     /// Passive heartbeat: the monitored job pings `/api/push/{id}`; missing a
     /// heartbeat within the interval marks it down. No active probing.
     Push,
@@ -505,7 +510,8 @@ pub struct Monitor {
     pub name: String,
     #[serde(default)]
     pub kind: Kind,
-    /// Probe target (URL for HTTP, `host:port` for TCP). Unused for push monitors.
+    /// Probe target (URL for HTTP, `host:port` for TCP, host or IP for ICMP).
+    /// Unused for push monitors.
     #[serde(default)]
     pub target: String,
     pub interval_secs: u64,
@@ -1000,6 +1006,23 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
             "monitor {}: tcp target must be host:port",
             monitor.id
         ),
+        Kind::Icmp => {
+            // A stray `:port` is a common mistake; an IPv6 literal parses as an IP
+            // and is exempt, so its colons are fine.
+            let has_port = monitor.target.parse::<std::net::IpAddr>().is_err()
+                && monitor
+                    .target
+                    .rsplit_once(':')
+                    .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+            anyhow::ensure!(
+                !monitor.target.contains("://")
+                    && !monitor.target.contains('/')
+                    && !monitor.target.chars().any(char::is_whitespace)
+                    && !has_port,
+                "monitor {}: icmp target must be a bare host or IP (no scheme, path, or port)",
+                monitor.id
+            );
+        }
         Kind::Push => {}
     }
     // A negative latency threshold would mark every check degraded/breached.
@@ -1865,5 +1888,45 @@ mod tests {
         );
         let error = validate(&config).unwrap_err().to_string();
         assert!(error.contains("cycle"), "got: {error}");
+    }
+
+    #[test]
+    fn parses_icmp_monitor() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "host"
+            name = "Host"
+            kind = "icmp"
+            target = "192.0.2.1"
+            interval_secs = 30
+        "#,
+        );
+        assert_eq!(config.monitors[0].kind, Kind::Icmp);
+        // ICMP is not HTTPS, so no certificate check.
+        assert!(!config.monitors[0].checks_cert());
+        validate(&config).expect("valid icmp monitor");
+    }
+
+    #[test]
+    fn rejects_icmp_target_with_scheme_or_port() {
+        for bad in ["https://example.com", "1.2.3.4:443", "a/b"] {
+            let config = parse(&format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "host"
+                name = "Host"
+                kind = "icmp"
+                target = "{bad}"
+                interval_secs = 30
+            "#
+            ));
+            let error = validate(&config).unwrap_err().to_string();
+            assert!(error.contains("bare host or IP"), "{bad} -> {error}");
+        }
     }
 }

@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-08
+
 ### Added
 
+- **ICMP (ping) monitors** (`kind = "icmp"`): `target` is a host or IP (no port),
+  up = an echo reply within the timeout, latency = the round-trip time
+  (`degraded_over_ms` applies). It uses an **unprivileged datagram socket**, so it
+  works in rootless Docker without `CAP_NET_RAW` (the kernel's
+  `net.ipv4.ping_group_range`, Docker's default, must cover the process); when no
+  ICMP permission is available the monitor reports down with a clear reason rather
+  than crashing. **IPv4 and IPv6** are both supported.
 - **Dependency-aware alerting** (`depends_on`) and **display groups** (`group`)
   on monitors. When a monitor goes down, the alert is annotated with topology
   context: `"caused by X"` if an upstream it depends on is also down (symptom),
