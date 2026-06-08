@@ -25,6 +25,7 @@ impl WebhookNotifier {
                 event: "down",
                 monitor,
                 message: error,
+                witness: None,
                 days_left: None,
                 latency_ms: None,
             },
@@ -35,6 +36,7 @@ impl WebhookNotifier {
                 event: "degraded",
                 monitor,
                 message: None,
+                witness: None,
                 days_left: None,
                 latency_ms,
             },
@@ -42,6 +44,7 @@ impl WebhookNotifier {
                 event: "recovered",
                 monitor,
                 message: None,
+                witness: None,
                 days_left: None,
                 latency_ms: None,
             },
@@ -49,7 +52,18 @@ impl WebhookNotifier {
                 event: "cert_expiring",
                 monitor,
                 message: None,
+                witness: None,
                 days_left: Some(days_left),
+                latency_ms: None,
+            },
+            // `monitor` carries the peer name; `witness` names the node still
+            // seeing it up.
+            Event::PeerLinkDegraded { peer, witness } => Payload {
+                event: "peer_link_degraded",
+                monitor: peer,
+                message: None,
+                witness: Some(witness),
+                days_left: None,
                 latency_ms: None,
             },
         }
@@ -62,6 +76,8 @@ struct Payload<'a> {
     monitor: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    witness: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     days_left: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,5 +123,13 @@ mod tests {
         });
         assert_eq!(degraded.event, "degraded");
         assert_eq!(degraded.latency_ms, Some(1234));
+
+        let partition = WebhookNotifier::payload(Event::PeerLinkDegraded {
+            peer: "Hora B",
+            witness: "Hora C",
+        });
+        assert_eq!(partition.event, "peer_link_degraded");
+        assert_eq!(partition.monitor, "Hora B");
+        assert_eq!(partition.witness, Some("Hora C"));
     }
 }

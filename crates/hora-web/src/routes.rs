@@ -170,6 +170,7 @@ mod tests {
     use super::*;
 
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
 
     use axum::http::StatusCode;
     use tokio::sync::watch;
@@ -188,6 +189,13 @@ mod tests {
             r#"
             [page]
             [server]
+            [health]
+            id = "test-node"
+            [[peers]]
+            id = "peer-x"
+            name = "Peer X"
+            expect_every_secs = 60
+            listen_token = "peertok"
             [[monitors]]
             id = "web"
             name = "Web"
@@ -203,7 +211,7 @@ mod tests {
         )
         .expect("config");
         let (_tx, rx) = watch::channel(Arc::new(config));
-        router(AppState::new(pool, rx))
+        router(AppState::new(pool, rx, Arc::new(AtomicU64::new(0))))
     }
 
     fn get(uri: &str) -> Request<Body> {
@@ -257,6 +265,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn push_records_peer_heartbeat() {
+        // A watched peer's listen id accepts heartbeats, like a push monitor.
+        let res = test_app()
+            .await
+            .oneshot(push("/api/push/peer-x?token=peertok"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn push_rejects_wrong_peer_token() {
+        let res = test_app()
+            .await
+            .oneshot(push("/api/push/peer-x?token=nope"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

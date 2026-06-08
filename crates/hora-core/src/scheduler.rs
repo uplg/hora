@@ -1,6 +1,7 @@
 //! The scheduler: one independent probing loop per monitor, plus alert state.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hora_notify::Event;
 use reqwest::Client;
@@ -33,9 +34,12 @@ pub fn spawn_monitor(
     pool: SqlitePool,
     client: Client,
     notifier: Notifiers,
+    last_tick: Arc<AtomicU64>,
     shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
-    tokio::spawn(run(monitor, config, pool, client, notifier, shutdown))
+    tokio::spawn(run(
+        monitor, config, pool, client, notifier, last_tick, shutdown,
+    ))
 }
 
 async fn run(
@@ -44,6 +48,7 @@ async fn run(
     pool: SqlitePool,
     client: Client,
     notifier: Notifiers,
+    last_tick: Arc<AtomicU64>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     // Fixed cadence: the tick interval does not drift by the probe duration.
@@ -58,6 +63,15 @@ async fn run(
             _ = ticker.tick() => {}
             _ = shutdown.changed() => break,
         }
+        // Liveness beacon: record that this scheduler loop iterated, independent of
+        // the probe outcome (a hung probe never reaches here, so the timestamp goes
+        // stale - exactly what the dead-man heartbeat and /healthz want to detect).
+        // `fetch_max` across all monitors tracks the most recent tick of any of them.
+        last_tick.fetch_max(
+            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0),
+            Ordering::Relaxed,
+        );
+
         let outcome = if monitor.kind == Kind::Push {
             match heartbeat_outcome(&pool, &monitor).await {
                 Some(outcome) => outcome,
@@ -152,25 +166,43 @@ async fn run(
 /// none arrived within the interval, up when one did. `None` means no heartbeat
 /// yet (or a read error) - the loop skips this tick, leaving the status unknown.
 async fn heartbeat_outcome(pool: &SqlitePool, monitor: &Monitor) -> Option<Outcome> {
-    let last = match db::last_check_time(pool, &monitor.id).await {
+    heartbeat_outcome_for(pool, &monitor.id, monitor.interval_secs).await
+}
+
+/// Evaluate a heartbeat from the stored pings for `id` against `interval_secs`:
+/// down (and record it) when none arrived within the interval, up when one did.
+/// `None` means no heartbeat yet (or a read error), leaving the status unknown -
+/// which is also the startup grace, since a peer that has never pinged is unknown,
+/// not down. Shared by push monitors and peer watches.
+///
+/// Staleness is measured from the last *positive* heartbeat, not the last check:
+/// the misses recorded below carry a fresh timestamp, so measuring from the latter
+/// would reset the clock each tick and the monitor would flap instead of
+/// confirming down (see [`db::last_heartbeat_time`]).
+pub(crate) async fn heartbeat_outcome_for(
+    pool: &SqlitePool,
+    id: &str,
+    interval_secs: u64,
+) -> Option<Outcome> {
+    let last = match db::last_heartbeat_time(pool, id).await {
         Ok(Some(last)) => last,
         Ok(None) => return None,
         Err(err) => {
-            error!(monitor = %monitor.id, "failed to read last heartbeat: {err:#}");
+            error!(monitor = %id, "failed to read last heartbeat: {err:#}");
             return None;
         }
     };
 
     let now = chrono::Utc::now().timestamp();
-    let max_gap = i64::try_from(monitor.interval_secs).unwrap_or(i64::MAX);
+    let max_gap = i64::try_from(interval_secs).unwrap_or(i64::MAX);
     if now - last > max_gap {
         // Heartbeat missed: record the down so the page and alerting react. The
-        // up-checks themselves are written by the push endpoint.
+        // up-checks themselves are written by the push endpoint. Staleness is
+        // tracked from the last positive heartbeat above, so this recorded miss
+        // does not mask the ongoing outage.
         let outcome = Outcome::down("missing heartbeat".to_owned());
-        if let Err(err) =
-            db::insert_check(pool, &monitor.id, outcome.status_value(), &outcome).await
-        {
-            error!(monitor = %monitor.id, "failed to record heartbeat miss: {err:#}");
+        if let Err(err) = db::insert_check(pool, id, outcome.status_value(), &outcome).await {
+            error!(monitor = %id, "failed to record heartbeat miss: {err:#}");
         }
         Some(outcome)
     } else {

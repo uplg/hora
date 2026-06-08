@@ -61,6 +61,13 @@ impl DiscordNotifier {
                 description: None,
                 color: COLOR_CERT,
             },
+            Event::PeerLinkDegraded { peer, witness } => Embed {
+                title: format!("\u{1F7E1} {peer} link degraded"),
+                description: Some(format!(
+                    "Unreachable from here, but still seen up by {witness} (likely a network partition)."
+                )),
+                color: COLOR_DEGRADED,
+            },
         }
     }
 }

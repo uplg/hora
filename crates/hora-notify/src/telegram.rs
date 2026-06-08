@@ -47,6 +47,11 @@ impl TelegramNotifier {
                 escape(monitor),
                 cert_expiry_phrase(days_left)
             ),
+            Event::PeerLinkDegraded { peer, witness } => format!(
+                "\u{1F7E1} <b>{}</b> link degraded\nunreachable from here, but seen up by {}",
+                escape(peer),
+                escape(witness),
+            ),
         }
     }
 }
@@ -103,5 +108,11 @@ mod tests {
             days_left: 3,
         });
         assert!(cert.contains("expires in 3 days"));
+
+        let partition = TelegramNotifier::render(Event::PeerLinkDegraded {
+            peer: "Hora B",
+            witness: "Hora C",
+        });
+        assert!(partition.contains("link degraded") && partition.contains("Hora C"));
     }
 }

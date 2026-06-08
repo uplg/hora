@@ -6,14 +6,17 @@
 //! ones restart - unchanged monitors keep running, so a reload never interrupts
 //! existing checks.
 //!
-//! `server.bind` and notification credentials are read once at startup; changing
-//! them still requires a restart. Everything else (monitors, intervals,
-//! thresholds, retention, the certificate window) reloads live.
+//! `server.bind` is read once at startup; changing it still requires a restart.
+//! Everything else - monitors, peers (the surveillance mesh), notification
+//! channels, intervals, thresholds, retention, the certificate window - reloads
+//! live: peer-watch tasks are reconciled like monitors, and the outbound
+//! heartbeat reads `[health]` on every cycle.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -23,13 +26,30 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::config::{self, Config, Monitor};
+use crate::config::{self, Config, Monitor, Peer};
 use crate::notifications::{self, Notifiers};
+use crate::peer::spawn_watch;
 use crate::scheduler;
 
 struct Running {
     monitor: Monitor,
     task: JoinHandle<()>,
+}
+
+struct RunningPeer {
+    peer: Peer,
+    task: JoinHandle<()>,
+}
+
+/// The shared handles threaded from [`start`] through the reload loop into each
+/// spawned monitor: the database pool, the notifier client (used to rebuild
+/// channels on reload), the hot-swappable notifier set, and the scheduler
+/// liveness beacon.
+struct Deps {
+    pool: SqlitePool,
+    client: Client,
+    notifier: Notifiers,
+    last_tick: Arc<AtomicU64>,
 }
 
 /// A handle to the running supervisor: the live config and the hot-swappable
@@ -49,19 +69,18 @@ pub fn start(
     config_path: PathBuf,
     pool: SqlitePool,
     client: Client,
+    last_tick: Arc<AtomicU64>,
     shutdown: watch::Receiver<bool>,
 ) -> Handle {
     let notifier = notifications::shared(&initial, &client);
     let (tx, rx) = watch::channel(Arc::new(initial));
-    let task = tokio::spawn(supervise(
-        tx,
-        rx.clone(),
-        config_path,
+    let deps = Deps {
         pool,
         client,
-        Arc::clone(&notifier),
-        shutdown,
-    ));
+        notifier: Arc::clone(&notifier),
+        last_tick,
+    };
+    let task = tokio::spawn(supervise(tx, rx.clone(), config_path, deps, shutdown));
     Handle {
         config: rx,
         notifier,
@@ -73,13 +92,13 @@ async fn supervise(
     tx: watch::Sender<Arc<Config>>,
     rx: watch::Receiver<Arc<Config>>,
     config_path: PathBuf,
-    pool: SqlitePool,
-    client: Client,
-    notifier: Notifiers,
+    deps: Deps,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut running: HashMap<String, Running> = HashMap::new();
-    reconcile(&mut running, &rx, &pool, &notifier, &shutdown);
+    let mut running_peers: HashMap<String, RunningPeer> = HashMap::new();
+    reconcile(&mut running, &rx, &deps, &shutdown);
+    reconcile_peers(&mut running_peers, &rx, &deps, &shutdown);
 
     // The raw text last applied: a file event whose content is unchanged (a touch,
     // or a spurious event from some filesystems) is ignored, so a flapping watcher
@@ -116,23 +135,30 @@ async fn supervise(
                 last_raw = raw;
                 let config = Arc::new(config);
                 // Rebuild the channels too, so credential/channel changes apply live.
-                notifier.store(Arc::new(notifications::build(&config, &client)));
+                deps.notifier
+                    .store(Arc::new(notifications::build(&config, &deps.client)));
                 if tx.send(Arc::clone(&config)).is_err() {
                     break;
                 }
-                reconcile(&mut running, &rx, &pool, &notifier, &shutdown);
+                reconcile(&mut running, &rx, &deps, &shutdown);
+                reconcile_peers(&mut running_peers, &rx, &deps, &shutdown);
                 info!(
-                    "configuration reloaded ({} monitors, {} channels)",
+                    "configuration reloaded ({} monitors, {} peers, {} channels)",
                     config.monitors.len(),
-                    notifier.load().len(),
+                    config.peers.iter().filter(|peer| peer.is_watched()).count(),
+                    deps.notifier.load().len(),
                 );
             }
             Err(err) => warn!("config reload failed, keeping current config: {err:#}"),
         }
     }
 
-    // On shutdown the monitor tasks observe the same signal and break; await them.
+    // On shutdown the monitor and peer-watch tasks observe the same signal and
+    // break; await them.
     for (_, run) in running.drain() {
+        let _ = run.task.await;
+    }
+    for (_, run) in running_peers.drain() {
         let _ = run.task.await;
     }
 }
@@ -146,8 +172,7 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
 fn reconcile(
     running: &mut HashMap<String, Running>,
     rx: &watch::Receiver<Arc<Config>>,
-    pool: &SqlitePool,
-    notifier: &Notifiers,
+    deps: &Deps,
     shutdown: &watch::Receiver<bool>,
 ) {
     let config = rx.borrow().clone();
@@ -177,15 +202,63 @@ fn reconcile(
             let task = scheduler::spawn_monitor(
                 monitor.clone(),
                 rx.clone(),
-                pool.clone(),
+                deps.pool.clone(),
                 client,
-                Arc::clone(notifier),
+                Arc::clone(&deps.notifier),
+                Arc::clone(&deps.last_tick),
                 shutdown.clone(),
             );
             running.insert(
                 monitor.id.clone(),
                 Running {
                     monitor: monitor.clone(),
+                    task,
+                },
+            );
+        }
+    }
+}
+
+/// Diff running peer-watch tasks against the latest config: stop removed or
+/// changed peers, start new or changed ones, leave unchanged ones running. Only
+/// watched peers (those with `expect_every_secs`) get a task.
+fn reconcile_peers(
+    running: &mut HashMap<String, RunningPeer>,
+    rx: &watch::Receiver<Arc<Config>>,
+    deps: &Deps,
+    shutdown: &watch::Receiver<bool>,
+) {
+    let config = rx.borrow().clone();
+
+    let desired: HashMap<&str, &Peer> = config
+        .peers
+        .iter()
+        .filter(|peer| peer.is_watched())
+        .map(|peer| (peer.id.as_str(), peer))
+        .collect();
+
+    running.retain(|id, run| match desired.get(id.as_str()) {
+        Some(peer) if **peer == run.peer => true,
+        _ => {
+            run.task.abort();
+            false
+        }
+    });
+
+    for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
+        if !running.contains_key(&peer.id) {
+            let task = spawn_watch(
+                peer.clone(),
+                rx.clone(),
+                deps.pool.clone(),
+                deps.client.clone(),
+                Arc::clone(&deps.notifier),
+                shutdown.clone(),
+            );
+            running.insert(
+                peer.id.clone(),
+                RunningPeer {
+                    peer: peer.clone(),
                     task,
                 },
             );

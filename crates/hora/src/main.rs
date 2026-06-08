@@ -4,6 +4,8 @@
 //! supervisor (which owns the live config and notification channels), spawn the
 //! certificate watcher and pruner, and serve the status page and JSON API.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -28,13 +30,19 @@ async fn main() -> anyhow::Result<()> {
     // current iteration) instead of being aborted when the runtime drops.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    // The scheduler's liveness beacon: each monitor tick bumps it, and the
+    // dead-man heartbeat and /healthz read it to tell a live scheduler from a
+    // wedged one. Shared with the supervisor (writers) and the web layer (reader).
+    let last_tick = Arc::new(AtomicU64::new(0));
+
     // The supervisor owns the live config + notification channels and reconciles
     // monitor tasks on reload; other components read through its handles.
     let handle = hora_core::supervisor::start(
         initial,
         config_path,
         pool.clone(),
-        client,
+        client.clone(),
+        Arc::clone(&last_tick),
         shutdown_rx.clone(),
     );
     let cert_task = hora_core::cert::spawn_watcher(
@@ -43,6 +51,19 @@ async fn main() -> anyhow::Result<()> {
         handle.notifier.clone(),
         shutdown_rx.clone(),
     );
+
+    // Mutual surveillance: the outbound dead-man heartbeat. It self-gates on the
+    // [health] section and reads it live, so it is always spawned (and activates if
+    // [health] is added on reload). The inbound peer-watch tasks are owned and
+    // hot-reloaded by the supervisor alongside the monitors.
+    let heartbeat_task = hora_core::peer::spawn_heartbeat(
+        handle.config.clone(),
+        pool.clone(),
+        client,
+        Arc::clone(&last_tick),
+        shutdown_rx.clone(),
+    );
+
     let prune_task = hora_core::db::spawn_pruner(&pool, handle.config.clone(), shutdown_rx);
 
     let bind = handle.config.borrow().server.bind.clone();
@@ -54,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    let state = hora_web::AppState::new(pool, handle.config);
+    let state = hora_web::AppState::new(pool, handle.config.clone(), Arc::clone(&last_tick));
     // Connect-info gives the rate limiter a peer IP to fall back on when there
     // is no `X-Forwarded-For` (i.e. direct access, not behind a proxy).
     let app = hora_web::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
@@ -67,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     // for them to finish their current iteration before the runtime drops.
     let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
-        let _ = tokio::join!(handle.task, cert_task, prune_task);
+        let _ = tokio::join!(handle.task, cert_task, prune_task, heartbeat_task);
     })
     .await;
     Ok(())

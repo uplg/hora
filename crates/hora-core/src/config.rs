@@ -27,6 +27,14 @@ pub struct Config {
     pub alerts: Alerts,
     #[serde(default)]
     pub monitors: Vec<Monitor>,
+    /// Outbound dead-man heartbeat + peer-watch settings. Absent = this node
+    /// neither emits heartbeats nor watches peers.
+    #[serde(default)]
+    pub health: Option<Health>,
+    /// Peers in a mutual-surveillance mesh. Each entry pings the peer (OUT) and/or
+    /// watches it for missed pings (IN); requires a [`Health`] section.
+    #[serde(default)]
+    pub peers: Vec<Peer>,
 }
 
 impl Config {
@@ -369,6 +377,116 @@ impl Default for Alerts {
     }
 }
 
+/// Node-level dead-man / peer settings. A node with a `[health]` section emits an
+/// outbound heartbeat to its peers (and any `heartbeat_url`) whenever it is
+/// locally healthy, and exposes its view of those peers on `/healthz`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Health {
+    /// This node's global identity. Peers refer to it by this id, and it is the
+    /// key under which other nodes report this node in their `/healthz` `peers`.
+    pub id: String,
+    /// Cadence of outbound heartbeats, in seconds.
+    #[serde(default = "default_health_interval")]
+    pub interval_secs: u64,
+    /// After startup, a peer that has never been seen is not alerted down until
+    /// this many seconds have passed (it stays `unknown`).
+    #[serde(default = "default_grace")]
+    pub grace_secs: u64,
+    /// Before alerting a peer down, poll the other peers' `/healthz`: if any still
+    /// sees it up, treat it as a partition (`PeerLinkDegraded`) instead of an
+    /// outage. With fewer than two other peers this is a no-op (honest mode).
+    #[serde(default)]
+    pub quorum: bool,
+    /// An extra dead-man target (e.g. a healthchecks.io ping URL) pinged every
+    /// `interval_secs` when locally healthy, alongside the peers' `ping_url`.
+    #[serde(default)]
+    pub heartbeat_url: Option<Secret>,
+}
+
+impl Health {
+    #[must_use]
+    pub fn interval(&self) -> Duration {
+        Duration::from_secs(self.interval_secs)
+    }
+}
+
+/// A peer in a mutual-surveillance mesh. The two halves are independent: `ping_url`
+/// is the OUT side (I heartbeat the peer when healthy); `expect_every_secs` enables
+/// the IN side (I mark the peer down if it stops heartbeating me). Either or both
+/// may be set; each half can terminate at another Hora or at an external service.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Peer {
+    /// The peer's global identity (its `[health].id`). Witnesses key their view of
+    /// the peer by this id, so it must match across the mesh.
+    pub id: String,
+    pub name: String,
+    /// OUT: where I `POST` my heartbeat when healthy - the peer's
+    /// `/api/push/{my-id}`, or an external receiver. Absent = I don't ping it.
+    #[serde(default)]
+    pub ping_url: Option<Secret>,
+    /// Token sent as the `X-Push-Token` header on the outbound ping (kept out of
+    /// the peer's access logs, unlike a `?token=` query).
+    #[serde(default)]
+    pub ping_token: Option<Secret>,
+    /// IN: the local push id the peer heartbeats (`/api/push/{listen_id}`).
+    /// Defaults to `id`. Only meaningful when `expect_every_secs` is set.
+    #[serde(default)]
+    pub listen_id: Option<String>,
+    /// Token required on the inbound `/api/push/{listen_id}` (the peer's
+    /// `ping_token` for me).
+    #[serde(default)]
+    pub listen_token: Option<Secret>,
+    /// Watch the peer: mark it down if no inbound heartbeat arrives within this
+    /// window. Setting it enables the IN side; leaving it unset makes this an
+    /// OUT-only peer (a plain dead-man to an external receiver).
+    #[serde(default)]
+    pub expect_every_secs: Option<u64>,
+    /// Where other peers poll this peer's `/healthz` for quorum. Defaults to the
+    /// origin (`scheme://host[:port]`) of `ping_url` plus `/healthz`.
+    #[serde(default)]
+    pub witness_url: Option<String>,
+    /// Restrict this peer's alerts to these channel names. Unset = every channel.
+    #[serde(default)]
+    pub notify: Option<Vec<String>>,
+}
+
+impl Peer {
+    /// The local push id this peer heartbeats (falls back to the peer's `id`).
+    #[must_use]
+    pub fn listen_id(&self) -> &str {
+        self.listen_id.as_deref().unwrap_or(&self.id)
+    }
+
+    /// Whether the IN side is active (I watch this peer for missed heartbeats).
+    #[must_use]
+    pub fn is_watched(&self) -> bool {
+        self.expect_every_secs.is_some()
+    }
+
+    /// The inbound staleness window, defaulting to the global health interval.
+    #[must_use]
+    pub fn expect_every(&self) -> Option<Duration> {
+        self.expect_every_secs.map(Duration::from_secs)
+    }
+
+    /// The peer's `/healthz` URL for quorum: the explicit `witness_url`, else the
+    /// origin (`scheme://host[:port]`) of `ping_url` with `/healthz` appended.
+    #[must_use]
+    pub fn effective_witness_url(&self) -> Option<String> {
+        if let Some(url) = &self.witness_url {
+            return Some(url.clone());
+        }
+        let ping = self.ping_url.as_ref()?;
+        let url = reqwest::Url::parse(ping.as_ref()).ok()?;
+        let origin = url.origin();
+        origin
+            .is_tuple()
+            .then(|| format!("{}/healthz", origin.ascii_serialization()))
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -552,6 +670,12 @@ fn default_retention_days() -> u16 {
 }
 fn default_rate_limit_refill() -> u64 {
     1
+}
+fn default_health_interval() -> u64 {
+    60
+}
+fn default_grace() -> u64 {
+    180
 }
 fn default_rate_limit_burst() -> u32 {
     30
@@ -760,6 +884,84 @@ fn validate(config: &Config) -> anyhow::Result<()> {
                     monitor.id
                 );
             }
+        }
+    }
+
+    validate_peers(config, &seen, &channel_names)?;
+    Ok(())
+}
+
+/// Validate the `[health]` section and the `[[peers]]` mesh: peers require a
+/// health section; a watched peer's `listen_id` must be URL-safe and clash with
+/// neither a monitor nor another peer; and every peer must do something (ping out,
+/// be watched, or both).
+fn validate_peers(
+    config: &Config,
+    monitor_ids: &HashSet<&str>,
+    channel_names: &HashSet<&str>,
+) -> anyhow::Result<()> {
+    if let Some(health) = &config.health {
+        anyhow::ensure!(!health.id.is_empty(), "health.id must not be empty");
+        anyhow::ensure!(health.interval_secs > 0, "health.interval_secs must be > 0");
+    }
+    anyhow::ensure!(
+        config.peers.is_empty() || config.health.is_some(),
+        "[[peers]] require a [health] section (it sets this node's id and heartbeat interval)"
+    );
+
+    let mut peer_ids: HashSet<&str> = HashSet::new();
+    let mut listen_ids: HashSet<&str> = HashSet::new();
+    for peer in &config.peers {
+        anyhow::ensure!(!peer.id.is_empty(), "peer id must not be empty");
+        anyhow::ensure!(
+            peer_ids.insert(peer.id.as_str()),
+            "duplicate peer id: {}",
+            peer.id
+        );
+        anyhow::ensure!(
+            peer.ping_url.is_some() || peer.is_watched(),
+            "peer {}: set ping_url (to heartbeat it) and/or expect_every_secs (to watch it)",
+            peer.id
+        );
+        if let Some(every) = peer.expect_every_secs {
+            anyhow::ensure!(every > 0, "peer {}: expect_every_secs must be > 0", peer.id);
+            // The id appears in `/api/push/{id}`, so keep it URL-safe.
+            let listen_id = peer.listen_id();
+            anyhow::ensure!(
+                listen_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "peer {}: listen_id {listen_id:?} must be alphanumeric, '-' or '_'",
+                peer.id
+            );
+            anyhow::ensure!(
+                !monitor_ids.contains(listen_id),
+                "peer {}: listen_id {listen_id:?} clashes with a monitor id",
+                peer.id
+            );
+            anyhow::ensure!(
+                listen_ids.insert(listen_id),
+                "peer {}: duplicate listen_id {listen_id:?}",
+                peer.id
+            );
+        }
+        if let Some(routes) = &peer.notify {
+            for route in routes {
+                anyhow::ensure!(
+                    channel_names.contains(route.as_str()),
+                    "peer {}: notify references unknown channel {route:?}",
+                    peer.id
+                );
+            }
+        }
+        // A push token sent over cleartext http to the peer would leak in transit.
+        if let (Some(url), Some(_token)) = (&peer.ping_url, &peer.ping_token)
+            && url.as_ref().starts_with("http://")
+        {
+            tracing::warn!(
+                "peer {}: ping_url uses http:// - the push token is sent in cleartext, use https",
+                peer.id
+            );
         }
     }
     Ok(())
@@ -1423,5 +1625,165 @@ mod tests {
         );
         let error = validate(&config).unwrap_err().to_string();
         assert!(error.contains("unknown channel"), "got: {error}");
+    }
+
+    #[test]
+    fn parses_health_and_peers() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            quorum = true
+            [[peers]]
+            id = "hora-b"
+            name = "Hora B"
+            ping_url = "https://b.example/api/push/hora-a"
+            ping_token = "tok"
+            listen_token = "in"
+            expect_every_secs = 90
+        "#,
+        );
+        let health = config.health.as_ref().expect("health");
+        assert_eq!(health.id, "hora-a");
+        assert_eq!(health.interval_secs, 60); // default
+        assert!(health.quorum);
+        let peer = &config.peers[0];
+        assert!(peer.is_watched());
+        assert_eq!(peer.listen_id(), "hora-b"); // defaults to id
+        assert_eq!(
+            peer.effective_witness_url().as_deref(),
+            Some("https://b.example/healthz")
+        );
+        validate(&config).expect("valid health + peers");
+    }
+
+    #[test]
+    fn rejects_peers_without_health() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[peers]]
+            id = "hora-b"
+            name = "Hora B"
+            ping_url = "https://b.example/api/push/hora-a"
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(
+            error.contains("require a [health] section"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_peer_that_does_nothing() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            [[peers]]
+            id = "hora-b"
+            name = "Hora B"
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(
+            error.contains("ping_url") && error.contains("expect_every_secs"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_peer_listen_id_clashing_with_monitor() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            [[monitors]]
+            id = "shared"
+            name = "Web"
+            target = "https://example.com"
+            interval_secs = 60
+            [[peers]]
+            id = "hora-b"
+            name = "Hora B"
+            listen_id = "shared"
+            expect_every_secs = 90
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(
+            error.contains("clashes with a monitor id"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn out_only_peer_is_valid_without_watch() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            [[peers]]
+            id = "hc"
+            name = "healthchecks.io"
+            ping_url = "https://hc-ping.com/abc"
+        "#,
+        );
+        assert!(!config.peers[0].is_watched());
+        validate(&config).expect("OUT-only peer valid");
+    }
+
+    #[test]
+    fn explicit_witness_url_overrides_derivation() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            [[peers]]
+            id = "hora-b"
+            name = "Hora B"
+            ping_url = "https://b.example:9000/api/push/hora-a"
+            witness_url = "https://b.internal/healthz"
+            expect_every_secs = 90
+        "#,
+        );
+        assert_eq!(
+            config.peers[0].effective_witness_url().as_deref(),
+            Some("https://b.internal/healthz")
+        );
+    }
+
+    #[test]
+    fn peer_debug_redacts_secrets() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            heartbeat_url = "https://hc-ping.com/sup3rsecret"
+            [[peers]]
+            id = "hora-b"
+            name = "Hora B"
+            ping_url = "https://b.example/api/push/hora-a?tok=sup3rsecret"
+            ping_token = "tok3n"
+            expect_every_secs = 90
+        "#,
+        );
+        let dump = format!("{:?}", config.health) + &format!("{:?}", config.peers);
+        assert!(!dump.contains("sup3rsecret"), "url secret leaked: {dump}");
+        assert!(!dump.contains("tok3n"), "ping token leaked: {dump}");
     }
 }

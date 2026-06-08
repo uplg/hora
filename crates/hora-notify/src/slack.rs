@@ -46,6 +46,11 @@ impl SlackNotifier {
                 escape(monitor),
                 cert_expiry_phrase(days_left)
             ),
+            Event::PeerLinkDegraded { peer, witness } => format!(
+                ":large_yellow_circle: *{}* link degraded\nunreachable from here, but seen up by {}",
+                escape(peer),
+                escape(witness),
+            ),
         }
     }
 }

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mutual surveillance / dead-man's switch** via a `[health]` section and
+  `[[peers]]`. A node emits an outbound heartbeat to each peer's `ping_url` only
+  while it is locally healthy (scheduler ticking *and* database writable), so a
+  hung or dead node goes silent and its peers mark it down. Each peer has two
+  independent halves - OUT (`ping_url`) and IN (`expect_every_secs`) - and either
+  half can terminate at another Hora or at an external service (healthchecks.io,
+  UptimeRobot, a cron job); the wire is plain HTTP. With `quorum = true` a node
+  consults the other peers' `/healthz` before alerting a peer down: if a witness
+  still sees it up, it reports a low-severity `PeerLinkDegraded` (a partition)
+  instead of an outage, and stays silent if it cannot reach any witness (likely
+  the local node is the isolated one). Watched peers appear in their own section
+  on the status page. Peers and `[health]` hot-reload like monitors (on SIGHUP or
+  a config-file edit) - adding, removing or changing a peer needs no restart.
+- `/healthz` now returns a JSON report (`status`, `scheduler_ok`, `db_ok`,
+  `last_tick_age`, `id`, and this node's `peers` view) instead of a bare `ok`.
+  The top-level `status` is `"ok"` only when fully healthy, so a keyword monitor
+  (e.g. UptimeRobot) can poll it; the rest powers peer quorum.
 - `alerts.alert_on_degraded` (default off): also alert when a monitor is
   *degraded* - up, but slower than its `degraded_over_ms` - not only when it is
   down. Uses the same `fail_threshold`, sends a new `degraded` event to every

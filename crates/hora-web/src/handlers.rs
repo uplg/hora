@@ -13,6 +13,7 @@ use utoipa::OpenApi;
 
 use hora_core::config::Kind;
 use hora_core::db::{self, Point};
+use hora_core::peer::{HealthReport, PeerSeen};
 
 use crate::error::AppError;
 use crate::render::{badge, status_color, svg_response, uptime_color};
@@ -39,13 +40,27 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         description = "Read-only JSON API of a Hora uptime monitor."
     ),
     paths(summary_json, latency_json, push, status_badge, uptime_badge, healthz),
-    components(schemas(Summary, MonitorView, IncidentView, MaintenanceView, DayCell, Point))
+    components(schemas(
+        Summary,
+        MonitorView,
+        IncidentView,
+        MaintenanceView,
+        DayCell,
+        Point,
+        HealthReport,
+        PeerSeen
+    ))
 )]
 struct ApiDoc;
 
-#[utoipa::path(get, path = "/healthz", responses((status = 200, description = "Service is up")))]
-pub(crate) async fn healthz() -> &'static str {
-    "ok"
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    responses((status = 200, description = "Node health and its view of watched peers", body = HealthReport))
+)]
+pub(crate) async fn healthz(State(state): State<AppState>) -> Json<HealthReport> {
+    let config = state.config.borrow().clone();
+    Json(hora_core::peer::report(&state.pool, &config, &state.last_tick).await)
 }
 
 pub(crate) async fn favicon() -> impl IntoResponse {
@@ -88,9 +103,7 @@ pub(crate) async fn openapi() -> Response {
 /// failing monitor degrades to an `unknown` card rather than failing the page.
 pub(crate) async fn state_summary(state: AppState) -> Arc<Summary> {
     let AppState {
-        pool,
-        config,
-        cache,
+        pool, config, cache, ..
     } = state;
     let config = config.borrow().clone();
     summary_for(&pool, &config, &cache).await
@@ -188,15 +201,27 @@ pub(crate) async fn push(
     headers: HeaderMap,
 ) -> Result<&'static str, AppError> {
     let config = state.config.borrow().clone();
-    let monitor = config
+    // A push id is either a push monitor or a watched peer's listen id (peers
+    // heartbeat the same endpoint); the expected token comes from whichever matches.
+    let expected_token = if let Some(monitor) = config
         .monitors
         .iter()
         .find(|monitor| monitor.id == id && monitor.kind == Kind::Push)
-        .ok_or(AppError::NotFound("unknown push monitor"))?;
+    {
+        monitor.push_token.as_ref()
+    } else if let Some(peer) = config
+        .peers
+        .iter()
+        .find(|peer| peer.is_watched() && peer.listen_id() == id)
+    {
+        peer.listen_token.as_ref()
+    } else {
+        return Err(AppError::NotFound("unknown push target"));
+    };
 
     // A configured token is required; without one, the id alone authorizes. Prefer
     // the `X-Push-Token` header (kept out of access logs) over the `?token=` query.
-    if let Some(expected) = &monitor.push_token {
+    if let Some(expected) = expected_token {
         let provided = headers
             .get("x-push-token")
             .and_then(|value| value.to_str().ok())

@@ -98,6 +98,13 @@ impl EmailNotifier {
                     format!("The TLS certificate for {monitor} {when}."),
                 )
             }
+            Event::PeerLinkDegraded { peer, witness } => (
+                format!("[LINK] {peer} link degraded"),
+                format!(
+                    "{peer} is unreachable from here, but still seen up by {witness} \
+                     (likely a network partition rather than an outage)."
+                ),
+            ),
         }
     }
 }

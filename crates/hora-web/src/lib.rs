@@ -8,6 +8,7 @@ mod summary;
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
@@ -60,15 +61,23 @@ pub struct AppState {
     pool: SqlitePool,
     config: watch::Receiver<Arc<Config>>,
     cache: Arc<Cache>,
+    /// The scheduler's liveness beacon, written by the monitor loops and read by
+    /// `/healthz` to report whether the scheduler is still ticking.
+    last_tick: Arc<AtomicU64>,
 }
 
 impl AppState {
     #[must_use]
-    pub fn new(pool: SqlitePool, config: watch::Receiver<Arc<Config>>) -> Self {
+    pub fn new(
+        pool: SqlitePool,
+        config: watch::Receiver<Arc<Config>>,
+        last_tick: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             pool,
             config,
             cache: Arc::new(Cache::default()),
+            last_tick,
         }
     }
 }

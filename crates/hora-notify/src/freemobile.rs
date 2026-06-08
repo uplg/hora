@@ -41,6 +41,9 @@ impl FreeMobileNotifier {
             Event::CertExpiring { monitor, days_left } => {
                 format!("CERT: {monitor} {}", cert_expiry_phrase(days_left))
             }
+            Event::PeerLinkDegraded { peer, witness } => {
+                format!("LINK: {peer} unreachable here, seen up by {witness}")
+            }
         }
     }
 }

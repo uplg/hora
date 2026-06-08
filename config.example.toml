@@ -160,3 +160,45 @@ name = "Nightly backup"
 kind = "push"
 interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # push_token = "${BACKUP_TOKEN}"   # optional but recommended
+
+# --- Mutual surveillance (who watches the watcher) ------------------------
+# A [health] section makes this node emit an outbound "dead-man" heartbeat: it
+# POSTs to each peer's `ping_url` every `interval_secs`, but ONLY while it is
+# locally healthy (its scheduler is ticking and its database is writable). If the
+# node hangs or dies, the pings stop and the receiver marks it down. Nothing here
+# is a bespoke protocol - every exchange is plain HTTP, so a peer can be another
+# Hora, a healthchecks.io / UptimeRobot endpoint, or a cron job.
+# [health] and [[peers]] reload live (SIGHUP or a config-file edit): adding,
+# removing or changing a peer takes effect without a restart.
+# [health]
+# id = "hora-a"             # this node's global identity (how peers refer to it)
+# interval_secs = 60        # how often to emit heartbeats when healthy
+# grace_secs = 180          # startup grace before a never-seen peer is alerted
+# quorum = true             # before alerting a peer down, ask the OTHER peers'
+#                           # /healthz: if any still sees it up, it's a partition
+#                           # (PeerLinkDegraded), not an outage. No-op with < 3 nodes.
+# heartbeat_url = "${HC_PING_URL}"   # optional extra dead-man target (e.g. healthchecks.io)
+
+# Each [[peers]] entry has two independent halves; set either or both:
+#   OUT  (ping_url)            - I heartbeat the peer when I'm healthy.
+#   IN   (expect_every_secs)   - I watch the peer and alert if it stops pinging me.
+# [[peers]]
+# id = "hora-b"             # the peer's [health].id (must match across the mesh)
+# name = "Hora B (Paris)"
+# ping_url = "https://b.example/api/push/hora-a"   # OUT: the peer's push endpoint for me
+# ping_token = "${PEER_B_TOKEN}"                   # sent as the X-Push-Token header
+# expect_every_secs = 90   # IN: mark the peer down if it goes silent this long
+# listen_token = "${PEER_B_IN}"   # token the peer must present when it pings me
+#                           # (peer pings POST /api/push/hora-b; listen_id defaults to id)
+# witness_url = "https://b.example/healthz"   # optional; default = origin(ping_url)/healthz
+# notify = ["ops-telegram"]                   # optional; route this peer's alerts
+
+# OUT-only peer: a plain dead-man to an external receiver (no watching).
+# [[peers]]
+# id = "healthchecks"
+# name = "healthchecks.io"
+# ping_url = "https://hc-ping.com/<uuid>"
+
+# To be watched BY UptimeRobot instead: point an UptimeRobot keyword monitor at
+# this node's /healthz and match the keyword "ok" (the top-level "status" field is
+# "ok" only while the node is fully healthy). No peer entry needed for that.

@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod http;
 pub mod notifications;
+pub mod peer;
 pub mod probe;
 pub mod scheduler;
 pub mod supervisor;

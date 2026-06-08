@@ -43,6 +43,10 @@ pub enum Event<'a> {
     Recovered { monitor: &'a str },
     /// A monitor's TLS certificate is within the warning window (or expired).
     CertExpiring { monitor: &'a str, days_left: i64 },
+    /// A peer is unreachable from here, but a third-party witness still sees it
+    /// up: likely a network partition on the local-to-peer link, not a peer
+    /// outage. Lower severity than [`Event::Down`].
+    PeerLinkDegraded { peer: &'a str, witness: &'a str },
 }
 
 /// A delivery channel for [`Event`]s.

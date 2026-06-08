@@ -973,6 +973,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "chrono",
+ "futures-util",
  "hora-notify",
  "notify",
  "reqwest",

@@ -10,7 +10,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use tokio::sync::watch;
 
 use crate::SECONDS_PER_DAY;
-use crate::config::Config;
+use crate::config::{Config, Peer};
 use crate::probe::Outcome;
 
 const PRUNE_INTERVAL: Duration = Duration::from_hours(6);
@@ -164,6 +164,24 @@ pub async fn last_check_time(pool: &SqlitePool, monitor_id: &str) -> sqlx::Resul
         .bind(monitor_id)
         .fetch_one(pool)
         .await
+}
+
+/// The timestamp of a monitor's most recent *positive* heartbeat (status != 0),
+/// ignoring recorded misses. Heartbeat staleness must be measured from this, not
+/// from [`last_check_time`]: a recorded "down" miss has a fresh timestamp, so
+/// using the latter would reset the staleness clock every tick and mask a
+/// continuing outage (the monitor would flap down/up and never confirm down).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn last_heartbeat_time(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(time) FROM checks WHERE monitor_id = ? AND status != 0",
+    )
+    .bind(monitor_id)
+    .fetch_one(pool)
+    .await
 }
 
 /// `(available, total)` check counts since `since`. Available = up or degraded.
@@ -473,6 +491,15 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
             .or_default()
             .push(monitor.id.as_str());
     }
+    // Watched peers store their heartbeats under `listen_id`; trim them to the
+    // default retention like any other check series.
+    let peer_cutoff = now - i64::from(config.alerts.default_retention_days) * SECONDS_PER_DAY;
+    for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
+        ids_by_cutoff
+            .entry(peer_cutoff)
+            .or_default()
+            .push(peer.listen_id());
+    }
     for (cutoff, ids) in ids_by_cutoff {
         let ids = serde_json::to_string(&ids)?;
         sqlx::query(
@@ -489,7 +516,20 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     // to keep travel as a single JSON array, expanded by SQLite's `json_each`
     // and matched with a `NOT EXISTS` anti-join - one static statement per
     // table, with no `IN`-list size limit.
-    let keep: Vec<&str> = config.monitors.iter().map(|m| m.id.as_str()).collect();
+    // Keep both monitor ids and watched peers' listen ids, so the orphan sweep
+    // never deletes a peer's heartbeat history.
+    let keep: Vec<&str> = config
+        .monitors
+        .iter()
+        .map(|m| m.id.as_str())
+        .chain(
+            config
+                .peers
+                .iter()
+                .filter(|peer| peer.is_watched())
+                .map(Peer::listen_id),
+        )
+        .collect();
     let keep = serde_json::to_string(&keep)?;
     sqlx::query(
         "DELETE FROM checks WHERE NOT EXISTS \
@@ -562,6 +602,22 @@ mod tests {
         let series = latency_series(&pool, "m", 0).await.unwrap();
         assert_eq!(series.len(), 2);
         assert_eq!(series[0].latency_ms, 10);
+    }
+
+    #[tokio::test]
+    async fn last_heartbeat_ignores_recorded_misses() {
+        let pool = memory_pool().await;
+        insert(&pool, "m", 100, 1, Some(5)).await; // positive heartbeat
+        insert(&pool, "m", 200, 0, None).await; // recorded miss (fresher)
+
+        // last_check_time sees the miss; last_heartbeat_time skips it, so staleness
+        // is measured from the real heartbeat and an outage can't reset the clock.
+        assert_eq!(last_check_time(&pool, "m").await.unwrap(), Some(200));
+        assert_eq!(last_heartbeat_time(&pool, "m").await.unwrap(), Some(100));
+
+        // A monitor with only misses has no positive heartbeat at all.
+        insert(&pool, "only-miss", 50, 0, None).await;
+        assert_eq!(last_heartbeat_time(&pool, "only-miss").await.unwrap(), None);
     }
 
     #[tokio::test]

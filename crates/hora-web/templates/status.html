@@ -295,6 +295,21 @@
       padding: 48px 0;
     }
 
+    .section-title {
+      font-family: var(--brand);
+      font-size: 18px;
+      font-weight: 600;
+      margin: 32px 0 12px;
+    }
+
+    .peer-out {
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 1px 7px;
+      font-size: 11px;
+    }
+
     .incidents {
       display: flex;
       flex-direction: column;
@@ -446,6 +461,26 @@
             {% if let Some(cert) = monitor.cert_label %}<span class="cert {{ monitor.cert_state }}">TLS {{ cert
               }}</span>{% endif %}
           </span>
+        </div>
+      </section>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if !summary.peers.is_empty() %}
+    <h2 class="section-title">Peers</h2>
+    <div class="grid">
+      {% for peer in summary.peers %}
+      <section class="card">
+        <div class="card-head">
+          <span class="dot {{ peer.status }}"></span>
+          <span class="name">{{ peer.name }}</span>
+          <span class="meta">
+            {% if peer.pings %}<span class="peer-out" title="this node also heartbeats the peer">heartbeating</span>{% endif %}
+          </span>
+        </div>
+        <div class="caption">
+          <span>{% if let Some(seen) = peer.last_seen %}last seen {{ seen }}{% else %}never seen{% endif %}</span>
         </div>
       </section>
       {% endfor %}

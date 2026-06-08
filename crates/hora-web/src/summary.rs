@@ -29,6 +29,8 @@ pub(crate) struct Summary {
     incidents: Vec<IncidentView>,
     maintenances: Vec<MaintenanceView>,
     pub(crate) monitors: Vec<MonitorView>,
+    /// Watched peers in the surveillance mesh, shown in their own section.
+    peers: Vec<PeerView>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -43,6 +45,18 @@ pub(crate) struct IncidentView {
 pub(crate) struct MaintenanceView {
     reason: String,
     monitors: String,
+}
+
+/// A watched peer's view for the status page: just its current status and when it
+/// was last seen. Peers are deliberately rendered apart from monitors.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct PeerView {
+    id: String,
+    name: String,
+    status: &'static str,
+    last_seen: Option<String>,
+    /// Whether this node also heartbeats the peer (the OUT side is configured).
+    pings: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -165,6 +179,10 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary
         .iter()
         .fold("up", |worst, m| worse(worst, m.status));
 
+    // Watched peers form their own section; their state does not roll into the
+    // overall badge (it tracks the monitored services, not the surveillance mesh).
+    let peers = build_peers(pool, config, ctx.threshold).await;
+
     let incidents = config
         .incidents
         .iter()
@@ -180,7 +198,25 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary
 
     // Active maintenance windows shown as a top banner (so a long reason never
     // changes a card's height and disturbs the grid).
-    let maintenances = config
+    let maintenances = build_maintenances(config, now);
+
+    Summary {
+        title: config.page.title.clone(),
+        overall,
+        overall_label: overall_label(overall),
+        generated_at: now.to_rfc3339(),
+        updated_utc: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        incidents,
+        maintenances,
+        monitors,
+        peers,
+    }
+}
+
+/// Build the banner view for the maintenance windows active at `now`, resolving
+/// each covered monitor id to its display name (or "all monitors" when empty).
+fn build_maintenances(config: &Config, now: DateTime<Utc>) -> Vec<MaintenanceView> {
+    config
         .maintenance
         .iter()
         .filter(|window| now >= window.start && now <= window.end)
@@ -206,18 +242,27 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary
                 monitors,
             }
         })
-        .collect();
+        .collect()
+}
 
-    Summary {
-        title: config.page.title.clone(),
-        overall,
-        overall_label: overall_label(overall),
-        generated_at: now.to_rfc3339(),
-        updated_utc: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        incidents,
-        maintenances,
-        monitors,
+/// Build the view for each watched peer (its current status and last-seen time),
+/// rendered in a section of its own apart from the monitors.
+async fn build_peers(pool: &SqlitePool, config: &Config, threshold: i64) -> Vec<PeerView> {
+    let mut peers = Vec::new();
+    for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
+        let recent = or_empty(
+            db::recent_checks(pool, peer.listen_id(), threshold.max(1)).await,
+            "peer recent checks",
+        );
+        peers.push(PeerView {
+            status: derive_status(&recent, threshold),
+            last_seen: recent.first().and_then(|latest| iso(latest.time)),
+            id: peer.id.clone(),
+            name: peer.name.clone(),
+            pings: peer.ping_url.is_some(),
+        });
     }
+    peers
 }
 
 /// Unwrap a batch query, logging and using empty data on error so one failed

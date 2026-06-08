@@ -10,6 +10,7 @@ publish.workspace = true
 anyhow.workspace = true
 arc-swap = "1.9.1"
 chrono.workspace = true
+futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
 hora-notify.workspace = true
 notify.workspace = true
 reqwest.workspace = true
