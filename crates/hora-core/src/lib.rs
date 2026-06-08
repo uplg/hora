@@ -9,6 +9,7 @@ pub mod peer;
 pub mod probe;
 pub mod scheduler;
 pub mod supervisor;
+pub mod topology;
 
 /// Seconds in a day (UTC), shared across the time-bucketing logic.
 pub const SECONDS_PER_DAY: i64 = 86_400;

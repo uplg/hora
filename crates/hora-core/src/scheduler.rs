@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 use crate::config::{Config, Kind, Monitor};
 use crate::notifications::Notifiers;
 use crate::probe::Outcome;
+use crate::topology;
 use crate::{db, probe};
 
 /// The level a monitor was most recently alerted at, so we never re-alert the
@@ -111,12 +112,18 @@ async fn run(
             consecutive_degraded = 0;
             if consecutive_down >= threshold && alerted != AlertLevel::Down {
                 error!(monitor = %monitor.id, failures = consecutive_down, "confirmed down");
+                let snapshot = config.borrow().clone();
+                let (cause, impacted_names) =
+                    down_context(&snapshot, &pool, &monitor, threshold).await;
+                let impacted_refs: Vec<&str> = impacted_names.iter().map(String::as_str).collect();
                 notifier
                     .load_full()
                     .dispatch(
                         Event::Down {
                             monitor: &monitor.name,
                             error: outcome.error.as_deref(),
+                            cause: cause.as_deref(),
+                            impacted: &impacted_refs,
                         },
                         monitor.notify.as_deref(),
                     )
@@ -167,6 +174,39 @@ async fn run(
 /// yet (or a read error) - the loop skips this tick, leaving the status unknown.
 async fn heartbeat_outcome(pool: &SqlitePool, monitor: &Monitor) -> Option<Outcome> {
     heartbeat_outcome_for(pool, &monitor.id, monitor.interval_secs).await
+}
+
+/// Compute topology annotation for a down alert: the nearest down upstream
+/// (`cause`) if any, or the list of impacted dependents (`impacted`) if this
+/// monitor is a root cause. Returns `(None, vec![])` when the monitor has no
+/// topology configured.
+async fn down_context(
+    config: &Config,
+    pool: &SqlitePool,
+    monitor: &Monitor,
+    threshold: u32,
+) -> (Option<String>, Vec<String>) {
+    let threshold_i64 = i64::from(threshold.max(1));
+
+    let upstreams = topology::transitive_upstreams(&config.monitors, &monitor.id);
+    for up_id in &upstreams {
+        let Ok(recent) = db::recent_checks(pool, up_id, threshold_i64).await else {
+            continue;
+        };
+        if db::derive_status(&recent, threshold_i64) == "down"
+            && let Some(name) = topology::monitor_name(&config.monitors, up_id)
+        {
+            return (Some(name.to_owned()), Vec::new());
+        }
+    }
+
+    let dependents = topology::transitive_dependents(&config.monitors, &monitor.id);
+    let impacted: Vec<String> = dependents
+        .iter()
+        .filter_map(|dep_id| topology::monitor_name(&config.monitors, dep_id).map(String::from))
+        .collect();
+
+    (None, impacted)
 }
 
 /// Evaluate a heartbeat from the stored pings for `id` against `interval_secs`:

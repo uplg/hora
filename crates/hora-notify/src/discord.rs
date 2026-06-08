@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, latency_suffix, post_json};
+use crate::util::{cert_expiry_phrase, latency_suffix, post_json, topology_suffix};
 use crate::{Event, Notifier};
 
 // Embed accent colours, matching the status badges: red / green / orange.
@@ -30,12 +30,16 @@ impl DiscordNotifier {
 
     fn embed(event: Event<'_>) -> Embed {
         match event {
-            Event::Down { monitor, error } => Embed {
-                // Fence the error so Discord shows it verbatim; strip backticks
-                // that would otherwise break out of the code block.
+            Event::Down {
+                monitor,
+                error,
+                cause,
+                impacted,
+            } => Embed {
                 description: Some(format!(
-                    "```{}```",
-                    error.unwrap_or("no response").replace('`', "'")
+                    "```{}```{}",
+                    error.unwrap_or("no response").replace('`', "'"),
+                    topology_suffix(cause, impacted)
                 )),
                 title: format!("\u{1F534} {monitor} is DOWN"),
                 color: COLOR_DOWN,
@@ -127,6 +131,8 @@ mod tests {
         let down = DiscordNotifier::embed(Event::Down {
             monitor: "API",
             error: Some("boom"),
+            cause: None,
+            impacted: &[],
         });
         assert!(down.title.contains("is DOWN"));
         assert!(down.description.expect("down has a body").contains("boom"));
@@ -157,6 +163,8 @@ mod tests {
         let down = DiscordNotifier::embed(Event::Down {
             monitor: "API",
             error: Some("``` injection"),
+            cause: None,
+            impacted: &[],
         });
         let body = down.description.expect("down has a body");
         assert!(

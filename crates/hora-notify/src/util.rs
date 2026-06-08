@@ -18,6 +18,18 @@ pub(crate) fn latency_suffix(latency_ms: Option<i64>) -> String {
     latency_ms.map_or_else(String::new, |ms| format!(" ({ms}ms)"))
 }
 
+/// Topology annotation for a down alert: `"caused by X"` when the monitor is a
+/// symptom, `"impacts N: a, b, c"` when it is a root cause, empty otherwise.
+pub(crate) fn topology_suffix(cause: Option<&str>, impacted: &[&str]) -> String {
+    if let Some(cause) = cause {
+        return format!("\ncaused by {cause}");
+    }
+    if impacted.is_empty() {
+        return String::new();
+    }
+    format!("\nimpacts {}: {}", impacted.len(), impacted.join(", "))
+}
+
 /// Human phrasing for a certificate-expiry event.
 pub(crate) fn cert_expiry_phrase(days_left: i64) -> String {
     if days_left <= 0 {

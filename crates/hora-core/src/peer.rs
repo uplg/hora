@@ -351,6 +351,8 @@ pub(crate) fn spawn_watch(
                         Event::Down {
                             monitor: &peer.name,
                             error: outcome.error.as_deref(),
+                            cause: None,
+                            impacted: &[],
                         },
                     )
                     .await;

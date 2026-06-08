@@ -310,6 +310,20 @@
       font-size: 11px;
     }
 
+    .topology {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 4px;
+    }
+
+    .topology.cause {
+      color: var(--degraded);
+    }
+
+    .topology.impacted {
+      color: var(--down);
+    }
+
     .incidents {
       display: flex;
       flex-direction: column;
@@ -433,8 +447,12 @@
     {% if summary.monitors.is_empty() %}
     <p class="empty-state">No monitors configured yet.</p>
     {% else %}
+    {% for group in summary.groups %}
+    {% if !group.name.is_empty() %}
+    <h2 class="section-title">{{ group.name }}</h2>
+    {% endif %}
     <div class="grid">
-      {% for monitor in summary.monitors %}
+      {% for monitor in group.monitors %}
       <section class="card{% if monitor.maintenance.is_some() %} under-maint{% endif %}">
         <div class="card-head">
           <span class="dot {{ monitor.status }}"></span>
@@ -444,6 +462,13 @@
             <span><b>{% if let Some(ms) = monitor.last_latency_ms %}{{ ms }}ms{% else %}-{% endif %}</b></span>
           </span>
         </div>
+
+        {% if let Some(cause) = monitor.cause %}
+        <div class="topology cause">caused by {{ cause }}</div>
+        {% endif %}
+        {% if !monitor.impacted.is_empty() %}
+        <div class="topology impacted">impacts: {{ monitor.impacted.join(", ") }}</div>
+        {% endif %}
 
         <div class="uptime-bar">
           {% for cell in monitor.bar %}
@@ -465,6 +490,7 @@
       </section>
       {% endfor %}
     </div>
+    {% endfor %}
     {% endif %}
 
     {% if !summary.peers.is_empty() %}

@@ -451,6 +451,27 @@ pub async fn cert_all(pool: &SqlitePool) -> sqlx::Result<HashMap<String, i64>> {
     Ok(rows.into_iter().collect())
 }
 
+/// Current status from the recent checks (newest first): a single failure only
+/// counts as `degraded` until `threshold` consecutive failures confirm `down`.
+#[must_use]
+pub fn derive_status(recent: &[Latest], threshold: i64) -> &'static str {
+    let Some(latest) = recent.first() else {
+        return "unknown";
+    };
+    match latest.status {
+        1 => "up",
+        2 => "degraded",
+        _ => {
+            let needed = usize::try_from(threshold).unwrap_or(usize::MAX);
+            if recent.len() >= needed && recent.iter().all(|check| check.status == 0) {
+                "down"
+            } else {
+                "degraded"
+            }
+        }
+    }
+}
+
 /// Background task: periodically prune each monitor's history to its retention,
 /// and drop any data left behind by monitors removed from the config. A shutdown
 /// signal lets it stop between ticks instead of being aborted.

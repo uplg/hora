@@ -21,10 +21,21 @@ impl WebhookNotifier {
 
     fn payload(event: Event<'_>) -> Payload<'_> {
         match event {
-            Event::Down { monitor, error } => Payload {
+            Event::Down {
+                monitor,
+                error,
+                cause,
+                impacted,
+            } => Payload {
                 event: "down",
                 monitor,
                 message: error,
+                cause,
+                impacted: if impacted.is_empty() {
+                    None
+                } else {
+                    Some(impacted)
+                },
                 witness: None,
                 days_left: None,
                 latency_ms: None,
@@ -36,6 +47,8 @@ impl WebhookNotifier {
                 event: "degraded",
                 monitor,
                 message: None,
+                cause: None,
+                impacted: None,
                 witness: None,
                 days_left: None,
                 latency_ms,
@@ -44,6 +57,8 @@ impl WebhookNotifier {
                 event: "recovered",
                 monitor,
                 message: None,
+                cause: None,
+                impacted: None,
                 witness: None,
                 days_left: None,
                 latency_ms: None,
@@ -52,16 +67,18 @@ impl WebhookNotifier {
                 event: "cert_expiring",
                 monitor,
                 message: None,
+                cause: None,
+                impacted: None,
                 witness: None,
                 days_left: Some(days_left),
                 latency_ms: None,
             },
-            // `monitor` carries the peer name; `witness` names the node still
-            // seeing it up.
             Event::PeerLinkDegraded { peer, witness } => Payload {
                 event: "peer_link_degraded",
                 monitor: peer,
                 message: None,
+                cause: None,
+                impacted: None,
                 witness: Some(witness),
                 days_left: None,
                 latency_ms: None,
@@ -76,6 +93,10 @@ struct Payload<'a> {
     monitor: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    impacted: Option<&'a [&'a str]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     witness: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,10 +126,30 @@ mod tests {
         let down = WebhookNotifier::payload(Event::Down {
             monitor: "API",
             error: Some("boom"),
+            cause: None,
+            impacted: &[],
         });
         assert_eq!(down.event, "down");
         assert_eq!(down.monitor, "API");
         assert_eq!(down.message, Some("boom"));
+        assert!(down.cause.is_none());
+        assert!(down.impacted.is_none());
+
+        let symptom = WebhookNotifier::payload(Event::Down {
+            monitor: "API",
+            error: Some("timeout"),
+            cause: Some("DB"),
+            impacted: &[],
+        });
+        assert_eq!(symptom.cause, Some("DB"));
+
+        let root = WebhookNotifier::payload(Event::Down {
+            monitor: "DB",
+            error: Some("refused"),
+            cause: None,
+            impacted: &["API", "Web"],
+        });
+        assert_eq!(root.impacted, Some(["API", "Web"].as_slice()));
 
         let cert = WebhookNotifier::payload(Event::CertExpiring {
             monitor: "API",

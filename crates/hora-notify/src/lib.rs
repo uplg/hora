@@ -33,6 +33,10 @@ pub enum Event<'a> {
     Down {
         monitor: &'a str,
         error: Option<&'a str>,
+        /// The upstream monitor causing this failure (topology annotation).
+        cause: Option<&'a str>,
+        /// Downstream monitors impacted by this root-cause failure.
+        impacted: &'a [&'a str],
     },
     /// A monitor is up but degraded: slower than its `degraded_over_ms` budget.
     Degraded {

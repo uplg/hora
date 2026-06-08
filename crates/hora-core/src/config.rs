@@ -557,6 +557,16 @@ pub struct Monitor {
     /// Override how long this monitor's checks are kept before pruning.
     #[serde(default)]
     pub retention_days: Option<u16>,
+    /// Display group for the status page (monitors sharing a group are rendered
+    /// together under a section header). Ungrouped monitors appear last.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Upstream monitor ids this one depends on. When set, a down alert is
+    /// annotated with the probable upstream cause (if any upstream is also
+    /// down) or with the dependents it impacts (if this is a root cause).
+    /// Validated as a DAG at load time.
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
 }
 
 // Manual `Debug` (rather than derived) so credentials never leak: `target` and
@@ -586,6 +596,8 @@ impl std::fmt::Debug for Monitor {
             .field("push_token", &self.push_token)
             .field("check_cert", &self.check_cert)
             .field("retention_days", &self.retention_days)
+            .field("group", &self.group)
+            .field("depends_on", &self.depends_on)
             .finish()
     }
 }
@@ -886,6 +898,8 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             }
         }
     }
+
+    crate::topology::validate_dag(&config.monitors)?;
 
     validate_peers(config, &seen, &channel_names)?;
     Ok(())
@@ -1779,5 +1793,77 @@ mod tests {
         let dump = format!("{:?}", config.health) + &format!("{:?}", config.peers);
         assert!(!dump.contains("sup3rsecret"), "url secret leaked: {dump}");
         assert!(!dump.contains("tok3n"), "ping token leaked: {dump}");
+    }
+
+    #[test]
+    fn parses_group_and_depends_on() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "db"
+            name = "DB"
+            kind = "tcp"
+            target = "db:5432"
+            interval_secs = 30
+            group = "infra"
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://api.example"
+            interval_secs = 30
+            group = "app"
+            depends_on = ["db"]
+        "#,
+        );
+        assert_eq!(config.monitors[0].group.as_deref(), Some("infra"));
+        assert_eq!(
+            config.monitors[1].depends_on.as_deref(),
+            Some(&vec!["db".to_owned()][..])
+        );
+        validate(&config).expect("valid topology");
+    }
+
+    #[test]
+    fn rejects_depends_on_unknown_monitor() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://api.example"
+            interval_secs = 30
+            depends_on = ["ghost"]
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("unknown monitor"), "got: {error}");
+    }
+
+    #[test]
+    fn rejects_dependency_cycle() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "a"
+            name = "A"
+            target = "https://a.example"
+            interval_secs = 30
+            depends_on = ["b"]
+            [[monitors]]
+            id = "b"
+            name = "B"
+            target = "https://b.example"
+            interval_secs = 30
+            depends_on = ["a"]
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("cycle"), "got: {error}");
     }
 }

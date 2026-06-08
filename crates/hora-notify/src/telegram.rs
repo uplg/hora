@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, escape, latency_suffix, post_json};
+use crate::util::{cert_expiry_phrase, escape, latency_suffix, post_json, topology_suffix};
 use crate::{Event, Notifier};
 
 /// Sends alerts to a Telegram chat via the Bot API.
@@ -26,10 +26,16 @@ impl TelegramNotifier {
 
     fn render(event: Event<'_>) -> String {
         match event {
-            Event::Down { monitor, error } => format!(
-                "\u{1F534} <b>{}</b> is DOWN\n<code>{}</code>",
+            Event::Down {
+                monitor,
+                error,
+                cause,
+                impacted,
+            } => format!(
+                "\u{1F534} <b>{}</b> is DOWN\n<code>{}</code>{}",
                 escape(monitor),
                 escape(error.unwrap_or("no response")),
+                escape(&topology_suffix(cause, impacted)),
             ),
             Event::Degraded {
                 monitor,
@@ -91,8 +97,26 @@ mod tests {
         let down = TelegramNotifier::render(Event::Down {
             monitor: "API",
             error: Some("boom"),
+            cause: None,
+            impacted: &[],
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
+
+        let symptom = TelegramNotifier::render(Event::Down {
+            monitor: "API",
+            error: Some("timeout"),
+            cause: Some("DB"),
+            impacted: &[],
+        });
+        assert!(symptom.contains("caused by DB"));
+
+        let root = TelegramNotifier::render(Event::Down {
+            monitor: "DB",
+            error: Some("refused"),
+            cause: None,
+            impacted: &["API", "Web"],
+        });
+        assert!(root.contains("impacts 2") && root.contains("API"));
 
         let recovered = TelegramNotifier::render(Event::Recovered { monitor: "API" });
         assert!(recovered.contains("recovered"));

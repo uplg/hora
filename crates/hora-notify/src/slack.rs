@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, escape, latency_suffix, post_json};
+use crate::util::{cert_expiry_phrase, escape, latency_suffix, post_json, topology_suffix};
 use crate::{Event, Notifier};
 
 /// Posts alerts to a Slack channel through an incoming webhook.
@@ -24,11 +24,16 @@ impl SlackNotifier {
 
     fn render(event: Event<'_>) -> String {
         match event {
-            Event::Down { monitor, error } => format!(
-                ":red_circle: *{}* is DOWN\n```{}```",
+            Event::Down {
+                monitor,
+                error,
+                cause,
+                impacted,
+            } => format!(
+                ":red_circle: *{}* is DOWN\n```{}```{}",
                 escape(monitor),
-                // Neutralise backticks so the error can't break out of the block.
                 escape(error.unwrap_or("no response")).replace('`', "'"),
+                topology_suffix(cause, impacted),
             ),
             Event::Degraded {
                 monitor,
@@ -89,6 +94,8 @@ mod tests {
         let down = SlackNotifier::render(Event::Down {
             monitor: "API",
             error: Some("boom"),
+            cause: None,
+            impacted: &[],
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
 

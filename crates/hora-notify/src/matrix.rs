@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, latency_suffix, send_retrying};
+use crate::util::{cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix};
 use crate::{Event, Notifier};
 
 /// Posts alerts to a Matrix room as the bot whose access token is configured.
@@ -46,9 +46,15 @@ impl MatrixNotifier {
 
     fn render(event: Event<'_>) -> String {
         match event {
-            Event::Down { monitor, error } => format!(
-                "\u{1F534} {monitor} is DOWN\n{}",
-                error.unwrap_or("no response")
+            Event::Down {
+                monitor,
+                error,
+                cause,
+                impacted,
+            } => format!(
+                "\u{1F534} {monitor} is DOWN\n{}{}",
+                error.unwrap_or("no response"),
+                topology_suffix(cause, impacted)
             ),
             Event::Degraded {
                 monitor,
@@ -116,6 +122,8 @@ mod tests {
         let down = MatrixNotifier::render(Event::Down {
             monitor: "API",
             error: Some("boom"),
+            cause: None,
+            impacted: &[],
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
 

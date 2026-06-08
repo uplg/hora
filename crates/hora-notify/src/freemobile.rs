@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 
-use crate::util::{cert_expiry_phrase, latency_suffix, send_retrying};
+use crate::util::{cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix};
 use crate::{Event, Notifier};
 
 const ENDPOINT: &str = "https://smsapi.free-mobile.fr/sendmsg";
@@ -30,8 +30,17 @@ impl FreeMobileNotifier {
     /// pricier UCS-2 encoding (70 chars per part instead of 160).
     fn render(event: Event<'_>) -> String {
         match event {
-            Event::Down { monitor, error } => {
-                format!("DOWN: {monitor} - {}", error.unwrap_or("no response"))
+            Event::Down {
+                monitor,
+                error,
+                cause,
+                impacted,
+            } => {
+                format!(
+                    "DOWN: {monitor} - {}{}",
+                    error.unwrap_or("no response"),
+                    topology_suffix(cause, impacted)
+                )
             }
             Event::Degraded {
                 monitor,
@@ -81,6 +90,8 @@ mod tests {
         let down = FreeMobileNotifier::render(Event::Down {
             monitor: "API",
             error: Some("boom"),
+            cause: None,
+            impacted: &[],
         });
         assert!(down.starts_with("DOWN: API") && down.contains("boom"));
 

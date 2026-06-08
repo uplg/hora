@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dependency-aware alerting** (`depends_on`) and **display groups** (`group`)
+  on monitors. When a monitor goes down, the alert is annotated with topology
+  context: `"caused by X"` if an upstream it depends on is also down (symptom),
+  or `"impacts: A, B, C"` if all its upstreams are up (root cause with blast
+  radius). Every monitor still alerts independently — annotations are additive,
+  nothing is suppressed. The dependency graph is validated as a DAG at load
+  (Kahn's algorithm); cycles and unknown references are rejected. On the status
+  page, monitors are grouped by their `group` field under section headers. The
+  webhook payload carries structural `cause` and `impacted` fields.
 - **Mutual surveillance / dead-man's switch** via a `[health]` section and
   `[[peers]]`. A node emits an outbound heartbeat to each peer's `ping_url` only
   while it is locally healthy (scheduler ticking *and* database writable), so a

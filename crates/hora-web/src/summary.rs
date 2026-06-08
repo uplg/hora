@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 use hora_core::SECONDS_PER_DAY;
 use hora_core::config::{Config, Monitor};
 use hora_core::db::{self, DayRow, Latest, Point};
+use hora_core::topology;
 
 use crate::SPARK_BUCKETS;
 use crate::render::sparkline;
@@ -23,14 +24,28 @@ pub(crate) struct Summary {
     overall: &'static str,
     overall_label: &'static str,
     generated_at: String,
-    /// Human-readable UTC timestamp for the footer (the API uses `generated_at`).
     #[serde(skip)]
     updated_utc: String,
     incidents: Vec<IncidentView>,
     maintenances: Vec<MaintenanceView>,
     pub(crate) monitors: Vec<MonitorView>,
-    /// Watched peers in the surveillance mesh, shown in their own section.
+    /// Monitor groups: `(group_name, monitors)`. Ungrouped monitors appear under
+    /// an empty-string key, always last.
+    groups: Vec<GroupView>,
     peers: Vec<PeerView>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct GroupView {
+    name: String,
+    /// Member monitor ids, in display order. The full monitor objects live once in
+    /// the top-level `monitors`; the API carries only ids here so the response is
+    /// not doubled, and a caller maps ids back to the monitors to render sections.
+    ids: Vec<String>,
+    /// The rendered cards, for the server-side template only; skipped from the API
+    /// (it would duplicate every monitor object).
+    #[serde(skip)]
+    monitors: Vec<MonitorView>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -59,7 +74,7 @@ pub(crate) struct PeerView {
     pings: bool,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Serialize, ToSchema)]
 pub(crate) struct MonitorView {
     pub(crate) id: String,
     name: String,
@@ -92,9 +107,17 @@ pub(crate) struct MonitorView {
     bar: Vec<DayCell>,
     #[serde(skip)]
     chart_svg: String,
+    /// Display group this monitor belongs to.
+    group: Option<String>,
+    /// Upstream monitor name causing this failure (topology annotation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<String>,
+    /// Downstream monitor names impacted by this root-cause failure.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    impacted: Vec<String>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Serialize, ToSchema)]
 pub(crate) struct DayCell {
     date: String,
     state: &'static str,
@@ -167,7 +190,7 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary
         .monitors
         .iter()
         .map(|monitor| {
-            let mut view = build_monitor_view(monitor, &ctx, &data);
+            let mut view = build_monitor_view(monitor, &ctx, &data, &config.monitors);
             view.maintenance = config
                 .active_maintenance(&monitor.id, now)
                 .map(|window| window.title.clone());
@@ -178,6 +201,8 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary
     let overall = monitors
         .iter()
         .fold("up", |worst, m| worse(worst, m.status));
+
+    let groups = build_groups(&monitors, &config.monitors);
 
     // Watched peers form their own section; their state does not roll into the
     // overall badge (it tracks the monitored services, not the surveillance mesh).
@@ -209,6 +234,7 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary
         incidents,
         maintenances,
         monitors,
+        groups,
         peers,
     }
 }
@@ -255,7 +281,7 @@ async fn build_peers(pool: &SqlitePool, config: &Config, threshold: i64) -> Vec<
             "peer recent checks",
         );
         peers.push(PeerView {
-            status: derive_status(&recent, threshold),
+            status: db::derive_status(&recent, threshold),
             last_seen: recent.first().and_then(|latest| iso(latest.time)),
             id: peer.id.clone(),
             name: peer.name.clone(),
@@ -322,13 +348,14 @@ pub(crate) fn build_monitor_view(
     monitor: &Monitor,
     ctx: &SummaryCtx,
     data: &MonitorData,
+    all_monitors: &[Monitor],
 ) -> MonitorView {
     let recent = data
         .recent
         .get(&monitor.id)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let status = derive_status(recent, ctx.threshold);
+    let status = db::derive_status(recent, ctx.threshold);
 
     let uptime_permille = data
         .availability
@@ -359,6 +386,12 @@ pub(crate) fn build_monitor_view(
         .map(|&not_after| (not_after - ctx.timestamp) / SECONDS_PER_DAY);
 
     let latest = recent.first();
+    let (cause, impacted) = if status == "down" {
+        topology_context(monitor, ctx.threshold, data.recent, all_monitors)
+    } else {
+        (None, Vec::new())
+    };
+
     MonitorView {
         id: monitor.id.clone(),
         name: monitor.name.clone(),
@@ -372,14 +405,83 @@ pub(crate) fn build_monitor_view(
         p99_ms: pct.map(|p| p.p99),
         slo_latency_ms: monitor.slo_latency_ms,
         slo_state,
-        // Overridden in `build_summary`, which has the live config and `now`.
         maintenance: None,
         cert_days,
         cert_label: cert_days.map(cert_label),
         cert_state: cert_state_for(cert_days, ctx.cert_threshold),
         bar,
         chart_svg,
+        group: monitor.group.clone(),
+        cause,
+        impacted,
     }
+}
+
+/// Compute topology annotation for a down monitor: the nearest down upstream
+/// name (`cause`) or the list of impacted dependent names.
+fn topology_context(
+    monitor: &Monitor,
+    threshold: i64,
+    recent_map: &HashMap<String, Vec<Latest>>,
+    all_monitors: &[Monitor],
+) -> (Option<String>, Vec<String>) {
+    let upstreams = topology::transitive_upstreams(all_monitors, &monitor.id);
+    for up_id in &upstreams {
+        let recent = recent_map
+            .get(*up_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if db::derive_status(recent, threshold) == "down"
+            && let Some(name) = topology::monitor_name(all_monitors, up_id)
+        {
+            return (Some(name.to_owned()), Vec::new());
+        }
+    }
+
+    let dependents = topology::transitive_dependents(all_monitors, &monitor.id);
+    let impacted: Vec<String> = dependents
+        .iter()
+        .filter_map(|dep_id| topology::monitor_name(all_monitors, dep_id).map(String::from))
+        .collect();
+
+    (None, impacted)
+}
+
+/// Group monitors by their `group` field. Groups appear in config order;
+/// ungrouped monitors (no `group`) appear last under an empty-string key.
+fn build_groups(monitors: &[MonitorView], config_monitors: &[Monitor]) -> Vec<GroupView> {
+    use std::collections::BTreeMap;
+
+    let mut group_order: Vec<String> = Vec::new();
+    let mut seen_groups: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for monitor in config_monitors {
+        if let Some(group) = &monitor.group
+            && seen_groups.insert(group.clone())
+        {
+            group_order.push(group.clone());
+        }
+    }
+    // Ungrouped monitors (empty key) always render last, after every named group
+    // (otherwise a headerless card could appear above the first group's header).
+    group_order.push(String::new());
+
+    let mut grouped: BTreeMap<String, Vec<MonitorView>> = BTreeMap::new();
+    for monitor in monitors {
+        let key = monitor.group.clone().unwrap_or_default();
+        grouped.entry(key).or_default().push(monitor.clone());
+    }
+
+    let mut groups = Vec::new();
+    for key in &group_order {
+        if let Some(mons) = grouped.remove(key) {
+            groups.push(GroupView {
+                name: key.clone(),
+                ids: mons.iter().map(|view| view.id.clone()).collect(),
+                monitors: mons,
+            });
+        }
+    }
+    groups
 }
 
 /// 24h latency percentiles for a monitor, computed in SQL by
@@ -397,26 +499,6 @@ pub(crate) fn slo_state(target: Option<i64>, p95: Option<i64>) -> &'static str {
         (Some(target), Some(p95)) if p95 <= target => "met",
         (Some(_), Some(_)) => "breached",
         _ => "none",
-    }
-}
-
-/// Current status from the recent checks (newest first): a single failure only
-/// counts as `degraded` until `threshold` consecutive failures confirm `down`.
-pub(crate) fn derive_status(recent: &[Latest], threshold: i64) -> &'static str {
-    let Some(latest) = recent.first() else {
-        return "unknown";
-    };
-    match latest.status {
-        1 => "up",
-        2 => "degraded",
-        _ => {
-            let needed = usize::try_from(threshold).unwrap_or(usize::MAX);
-            if recent.len() >= needed && recent.iter().all(|check| check.status == 0) {
-                "down"
-            } else {
-                "degraded"
-            }
-        }
     }
 }
 
@@ -548,10 +630,13 @@ mod tests {
 
     #[test]
     fn derive_status_confirms_down_only_after_threshold() {
-        assert_eq!(derive_status(&[check(0), check(0), check(0)], 3), "down");
-        assert_eq!(derive_status(&[check(0)], 3), "degraded");
-        assert_eq!(derive_status(&[], 3), "unknown");
-        assert_eq!(derive_status(&[check(1)], 3), "up");
+        assert_eq!(
+            db::derive_status(&[check(0), check(0), check(0)], 3),
+            "down"
+        );
+        assert_eq!(db::derive_status(&[check(0)], 3), "degraded");
+        assert_eq!(db::derive_status(&[], 3), "unknown");
+        assert_eq!(db::derive_status(&[check(1)], 3), "up");
     }
 
     #[test]

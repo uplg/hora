@@ -73,10 +73,21 @@ impl EmailNotifier {
 
     fn render(event: Event<'_>) -> (String, String) {
         match event {
-            Event::Down { monitor, error } => (
-                format!("[DOWN] {monitor}"),
-                format!("{monitor} is DOWN\n\n{}", error.unwrap_or("no response")),
-            ),
+            Event::Down {
+                monitor,
+                error,
+                cause,
+                impacted,
+            } => {
+                let suffix = crate::util::topology_suffix(cause, impacted);
+                (
+                    format!("[DOWN] {monitor}"),
+                    format!(
+                        "{monitor} is DOWN\n\n{}{suffix}",
+                        error.unwrap_or("no response")
+                    ),
+                )
+            }
             Event::Degraded {
                 monitor,
                 latency_ms,
@@ -145,6 +156,8 @@ mod tests {
         let (subject, body) = EmailNotifier::render(Event::Down {
             monitor: "API",
             error: Some("boom"),
+            cause: None,
+            impacted: &[],
         });
         assert!(subject.contains("[DOWN]") && subject.contains("API"));
         assert!(body.contains("boom"));

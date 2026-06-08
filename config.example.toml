@@ -112,6 +112,14 @@ default_retention_days = 90
 # For tcp:  target is "host:port"; up = TCP connect succeeds.
 # For push: no target; the job calls POST /api/push/{id} (see below).
 # TLS certificate expiry is checked automatically for https:// monitors.
+#
+# Topology (optional):
+#   group = "infra"              # display group on the status page
+#   depends_on = ["db", "cache"] # upstream monitors this one depends on
+# When a monitor goes down, the alert is annotated:
+#   - "caused by X" if an upstream it depends on is also down (symptom)
+#   - "impacts: A, B, C" if all its upstreams are up (root cause, blast radius)
+# The dependency graph must be acyclic (validated at load).
 
 [[monitors]]
 id = "website"
@@ -120,6 +128,8 @@ kind = "http"
 target = "https://example.com"
 interval_secs = 60
 timeout_secs = 10
+group = "app"
+depends_on = ["api"]
 # expected_status = 200   # optional; default: any 2xx counts as up
 # degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)
 # slo_latency_ms = 500    # optional; the 24h p95 is flagged met/breached against this
@@ -136,6 +146,8 @@ kind = "http"
 target = "https://api.example.com/health"
 interval_secs = 30
 timeout_secs = 10
+group = "app"
+depends_on = ["database"]
 # Body assertions (http only):
 # keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 # json_query = "$.status"   # JSONPath (RFC 9535) evaluated against a JSON body
@@ -149,6 +161,7 @@ kind = "tcp"
 target = "db.example.com:5432"
 interval_secs = 60
 timeout_secs = 5
+group = "infra"
 
 # Heartbeat / push monitor: down if no ping arrives within `interval_secs`.
 # The job calls: curl -fsS -X POST \
