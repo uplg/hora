@@ -60,7 +60,9 @@ impl MatrixNotifier {
                 cert_expiry_phrase(days_left)
             ),
             Event::PeerLinkDegraded { peer, witness } => {
-                format!("\u{1F7E1} {peer} link degraded: unreachable from here, but seen up by {witness}")
+                format!(
+                    "\u{1F7E1} {peer} link degraded: unreachable from here, but seen up by {witness}"
+                )
             }
         }
     }

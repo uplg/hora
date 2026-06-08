@@ -79,7 +79,12 @@ pub async fn report(pool: &SqlitePool, config: &Config, last_tick: &AtomicU64) -
     }
 
     HealthReport {
-        status: if scheduler_ok && db_ok { "ok" } else { "degraded" }.to_owned(),
+        status: if scheduler_ok && db_ok {
+            "ok"
+        } else {
+            "degraded"
+        }
+        .to_owned(),
         scheduler_ok,
         db_ok,
         last_tick_age,
@@ -101,7 +106,11 @@ pub(crate) fn scheduler_liveness(config: &Config, last_tick: &AtomicU64, now: i6
         return (config.monitors.is_empty(), -1);
     }
     let age = (now - i64::try_from(last).unwrap_or(i64::MAX)).max(0);
-    let Some(min_interval) = config.monitors.iter().map(|monitor| monitor.interval_secs).min()
+    let Some(min_interval) = config
+        .monitors
+        .iter()
+        .map(|monitor| monitor.interval_secs)
+        .min()
     else {
         return (true, age);
     };
@@ -116,7 +125,10 @@ pub(crate) fn scheduler_liveness(config: &Config, last_tick: &AtomicU64, now: i6
 /// outbound heartbeat - so the dead-man fires rather than a zombie pinging "ok".
 pub(crate) async fn db_ok(pool: &SqlitePool) -> bool {
     let query = sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(pool);
-    matches!(tokio::time::timeout(Duration::from_secs(2), query).await, Ok(Ok(_)))
+    matches!(
+        tokio::time::timeout(Duration::from_secs(2), query).await,
+        Ok(Ok(_))
+    )
 }
 
 /// This node's view of one peer, measured from its last *positive* heartbeat
@@ -294,7 +306,14 @@ pub(crate) fn spawn_watch(
                     // Only announce recovery if we actually alerted (Isolated was silent).
                     if matches!(alerted, PeerAlert::Down | PeerAlert::Partition) {
                         info!(peer = %peer.id, "peer recovered");
-                        dispatch(&notifier, &peer, Event::Recovered { monitor: &peer.name }).await;
+                        dispatch(
+                            &notifier,
+                            &peer,
+                            Event::Recovered {
+                                monitor: &peer.name,
+                            },
+                        )
+                        .await;
                     }
                     alerted = PeerAlert::Healthy;
                 }
@@ -303,9 +322,13 @@ pub(crate) fn spawn_watch(
 
             consecutive_down = consecutive_down.saturating_add(1);
             // Hold off during the post-startup grace window (see `started`).
-            let grace =
-                i64::try_from(snapshot.health.as_ref().map_or(0, |health| health.grace_secs))
-                    .unwrap_or(0);
+            let grace = i64::try_from(
+                snapshot
+                    .health
+                    .as_ref()
+                    .map_or(0, |health| health.grace_secs),
+            )
+            .unwrap_or(0);
             let in_grace = now.timestamp() - started < grace;
             if consecutive_down < threshold || alerted == PeerAlert::Down || in_grace {
                 continue;
@@ -367,7 +390,10 @@ async fn confirm_down(client: &Client, config: &Config, target: &Peer) -> Verdic
         .peers
         .iter()
         .filter(|peer| peer.id != target.id)
-        .filter_map(|peer| peer.effective_witness_url().map(|url| (peer.name.clone(), url)))
+        .filter_map(|peer| {
+            peer.effective_witness_url()
+                .map(|url| (peer.name.clone(), url))
+        })
         .collect();
     if witnesses.is_empty() {
         return Verdict::Confirmed;
@@ -385,7 +411,10 @@ async fn confirm_down(client: &Client, config: &Config, target: &Peer) -> Verdic
         if let Some(seen) = report {
             reachable += 1;
             if partition.is_none()
-                && seen.peers.get(&target.id).is_some_and(|view| view.state == "up")
+                && seen
+                    .peers
+                    .get(&target.id)
+                    .is_some_and(|view| view.state == "up")
             {
                 partition = Some(name);
             }
@@ -466,27 +495,26 @@ mod tests {
 
     #[test]
     fn liveness_uses_fastest_interval_and_warms_up() {
-        let config = cfg(
-            "[page]\n[server]\n\
+        let config = cfg("[page]\n[server]\n\
              [[monitors]]\nid=\"slow\"\nname=\"S\"\ntarget=\"https://e.com\"\ninterval_secs=86400\n\
-             [[monitors]]\nid=\"fast\"\nname=\"F\"\ntarget=\"https://e.com\"\ninterval_secs=30\n",
-        );
+             [[monitors]]\nid=\"fast\"\nname=\"F\"\ntarget=\"https://e.com\"\ninterval_secs=30\n");
         // Fresh tick: age 10 <= 2*min(30)=60 -> alive (the slow monitor must not relax it).
         let tick = AtomicU64::new(1000);
         assert_eq!(scheduler_liveness(&config, &tick, 1010), (true, 10));
         // Stale: age 200 > 60 -> not alive, even though it is well within the slow interval.
         assert!(!scheduler_liveness(&config, &tick, 1200).0);
         // Never ticked while monitors exist -> warming up, not alive.
-        assert_eq!(scheduler_liveness(&config, &AtomicU64::new(0), 1000), (false, -1));
+        assert_eq!(
+            scheduler_liveness(&config, &AtomicU64::new(0), 1000),
+            (false, -1)
+        );
     }
 
     #[tokio::test]
     async fn peer_seen_reflects_freshness_and_status() {
         let pool = memory_pool().await;
-        let base = cfg(
-            "[page]\n[server]\n[health]\nid=\"a\"\n\
-             [[peers]]\nid=\"x\"\nname=\"X\"\nexpect_every_secs=100\n",
-        );
+        let base = cfg("[page]\n[server]\n[health]\nid=\"a\"\n\
+             [[peers]]\nid=\"x\"\nname=\"X\"\nexpect_every_secs=100\n");
         let mut peer = base.peers[0].clone();
         let now = 1_000_000;
 
@@ -519,11 +547,9 @@ mod tests {
     #[tokio::test]
     async fn report_includes_watched_peers_and_status() {
         let pool = memory_pool().await;
-        let config = cfg(
-            "[page]\n[server]\n[health]\nid=\"hora-a\"\n\
+        let config = cfg("[page]\n[server]\n[health]\nid=\"hora-a\"\n\
              [[peers]]\nid=\"hora-b\"\nname=\"B\"\nexpect_every_secs=100\n\
-             [[peers]]\nid=\"hc\"\nname=\"HC\"\nping_url=\"https://hc-ping.com/x\"\n",
-        );
+             [[peers]]\nid=\"hc\"\nname=\"HC\"\nping_url=\"https://hc-ping.com/x\"\n");
         let report = report(&pool, &config, &AtomicU64::new(0)).await;
         assert_eq!(report.id.as_deref(), Some("hora-a"));
         assert!(report.db_ok);

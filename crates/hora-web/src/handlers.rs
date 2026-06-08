@@ -103,7 +103,10 @@ pub(crate) async fn openapi() -> Response {
 /// failing monitor degrades to an `unknown` card rather than failing the page.
 pub(crate) async fn state_summary(state: AppState) -> Arc<Summary> {
     let AppState {
-        pool, config, cache, ..
+        pool,
+        config,
+        cache,
+        ..
     } = state;
     let config = config.borrow().clone();
     summary_for(&pool, &config, &cache).await

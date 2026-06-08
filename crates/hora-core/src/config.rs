@@ -1672,10 +1672,7 @@ mod tests {
         "#,
         );
         let error = validate(&config).unwrap_err().to_string();
-        assert!(
-            error.contains("require a [health] section"),
-            "got: {error}"
-        );
+        assert!(error.contains("require a [health] section"), "got: {error}");
     }
 
     #[test]
@@ -1719,10 +1716,7 @@ mod tests {
         "#,
         );
         let error = validate(&config).unwrap_err().to_string();
-        assert!(
-            error.contains("clashes with a monitor id"),
-            "got: {error}"
-        );
+        assert!(error.contains("clashes with a monitor id"), "got: {error}");
     }
 
     #[test]
