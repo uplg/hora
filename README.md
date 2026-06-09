@@ -17,7 +17,11 @@ Named after the **Horai**, the Greek goddesses of the hours.
 ## Features
 
 - **HTTP, TCP, ICMP, DNS, push & assertion probes** - per-monitor interval, timeout,
-  expected status and a "degraded if slower than" threshold. HTTP monitors can assert
+  expected status and a "degraded if slower than" threshold. Failed probes are
+  **retried once** before anything is recorded (`probe_retries`), so a one-off
+  network blip never pollutes the history or the error budget - and every failure
+  that survives its retry is logged with its reason and shown as a **tooltip on
+  the status dot** (plus `last_error` in the API). HTTP monitors can assert
   a **keyword** in the body or a **JSONPath** (`json_query` / `json_expected`), route
   through an HTTP/SOCKS **proxy**, and send custom headers. **ICMP** (ping) monitors
   use an unprivileged datagram socket - no `CAP_NET_RAW`, rootless-Docker friendly,

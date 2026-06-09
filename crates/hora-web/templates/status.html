@@ -105,6 +105,20 @@
       font-size: 13px;
     }
 
+    .nav-pill {
+      color: var(--muted);
+      font-size: 13px;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 8px 14px;
+      background: var(--card);
+    }
+
+    .nav-pill:hover {
+      color: var(--text);
+    }
+
     .dot {
       width: 9px;
       height: 9px;
@@ -425,6 +439,7 @@
         <span class="dot {{ summary.overall }}"></span>
         <span class="overall-label">{{ summary.overall_label }}</span>
       </div>
+      <a class="nav-pill" href="/history">Incident history</a>
     </div>
 
     {% if !summary.incidents.is_empty() %}
@@ -465,7 +480,8 @@
       {% for monitor in group.monitors %}
       <section class="card{% if monitor.maintenance.is_some() %} under-maint{% endif %}">
         <div class="card-head">
-          <span class="dot {{ monitor.status }}"></span>
+          <span class="dot {{ monitor.status }}"{% if let Some(err) = monitor.last_error %}
+            title="{{ err }}"{% endif %}></span>
           <span class="name">{{ monitor.name }}</span>
           <span class="meta">
             <span>{% if let Some(label) = monitor.uptime_label %}{{ label }}{% else %}-{% endif %}</span>
@@ -526,8 +542,7 @@
     {% endif %}
 
     <footer>
-      Updated {{ summary.updated_utc }} · <a href="/history">Incident history</a> · Powered by <a
-        href="https://github.com/uplg/hora" rel="noopener">Hora</a>
+      Updated {{ summary.updated_utc }} · Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
     </footer>
   </main>
 </body>

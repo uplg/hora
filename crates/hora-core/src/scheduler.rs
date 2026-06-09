@@ -113,6 +113,18 @@ async fn run(
             continue;
         };
 
+        // Every failure that survived its retries is worth a log line (the
+        // page only shows "degraded" until the threshold confirms, so this is
+        // where a blip's reason is visible). Quiet once the outage is
+        // confirmed - "confirmed down" already said it.
+        if !outcome.up && alerted != AlertLevel::Down {
+            warn!(
+                monitor = %monitor.id,
+                error = outcome.error.as_deref().unwrap_or("unknown"),
+                "check failed"
+            );
+        }
+
         let (muted, threshold, alert_on_degraded) = alert_settings(&config, &monitor.id);
         // An incident is bound to confirmed-down alerts; any up tick (healthy
         // or merely degraded) ends it, whatever the alert state machine does -

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Probe retries** (`probe_retries`, default 1, max 5): a failed probe is
+  re-tried after one second before anything is recorded, so a single network
+  blip between Hora and the target never lands in the history, the uptime
+  numbers or the error budget - the burn-rate alerts and the page tell the
+  same story. Retries are logged; set `probe_retries = 0` to record every
+  raw result.
+- **Failure reasons surfaced**: the most recent check's error (timeout, HTTP
+  status + body snippet, connect error) is now a tooltip on the status dot,
+  a `last_error` field in `/api/summary`, and a `check failed` warn log line
+  for every failure that survived its retries (visible in `docker logs`) -
+  no more opening the database to learn why a card went orange.
+- **Header navigation**: the status page links to the incident history (and
+  the history page back to the status page and its Atom feed) as pills in the
+  header.
+
 - **Availability SLOs, error budgets and burn-rate alerts**: `slo_uptime = 99.9`
   (+ optional `slo_window_days`, default 30) per monitor. The status page and
   `/api/summary` show the error budget left over the window (computed from the
@@ -76,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A failed check now needs to fail twice (probe + one retry, see
+  `probe_retries`) before being recorded; histories get cleaner from this
+  release on, existing rows are untouched.
 - Down alerts of monitors whose `depends_on` upstream is also down now wait
   out the grouping window (up to `alerts.group_window_secs`, default 30s)
   before being sent - or folded. Root-cause alerts are unaffected. Set

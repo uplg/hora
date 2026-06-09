@@ -63,18 +63,23 @@
       letter-spacing: 0.01em;
     }
 
-    .feed-link {
+    .nav {
       margin-left: auto;
+      display: flex;
+      gap: 8px;
+    }
+
+    .nav-pill {
       color: var(--muted);
-      font-size: 12px;
+      font-size: 13px;
       text-decoration: none;
       border: 1px solid var(--border);
       border-radius: 999px;
-      padding: 6px 12px;
+      padding: 8px 14px;
       background: var(--card);
     }
 
-    .feed-link:hover {
+    .nav-pill:hover {
       color: var(--text);
     }
 
@@ -160,7 +165,10 @@
   <main class="wrap">
     <div class="top">
       <h1>Incident history</h1>
-      <a class="feed-link" href="/history.atom">Atom feed</a>
+      <nav class="nav">
+        <a class="nav-pill" href="/">Status page</a>
+        <a class="nav-pill" href="/history.atom">Atom feed</a>
+      </nav>
     </div>
 
     {% if incidents.is_empty() %}
@@ -185,7 +193,7 @@
     {% endif %}
 
     <footer>
-      <a href="/">{{ title }}</a> · Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
+      Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
     </footer>
   </main>
 </body>

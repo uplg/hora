@@ -54,9 +54,35 @@ impl Outcome {
     }
 }
 
-/// Probe a monitor according to its kind.
+/// Pause before a retry, long enough for a micro-blip (packet loss, a
+/// connection reset mid-deploy) to pass, short next to any real interval.
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Probe a monitor according to its kind, re-trying failures up to the
+/// monitor's `probe_retries` (default 1). Only the final attempt is reported:
+/// a blip that passes on retry never reaches the history, the page or the
+/// error budget. Retries are logged so a flaky path stays visible in the logs
+/// even when the recorded check ends up green.
 #[must_use]
 pub async fn run(client: &Client, monitor: &Monitor) -> Outcome {
+    let mut outcome = probe_once(client, monitor).await;
+    for attempt in 1..=monitor.probe_retries() {
+        if outcome.up {
+            break;
+        }
+        tracing::info!(
+            monitor = %monitor.id,
+            attempt,
+            error = outcome.error.as_deref().unwrap_or("unknown"),
+            "probe failed, retrying"
+        );
+        tokio::time::sleep(RETRY_DELAY).await;
+        outcome = probe_once(client, monitor).await;
+    }
+    outcome
+}
+
+async fn probe_once(client: &Client, monitor: &Monitor) -> Outcome {
     match monitor.kind {
         Kind::Http => http(client, monitor).await,
         Kind::Tcp => tcp(monitor).await,
@@ -458,6 +484,7 @@ mod tests {
             json_query: None,
             json_expected: None,
             max_body_kb: None,
+            probe_retries: None,
             notify: None,
             proxy: None,
             push_token: None,

@@ -28,6 +28,8 @@ pub struct Latest {
     pub time: i64,
     pub latency_ms: Option<i64>,
     pub status: i64,
+    /// Failure reason (or response snippet) when the check was not up.
+    pub error: Option<String>,
 }
 
 /// Per-day aggregate of check statuses.
@@ -152,7 +154,7 @@ pub async fn recent_checks(
     limit: i64,
 ) -> sqlx::Result<Vec<Latest>> {
     sqlx::query_as::<_, Latest>(
-        "SELECT time, latency_ms, status FROM checks \
+        "SELECT time, latency_ms, status, error FROM checks \
          WHERE monitor_id = ? ORDER BY time DESC LIMIT ?",
     )
     .bind(monitor_id)
@@ -1172,6 +1174,23 @@ mod tests {
         let bars = daily_all(&pool, 0).await.unwrap();
         assert_eq!(bars["m"][0].day, day_key);
         assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn recent_checks_carry_the_failure_reason() {
+        let pool = memory_pool().await;
+        insert(&pool, "m", 100, 1, Some(10)).await;
+        sqlx::query(
+            "INSERT INTO checks (time, monitor_id, status, latency_ms, status_code, error) \
+             VALUES (200, 'm', 0, NULL, 522, 'HTTP 522: origin timeout')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let recent = recent_checks(&pool, "m", 2).await.unwrap();
+        assert_eq!(recent[0].error.as_deref(), Some("HTTP 522: origin timeout"));
+        assert_eq!(recent[1].error, None);
     }
 
     #[tokio::test]

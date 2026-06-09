@@ -80,6 +80,10 @@ pub(crate) struct MonitorView {
     pub(crate) name: String,
     pub(crate) status: &'static str,
     pub(crate) last_latency_ms: Option<i64>,
+    /// Failure reason of the most recent check, when it was not up: surfaces
+    /// the *why* behind a degraded/down card without opening the database.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
     last_checked: Option<String>,
     #[serde(rename = "uptime_24h_permille")]
     pub(crate) uptime_permille: Option<i64>,
@@ -435,6 +439,7 @@ pub(crate) fn build_monitor_view(
         name: monitor.name.clone(),
         status,
         last_latency_ms: latest.and_then(|l| l.latency_ms),
+        last_error: latest.and_then(|l| l.error.clone()),
         last_checked: latest.and_then(|l| iso(l.time)),
         uptime_permille,
         uptime_label: uptime_permille.map(format_permille),
@@ -729,6 +734,7 @@ mod tests {
             time: 0,
             latency_ms: None,
             status,
+            error: None,
         }
     }
     #[test]

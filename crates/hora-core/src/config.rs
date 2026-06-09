@@ -614,6 +614,13 @@ pub struct Monitor {
     /// (default 1024 = 1 MiB). Raise for large JSON endpoints, with care.
     #[serde(default)]
     pub max_body_kb: Option<u32>,
+    /// Immediate re-probes after a failed check before recording it (default
+    /// 1, max 5). A single network blip between the prober and the target
+    /// thus never lands in the history - so the page, the uptime numbers and
+    /// the error budget only count failures that survived a retry. Set 0 to
+    /// record every raw probe result. Not applicable to push monitors.
+    #[serde(default)]
+    pub probe_retries: Option<u32>,
     /// Restrict this monitor's alerts to these channel names (e.g. `["ops"]`).
     /// Unset = every configured channel.
     #[serde(default)]
@@ -699,6 +706,7 @@ impl std::fmt::Debug for Monitor {
             .field("json_query", &self.json_query)
             .field("json_expected", &self.json_expected)
             .field("max_body_kb", &self.max_body_kb)
+            .field("probe_retries", &self.probe_retries)
             .field("notify", &self.notify)
             .field("proxy", &self.proxy.as_deref().map(redact_url_credentials))
             .field("push_token", &self.push_token)
@@ -774,6 +782,12 @@ impl Monitor {
     #[must_use]
     pub fn push_grace_secs(&self) -> u64 {
         self.grace_secs.unwrap_or(1800)
+    }
+
+    /// Immediate re-probes after a failure before recording it (default 1).
+    #[must_use]
+    pub fn probe_retries(&self) -> u32 {
+        self.probe_retries.unwrap_or(1)
     }
 
     /// Availability SLO window in days (default 30).
@@ -1185,6 +1199,13 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
             anyhow::ensure!(ms > 0, "monitor {}: {label} must be > 0", monitor.id);
         }
     }
+    // Each retry can cost a full timeout; an unbounded count would let one
+    // tick outlive several intervals.
+    anyhow::ensure!(
+        monitor.probe_retries.is_none_or(|retries| retries <= 5),
+        "monitor {}: probe_retries must be at most 5",
+        monitor.id
+    );
     anyhow::ensure!(
         monitor.max_body_kb != Some(0),
         "monitor {}: max_body_kb must be > 0",
@@ -2365,6 +2386,42 @@ mod tests {
         "#,
         );
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn probe_retries_default_and_bounds() {
+        let config = parse(MINIMAL);
+        assert_eq!(config.monitors[0].probe_retries(), 1);
+
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "raw"
+            name = "Raw"
+            target = "https://example.com"
+            interval_secs = 60
+            probe_retries = 0
+        "#,
+        );
+        validate(&config).expect("0 disables retries");
+        assert_eq!(config.monitors[0].probe_retries(), 0);
+
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "m"
+            name = "M"
+            target = "https://example.com"
+            interval_secs = 60
+            probe_retries = 6
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("at most 5"), "{error}");
     }
 
     #[test]
