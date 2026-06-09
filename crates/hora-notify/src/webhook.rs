@@ -27,8 +27,6 @@ impl WebhookNotifier {
                 cause,
                 impacted,
             } => Payload {
-                event: "down",
-                monitor,
                 message: error,
                 cause,
                 impacted: if impacted.is_empty() {
@@ -36,52 +34,43 @@ impl WebhookNotifier {
                 } else {
                     Some(impacted)
                 },
-                witness: None,
-                days_left: None,
-                latency_ms: None,
+                ..Payload::new("down", monitor)
             },
             Event::Degraded {
                 monitor,
                 latency_ms,
             } => Payload {
-                event: "degraded",
-                monitor,
-                message: None,
-                cause: None,
-                impacted: None,
-                witness: None,
-                days_left: None,
                 latency_ms,
+                ..Payload::new("degraded", monitor)
             },
-            Event::Recovered { monitor } => Payload {
-                event: "recovered",
-                monitor,
-                message: None,
-                cause: None,
-                impacted: None,
-                witness: None,
-                days_left: None,
-                latency_ms: None,
-            },
+            Event::Recovered { monitor } => Payload::new("recovered", monitor),
             Event::CertExpiring { monitor, days_left } => Payload {
-                event: "cert_expiring",
-                monitor,
-                message: None,
-                cause: None,
-                impacted: None,
-                witness: None,
                 days_left: Some(days_left),
-                latency_ms: None,
+                ..Payload::new("cert_expiring", monitor)
             },
             Event::PeerLinkDegraded { peer, witness } => Payload {
-                event: "peer_link_degraded",
-                monitor: peer,
-                message: None,
-                cause: None,
-                impacted: None,
                 witness: Some(witness),
-                days_left: None,
-                latency_ms: None,
+                ..Payload::new("peer_link_degraded", peer)
+            },
+            Event::CertChanged {
+                monitor,
+                old_fingerprint,
+                new_fingerprint,
+            } => Payload {
+                old_fingerprint: Some(old_fingerprint),
+                new_fingerprint: Some(new_fingerprint),
+                ..Payload::new("cert_changed", monitor)
+            },
+            Event::BudgetBurn {
+                monitor,
+                burn_rate_x10,
+                window,
+                exhausted_in_secs,
+            } => Payload {
+                burn_rate_x10: Some(burn_rate_x10),
+                burn_window: Some(window),
+                exhausted_in_secs,
+                ..Payload::new("budget_burn", monitor)
             },
         }
     }
@@ -103,6 +92,38 @@ struct Payload<'a> {
     days_left: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_fingerprint: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_fingerprint: Option<&'a str>,
+    /// Burn rate in tenths of the sustainable rate (144 = 14.4x).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    burn_rate_x10: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    burn_window: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exhausted_in_secs: Option<i64>,
+}
+
+impl<'a> Payload<'a> {
+    /// The bare payload; event-specific fields come in via struct update.
+    fn new(event: &'static str, monitor: &'a str) -> Self {
+        Self {
+            event,
+            monitor,
+            message: None,
+            cause: None,
+            impacted: None,
+            witness: None,
+            days_left: None,
+            latency_ms: None,
+            old_fingerprint: None,
+            new_fingerprint: None,
+            burn_rate_x10: None,
+            burn_window: None,
+            exhausted_in_secs: None,
+        }
+    }
 }
 
 #[async_trait]

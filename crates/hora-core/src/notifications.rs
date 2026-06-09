@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use hora_notify::{
-    DiscordNotifier, Dispatcher, EmailConfig, EmailNotifier, FreeMobileNotifier, MatrixNotifier,
-    Notifier, SlackNotifier, TelegramNotifier, WebhookNotifier,
+    DiscordNotifier, Dispatcher, EmailConfig, EmailNotifier, FreeMobileNotifier, GotifyNotifier,
+    MatrixNotifier, Notifier, NtfyNotifier, PushoverNotifier, SlackNotifier, TelegramNotifier,
+    WebhookNotifier,
 };
 use reqwest::Client;
 
@@ -86,6 +87,21 @@ pub fn build(config: &Config, client: &Client) -> Dispatcher {
                         return None;
                     }
                 },
+                Channel::Ntfy { url, token, .. } => Box::new(NtfyNotifier::new(
+                    client.clone(),
+                    url.as_ref().to_owned(),
+                    token.as_ref().map(|t| t.as_ref().to_owned()),
+                )),
+                Channel::Gotify { url, token, .. } => Box::new(GotifyNotifier::new(
+                    client.clone(),
+                    url.as_ref().to_owned(),
+                    token.as_ref().to_owned(),
+                )),
+                Channel::Pushover { token, user, .. } => Box::new(PushoverNotifier::new(
+                    client.clone(),
+                    token.as_ref().to_owned(),
+                    user.as_ref().to_owned(),
+                )),
             };
             Some((channel.name().to_owned(), notifier))
         })

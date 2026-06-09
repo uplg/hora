@@ -289,6 +289,10 @@
       color: var(--down);
     }
 
+    .slo.low {
+      color: var(--degraded);
+    }
+
     .empty-state {
       color: var(--muted);
       text-align: center;
@@ -482,6 +486,8 @@
           <span class="caption-badges">
             {% if monitor.slo_state != "none" %}{% if let Some(target) = monitor.slo_latency_ms %}<span
               class="slo {{ monitor.slo_state }}" title="24h p95 vs {{ target }}ms SLO">SLO</span>{% endif %}{% endif %}
+            {% if let Some(budget) = monitor.budget_label %}<span class="slo {{ monitor.budget_state }}"
+              title="{{ monitor.budget_title }}">{{ budget }}</span>{% endif %}
             {% if let Some(cert) = monitor.cert_label %}<span class="cert {{ monitor.cert_state }}">TLS {{ cert
               }}</span>{% endif %}
           </span>

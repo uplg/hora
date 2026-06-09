@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, latency_suffix, post_json, topology_suffix};
+use crate::util::{
+    budget_burn_phrase, cert_expiry_phrase, latency_suffix, post_json, topology_suffix,
+};
 use crate::{Event, Notifier};
 
 // Embed accent colours, matching the status badges: red / green / orange.
@@ -70,6 +72,27 @@ impl DiscordNotifier {
                 description: Some(format!(
                     "Unreachable from here, but still seen up by {witness} (likely a network partition)."
                 )),
+                color: COLOR_DEGRADED,
+            },
+            Event::CertChanged {
+                monitor,
+                old_fingerprint,
+                new_fingerprint,
+            } => Embed {
+                title: format!("\u{26A0}\u{FE0F} {monitor} TLS certificate changed"),
+                description: Some(format!(
+                    "old: `{old_fingerprint}`\nnew: `{new_fingerprint}`"
+                )),
+                color: COLOR_CERT,
+            },
+            Event::BudgetBurn {
+                monitor,
+                burn_rate_x10,
+                window,
+                exhausted_in_secs,
+            } => Embed {
+                title: format!("\u{1F525} {monitor} error budget burn"),
+                description: Some(budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)),
                 color: COLOR_DEGRADED,
             },
         }

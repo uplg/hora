@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix};
+use crate::util::{
+    budget_burn_phrase, cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix,
+};
 use crate::{Event, Notifier};
 
 /// Posts alerts to a Matrix room as the bot whose access token is configured.
@@ -70,6 +72,22 @@ impl MatrixNotifier {
                     "\u{1F7E1} {peer} link degraded: unreachable from here, but seen up by {witness}"
                 )
             }
+            Event::CertChanged {
+                monitor,
+                old_fingerprint,
+                new_fingerprint,
+            } => format!(
+                "\u{26A0}\u{FE0F} {monitor} TLS certificate changed unexpectedly\nold: {old_fingerprint}\nnew: {new_fingerprint}"
+            ),
+            Event::BudgetBurn {
+                monitor,
+                burn_rate_x10,
+                window,
+                exhausted_in_secs,
+            } => format!(
+                "\u{1F525} {monitor} {}",
+                budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
+            ),
         }
     }
 }

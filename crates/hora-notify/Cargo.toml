@@ -15,6 +15,7 @@ futures-util = { version = "0.3.32", default-features = false, features = ["allo
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }
 reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 

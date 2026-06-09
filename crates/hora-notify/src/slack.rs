@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, escape, latency_suffix, post_json, topology_suffix};
+use crate::util::{
+    budget_burn_phrase, cert_expiry_phrase, escape, latency_suffix, post_json, topology_suffix,
+};
 use crate::{Event, Notifier};
 
 /// Posts alerts to a Slack channel through an incoming webhook.
@@ -55,6 +57,26 @@ impl SlackNotifier {
                 ":large_yellow_circle: *{}* link degraded\nunreachable from here, but seen up by {}",
                 escape(peer),
                 escape(witness),
+            ),
+            Event::CertChanged {
+                monitor,
+                old_fingerprint,
+                new_fingerprint,
+            } => format!(
+                ":warning: *{}* TLS certificate changed unexpectedly\nold: `{}`\nnew: `{}`",
+                escape(monitor),
+                old_fingerprint,
+                new_fingerprint,
+            ),
+            Event::BudgetBurn {
+                monitor,
+                burn_rate_x10,
+                window,
+                exhausted_in_secs,
+            } => format!(
+                ":fire: *{}* {}",
+                escape(monitor),
+                budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs),
             ),
         }
     }

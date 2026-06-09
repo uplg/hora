@@ -3,13 +3,17 @@
 //! Alerting code emits an [`Event`]; each configured [`Notifier`] decides how
 //! to deliver it. [`Dispatcher`] holds the channels under their routing names
 //! and fans an event out to the matching ones. Telegram, Discord, Slack, Matrix,
-//! a generic JSON webhook, SMTP e-mail and Free Mobile SMS are the built-in
-//! backends; adding another means implementing the trait and registering it.
+//! a generic JSON webhook, SMTP e-mail, Free Mobile SMS, ntfy, Gotify and
+//! Pushover are the built-in backends; adding another means implementing the
+//! trait and registering it.
 
 pub mod discord;
 pub mod email;
 pub mod freemobile;
+pub mod gotify;
 pub mod matrix;
+pub mod ntfy;
+pub mod pushover;
 pub mod slack;
 pub mod telegram;
 mod util;
@@ -21,7 +25,10 @@ use futures_util::future::join_all;
 pub use discord::DiscordNotifier;
 pub use email::{EmailConfig, EmailNotifier};
 pub use freemobile::FreeMobileNotifier;
+pub use gotify::GotifyNotifier;
 pub use matrix::MatrixNotifier;
+pub use ntfy::NtfyNotifier;
+pub use pushover::PushoverNotifier;
 pub use slack::SlackNotifier;
 pub use telegram::TelegramNotifier;
 pub use webhook::WebhookNotifier;
@@ -51,6 +58,25 @@ pub enum Event<'a> {
     /// up: likely a network partition on the local-to-peer link, not a peer
     /// outage. Lower severity than [`Event::Down`].
     PeerLinkDegraded { peer: &'a str, witness: &'a str },
+    /// A monitor's TLS certificate has changed unexpectedly (different public key
+    /// fingerprint). This may indicate a MITM attack or an unexpected renewal.
+    CertChanged {
+        monitor: &'a str,
+        old_fingerprint: &'a str,
+        new_fingerprint: &'a str,
+    },
+    /// A monitor is burning its availability error budget abnormally fast
+    /// (Google-SRE burn-rate alerting). Fires while the monitor may still be
+    /// "up" between blips - which is exactly the point.
+    BudgetBurn {
+        monitor: &'a str,
+        /// Burn rate in tenths of the sustainable rate (144 = 14.4x).
+        burn_rate_x10: i64,
+        /// The lookback that triggered: `"1h"` (fast burn) or `"6h"` (slow).
+        window: &'a str,
+        /// Estimated seconds until the budget is fully spent at this rate.
+        exhausted_in_secs: Option<i64>,
+    },
 }
 
 /// A delivery channel for [`Event`]s.

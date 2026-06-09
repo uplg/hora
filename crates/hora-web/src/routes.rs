@@ -15,8 +15,8 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
-    favicon, font, healthz, latency_json, openapi, page, push, status_badge, summary_json,
-    uptime_badge,
+    favicon, font, healthz, history_atom, history_page, latency_json, metrics_prometheus, openapi,
+    page, push, status_badge, summary_json, uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -62,6 +62,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/openapi.json", get(openapi))
         .route("/api/badge/{id}/status", get(status_badge))
         .route("/api/badge/{id}/uptime", get(uptime_badge))
+        .route("/metrics", get(metrics_prometheus))
+        .route("/history", get(history_page))
+        .route("/history.atom", get(history_atom))
         .merge(api)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,

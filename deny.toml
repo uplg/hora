@@ -35,6 +35,25 @@ skip = [
     { crate = "windows-sys" },
     # lettre (email parsing) pulls nom 8 while x509-parser is still on nom 7.
     { crate = "nom" },
+    # hickory-resolver 0.26 (DNS monitors) is on rand 0.10 / getrandom 0.4 /
+    # cpufeatures 0.3 and the matching wasi/efi shims, while the rest of the
+    # ecosystem (governor, sqlx, sha2, ring) still rides the previous majors.
+    # Its system-configuration dep is likewise a core-foundation behind.
+    { crate = "rand" },
+    { crate = "rand_core" },
+    { crate = "getrandom" },
+    { crate = "cpufeatures" },
+    { crate = "core-foundation" },
+    { crate = "r-efi" },
+    { crate = "wit-bindgen" },
+    # We use sha2 0.11 (cert pinning) for its fixes going forward; sqlx still
+    # pins the 0.10 line.
+    { crate = "sha2" },
+    # sha2 0.11 is on the digest 0.11 / block-buffer 0.11 stack; sqlx's 0.10
+    # still pulls the previous majors of the same RustCrypto crates.
+    { crate = "digest" },
+    { crate = "block-buffer" },
+    { crate = "crypto-common" },
 ]
 
 [sources]

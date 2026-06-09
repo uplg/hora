@@ -10,13 +10,16 @@ publish.workspace = true
 anyhow.workspace = true
 arc-swap = "1.9.1"
 chrono.workspace = true
+croner.workspace = true
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
+hickory-resolver = { workspace = true }
 hora-notify.workspace = true
 notify.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_json_path = "0.7.2"
+sha2.workspace = true
 socket2 = "0.6.1"
 sqlx.workspace = true
 surge-ping = "0.8.4"

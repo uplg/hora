@@ -8,7 +8,9 @@
 use async_trait::async_trait;
 use reqwest::Client;
 
-use crate::util::{cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix};
+use crate::util::{
+    budget_burn_phrase, cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix,
+};
 use crate::{Event, Notifier};
 
 const ENDPOINT: &str = "https://smsapi.free-mobile.fr/sendmsg";
@@ -53,6 +55,22 @@ impl FreeMobileNotifier {
             Event::PeerLinkDegraded { peer, witness } => {
                 format!("LINK: {peer} unreachable here, seen up by {witness}")
             }
+            Event::CertChanged {
+                monitor,
+                old_fingerprint: _,
+                new_fingerprint: _,
+            } => {
+                format!("CERT: {monitor} certificate changed unexpectedly")
+            }
+            Event::BudgetBurn {
+                monitor,
+                burn_rate_x10,
+                window,
+                exhausted_in_secs,
+            } => format!(
+                "BUDGET: {monitor} {}",
+                budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
+            ),
         }
     }
 }

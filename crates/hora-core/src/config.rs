@@ -138,6 +138,10 @@ pub struct Server {
     /// Per-IP API rate limit: maximum burst of requests.
     #[serde(default = "default_rate_limit_burst")]
     pub rate_limit_burst: u32,
+    /// Token required to view private monitors (those with `public = false`).
+    /// Sent as `Authorization: Bearer <token>` or `?token=` query parameter.
+    #[serde(default)]
+    pub auth_token: Option<Secret>,
 }
 
 /// A named notification channel. Several channels may share a `type` (e.g. two
@@ -193,6 +197,28 @@ pub enum Channel {
         #[serde(default)]
         implicit_tls: bool,
     },
+    Ntfy {
+        name: String,
+        /// ntfy topic URL, e.g. `https://ntfy.sh/my-topic`.
+        url: Secret,
+        /// Optional access token for private ntfy servers.
+        #[serde(default)]
+        token: Option<Secret>,
+    },
+    Gotify {
+        name: String,
+        /// Gotify server URL, e.g. `https://gotify.example.com`.
+        url: Secret,
+        /// Application token.
+        token: Secret,
+    },
+    Pushover {
+        name: String,
+        /// Pushover API token (application key).
+        token: Secret,
+        /// Pushover user key (recipient).
+        user: Secret,
+    },
 }
 
 impl Channel {
@@ -206,7 +232,10 @@ impl Channel {
             | Self::Webhook { name, .. }
             | Self::Matrix { name, .. }
             | Self::FreeMobile { name, .. }
-            | Self::Email { name, .. } => name,
+            | Self::Email { name, .. }
+            | Self::Ntfy { name, .. }
+            | Self::Gotify { name, .. }
+            | Self::Pushover { name, .. } => name,
         }
     }
 
@@ -219,7 +248,7 @@ impl Channel {
             Self::Discord { webhook_url, .. } | Self::Slack { webhook_url, .. } => {
                 !webhook_url.is_empty()
             }
-            Self::Webhook { url, .. } => !url.is_empty(),
+            Self::Webhook { url, .. } | Self::Ntfy { url, .. } => !url.is_empty(),
             Self::Matrix {
                 homeserver,
                 token,
@@ -230,6 +259,8 @@ impl Channel {
             Self::Email { host, from, to, .. } => {
                 !host.is_empty() && !from.is_empty() && !to.is_empty()
             }
+            Self::Gotify { url, token, .. } => !url.is_empty() && !token.is_empty(),
+            Self::Pushover { token, user, .. } => !token.is_empty() && !user.is_empty(),
         }
     }
 }
@@ -302,6 +333,24 @@ impl std::fmt::Debug for Channel {
                 .field("to", to)
                 .field("implicit_tls", implicit_tls)
                 .finish(),
+            Self::Ntfy { name, url, token } => f
+                .debug_struct("Ntfy")
+                .field("name", name)
+                .field("url", url)
+                .field("token", token)
+                .finish(),
+            Self::Gotify { name, url, token } => f
+                .debug_struct("Gotify")
+                .field("name", name)
+                .field("url", url)
+                .field("token", token)
+                .finish(),
+            Self::Pushover { name, token, user } => f
+                .debug_struct("Pushover")
+                .field("name", name)
+                .field("token", token)
+                .field("user", user)
+                .finish(),
         }
     }
 }
@@ -364,6 +413,13 @@ pub struct Alerts {
     /// Default storage retention, overridable per monitor.
     #[serde(default = "default_retention_days")]
     pub default_retention_days: u16,
+    /// Root-cause alert grouping window, seconds. A monitor confirmed down
+    /// with a down upstream waits this long before alerting; if the upstream
+    /// alerts first (or already has), the symptom is folded into that single
+    /// notification. 0 disables grouping (every monitor alerts on its own,
+    /// the pre-0.5 behaviour). Default 30.
+    #[serde(default = "default_group_window")]
+    pub group_window_secs: u64,
 }
 
 impl Default for Alerts {
@@ -373,6 +429,7 @@ impl Default for Alerts {
             alert_on_degraded: false,
             cert_expiry_days: default_cert_expiry_days(),
             default_retention_days: default_retention_days(),
+            group_window_secs: default_group_window(),
         }
     }
 }
@@ -501,6 +558,9 @@ pub enum Kind {
     /// Passive heartbeat: the monitored job pings `/api/push/{id}`; missing a
     /// heartbeat within the interval marks it down. No active probing.
     Push,
+    /// DNS resolution: resolve a name and assert the expected record type/value.
+    /// Target is a hostname; `dns_expected` pins the answer (hijack detection).
+    Dns,
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize)]
@@ -510,8 +570,8 @@ pub struct Monitor {
     pub name: String,
     #[serde(default)]
     pub kind: Kind,
-    /// Probe target (URL for HTTP, `host:port` for TCP, host or IP for ICMP).
-    /// Unused for push monitors.
+    /// Probe target (URL for HTTP, `host:port` for TCP, host or IP for ICMP,
+    /// hostname for DNS). Unused for push monitors.
     #[serde(default)]
     pub target: String,
     pub interval_secs: u64,
@@ -524,6 +584,15 @@ pub struct Monitor {
     /// Latency SLO objective in ms: the 24h p95 is flagged met/breached against it.
     #[serde(default)]
     pub slo_latency_ms: Option<i64>,
+    /// Availability SLO target in percent (e.g. `99.9`), evaluated over
+    /// [`slo_window_days`](Self::slo_window_days). Drives the error-budget
+    /// display on the status page and the burn-rate alerts. Stored in basis
+    /// points (99.9% = 9990) so the config stays `Eq`-comparable.
+    #[serde(default, deserialize_with = "de_slo_uptime")]
+    pub slo_uptime: Option<u32>,
+    /// Window for the availability SLO, in days (default 30).
+    #[serde(default)]
+    pub slo_window_days: Option<u16>,
     /// Extra HTTP request headers (e.g. `Accept`, `Authorization`). HTTP monitors
     /// only. Values are redacted in `Debug` (a header may carry a credential).
     #[serde(default)]
@@ -557,6 +626,17 @@ pub struct Monitor {
     /// Unset = no token check (anyone who knows the id can heartbeat).
     #[serde(default)]
     pub push_token: Option<Secret>,
+    /// Push monitor only: a five-field cron expression (UTC) for when heartbeats
+    /// are expected (e.g. `"0 3 * * *"` for a nightly job). The monitor goes
+    /// down only when a scheduled run misses its [`grace_secs`](Self::grace_secs)
+    /// window - `interval_secs` then merely sets how often Hora re-evaluates.
+    #[serde(default)]
+    pub schedule: Option<String>,
+    /// Push monitor with a [`schedule`](Self::schedule): how late (seconds) a
+    /// heartbeat may arrive after its scheduled time before alerting.
+    /// Default 1800 (30 minutes).
+    #[serde(default)]
+    pub grace_secs: Option<u64>,
     /// Override TLS certificate checking. Defaults to on for `https://` HTTP monitors.
     #[serde(default)]
     pub check_cert: Option<bool>,
@@ -573,6 +653,26 @@ pub struct Monitor {
     /// Validated as a DAG at load time.
     #[serde(default)]
     pub depends_on: Option<Vec<String>>,
+    /// Whether this monitor appears on the public status page. `true` by default;
+    /// set `false` to hide it from unauthenticated viewers (requires a token).
+    #[serde(default = "default_true")]
+    pub public: bool,
+    /// DNS monitor: the record type to query (e.g. `"A"`, `"AAAA"`, `"CNAME"`).
+    #[serde(default)]
+    pub dns_record: Option<String>,
+    /// DNS monitor: the expected answer, comma-separated when several records
+    /// are pinned, compared order-insensitively (hijack detection). When unset,
+    /// any non-empty answer counts as up - no change detection, since answers
+    /// rotate freely behind CDNs and round-robin records.
+    #[serde(default)]
+    pub dns_expected: Option<String>,
+    /// DNS monitor: custom resolver address (`host:port`). Unset = system default.
+    #[serde(default)]
+    pub dns_resolver: Option<String>,
+    /// TLS certificate pinning: hex-encoded SHA-256 of the leaf public key. When
+    /// set, an alert fires if the key changes (MITM / unexpected renewal detection).
+    #[serde(default)]
+    pub cert_pin: Option<String>,
 }
 
 // Manual `Debug` (rather than derived) so credentials never leak: `target` and
@@ -591,6 +691,8 @@ impl std::fmt::Debug for Monitor {
             .field("expected_status", &self.expected_status)
             .field("degraded_over_ms", &self.degraded_over_ms)
             .field("slo_latency_ms", &self.slo_latency_ms)
+            .field("slo_uptime", &self.slo_uptime)
+            .field("slo_window_days", &self.slo_window_days)
             .field("headers", &self.headers)
             .field("keyword", &self.keyword)
             .field("keyword_invert", &self.keyword_invert)
@@ -600,10 +702,17 @@ impl std::fmt::Debug for Monitor {
             .field("notify", &self.notify)
             .field("proxy", &self.proxy.as_deref().map(redact_url_credentials))
             .field("push_token", &self.push_token)
+            .field("schedule", &self.schedule)
+            .field("grace_secs", &self.grace_secs)
             .field("check_cert", &self.check_cert)
             .field("retention_days", &self.retention_days)
             .field("group", &self.group)
             .field("depends_on", &self.depends_on)
+            .field("public", &self.public)
+            .field("dns_record", &self.dns_record)
+            .field("dns_expected", &self.dns_expected)
+            .field("dns_resolver", &self.dns_resolver)
+            .field("cert_pin", &self.cert_pin)
             .finish()
     }
 }
@@ -660,6 +769,41 @@ impl Monitor {
                 .saturating_mul(1024)
         })
     }
+
+    /// Grace period for a scheduled push monitor (default 30 minutes).
+    #[must_use]
+    pub fn push_grace_secs(&self) -> u64 {
+        self.grace_secs.unwrap_or(1800)
+    }
+
+    /// Availability SLO window in days (default 30).
+    #[must_use]
+    pub fn slo_window_days(&self) -> u16 {
+        self.slo_window_days.unwrap_or(30)
+    }
+}
+
+/// Accept the availability SLO as a percent float (`99.9`) and store basis
+/// points (9990): the config structs stay `Eq` and no precision is lost for
+/// the targets that occur in practice (two decimals).
+fn de_slo_uptime<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(percent) = Option::<f64>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if !percent.is_finite() || percent <= 0.0 || percent >= 100.0 {
+        return Err(serde::de::Error::custom(
+            "slo_uptime must be a percentage between 0 and 100 (exclusive), e.g. 99.9",
+        ));
+    }
+    // Lossless float-to-int without a cast: the value is bounded (0, 10_000)
+    // by the guard above, and this runs once at config load.
+    let basis_points = format!("{:.0}", percent * 100.0)
+        .parse::<u32>()
+        .map_err(serde::de::Error::custom)?;
+    Ok(Some(basis_points.clamp(1, 9999)))
 }
 
 fn default_title() -> String {
@@ -695,8 +839,14 @@ fn default_health_interval() -> u64 {
 fn default_grace() -> u64 {
     180
 }
+fn default_group_window() -> u64 {
+    30
+}
 fn default_rate_limit_burst() -> u32 {
     30
+}
+fn default_true() -> bool {
+    true
 }
 
 /// The configuration file path, from `$HORA_CONFIG` (default `./config.toml`).
@@ -823,9 +973,14 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             Channel::Discord { webhook_url, .. } | Channel::Slack { webhook_url, .. } => {
                 Some(webhook_url.as_ref())
             }
-            Channel::Webhook { url, .. } => Some(url.as_ref()),
+            Channel::Webhook { url, .. }
+            | Channel::Ntfy { url, .. }
+            | Channel::Gotify { url, .. } => Some(url.as_ref()),
             Channel::Matrix { homeserver, .. } => Some(homeserver.as_str()),
-            Channel::Telegram { .. } | Channel::FreeMobile { .. } | Channel::Email { .. } => None,
+            Channel::Telegram { .. }
+            | Channel::FreeMobile { .. }
+            | Channel::Email { .. }
+            | Channel::Pushover { .. } => None,
         };
         if url.is_some_and(|url| url.starts_with("http://")) {
             tracing::warn!(
@@ -876,23 +1031,18 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             "monitor {} timeout_secs must be > 0",
             monitor.id
         );
+        // A private monitor without a configured token would be visible to no
+        // one at all - fail fast rather than silently hide it.
         anyhow::ensure!(
-            monitor.kind == Kind::Http
-                || (monitor.keyword.is_none()
-                    && monitor.json_query.is_none()
-                    && monitor.proxy.is_none()),
-            "monitor {}: keyword/json_query/proxy require an http monitor",
+            monitor.public
+                || config
+                    .server
+                    .auth_token
+                    .as_ref()
+                    .is_some_and(|t| !t.is_empty()),
+            "monitor {}: public = false requires server.auth_token to be set",
             monitor.id
         );
-        if let Some(query) = &monitor.json_query {
-            serde_json_path::JsonPath::parse(query).map_err(|err| {
-                anyhow::anyhow!("monitor {}: invalid json_query: {err}", monitor.id)
-            })?;
-        }
-        if let Some(proxy) = &monitor.proxy {
-            reqwest::Proxy::all(proxy)
-                .map_err(|err| anyhow::anyhow!("monitor {}: invalid proxy: {err}", monitor.id))?;
-        }
         validate_monitor_io(monitor)?;
         if let Some(routes) = &monitor.notify {
             for route in routes {
@@ -1024,6 +1174,7 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
             );
         }
         Kind::Push => {}
+        Kind::Dns => validate_dns_io(monitor)?,
     }
     // A negative latency threshold would mark every check degraded/breached.
     for (label, value) in [
@@ -1049,6 +1200,100 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
         anyhow::ensure!(
             reqwest::header::HeaderValue::from_str(value.as_ref()).is_ok(),
             "monitor {}: invalid value for header {name:?}",
+            monitor.id
+        );
+    }
+    anyhow::ensure!(
+        monitor.kind == Kind::Http
+            || (monitor.keyword.is_none()
+                && monitor.json_query.is_none()
+                && monitor.proxy.is_none()),
+        "monitor {}: keyword/json_query/proxy require an http monitor",
+        monitor.id
+    );
+    if let Some(query) = &monitor.json_query {
+        serde_json_path::JsonPath::parse(query)
+            .map_err(|err| anyhow::anyhow!("monitor {}: invalid json_query: {err}", monitor.id))?;
+    }
+    if let Some(proxy) = &monitor.proxy {
+        reqwest::Proxy::all(proxy)
+            .map_err(|err| anyhow::anyhow!("monitor {}: invalid proxy: {err}", monitor.id))?;
+    }
+    anyhow::ensure!(
+        monitor.kind == Kind::Dns
+            || (monitor.dns_record.is_none()
+                && monitor.dns_expected.is_none()
+                && monitor.dns_resolver.is_none()),
+        "monitor {}: dns_record/dns_expected/dns_resolver require a dns monitor",
+        monitor.id
+    );
+    validate_schedule_and_slo(monitor)?;
+    Ok(())
+}
+
+/// Validate the push `schedule`/`grace_secs` pair and the availability SLO
+/// fields. The cron expression is parsed here so a typo fails at load, not at
+/// the first missed heartbeat.
+fn validate_schedule_and_slo(monitor: &Monitor) -> anyhow::Result<()> {
+    if let Some(schedule) = &monitor.schedule {
+        anyhow::ensure!(
+            monitor.kind == Kind::Push,
+            "monitor {}: schedule requires a push monitor",
+            monitor.id
+        );
+        schedule.parse::<croner::Cron>().map_err(|err| {
+            anyhow::anyhow!(
+                "monitor {}: invalid schedule {schedule:?}: {err}",
+                monitor.id
+            )
+        })?;
+    }
+    anyhow::ensure!(
+        monitor.schedule.is_some() || monitor.grace_secs.is_none(),
+        "monitor {}: grace_secs requires a schedule",
+        monitor.id
+    );
+    if let Some(window) = monitor.slo_window_days {
+        anyhow::ensure!(
+            window > 0,
+            "monitor {}: slo_window_days must be > 0",
+            monitor.id
+        );
+        anyhow::ensure!(
+            monitor.slo_uptime.is_some(),
+            "monitor {}: slo_window_days requires slo_uptime",
+            monitor.id
+        );
+    }
+    Ok(())
+}
+
+/// The DNS-specific half of [`validate_monitor_io`]: target shape, record
+/// type, resolver address.
+fn validate_dns_io(monitor: &Monitor) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !monitor.target.is_empty()
+            && !monitor.target.contains("://")
+            && !monitor.target.chars().any(char::is_whitespace),
+        "monitor {}: dns target must be a hostname (no scheme or whitespace)",
+        monitor.id
+    );
+    if let Some(record) = &monitor.dns_record {
+        anyhow::ensure!(
+            matches!(
+                record.to_uppercase().as_str(),
+                "A" | "AAAA" | "CNAME" | "MX" | "NS" | "TXT" | "SRV" | "SOA" | "PTR"
+            ),
+            "monitor {}: unsupported dns_record type {record:?}",
+            monitor.id
+        );
+    }
+    if let Some(resolver) = &monitor.dns_resolver {
+        anyhow::ensure!(
+            resolver
+                .rsplit_once(':')
+                .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok()),
+            "monitor {}: dns_resolver must be host:port",
             monitor.id
         );
     }
@@ -1928,5 +2173,215 @@ mod tests {
             let error = validate(&config).unwrap_err().to_string();
             assert!(error.contains("bare host or IP"), "{bad} -> {error}");
         }
+    }
+
+    #[test]
+    fn accepts_dns_monitor() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "dns"
+            name = "DNS"
+            kind = "dns"
+            target = "example.com"
+            interval_secs = 300
+            dns_record = "A"
+            dns_expected = "1.2.3.4, 5.6.7.8"
+            dns_resolver = "9.9.9.9:53"
+        "#,
+        );
+        validate(&config).expect("valid dns monitor");
+    }
+
+    #[test]
+    fn rejects_invalid_dns_monitor() {
+        for (field, message) in [
+            ("dns_record = \"WHATEVER\"", "unsupported dns_record"),
+            ("dns_resolver = \"no-port\"", "must be host:port"),
+            ("dns_resolver = \"host:notaport\"", "must be host:port"),
+        ] {
+            let config = parse(&format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "dns"
+                name = "DNS"
+                kind = "dns"
+                target = "example.com"
+                interval_secs = 300
+                {field}
+            "#
+            ));
+            let error = validate(&config).unwrap_err().to_string();
+            assert!(error.contains(message), "{field} -> {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_dns_target_with_scheme() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "dns"
+            name = "DNS"
+            kind = "dns"
+            target = "https://example.com"
+            interval_secs = 300
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("must be a hostname"), "{error}");
+    }
+
+    #[test]
+    fn rejects_dns_fields_on_http() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://example.com"
+            interval_secs = 60
+            dns_record = "A"
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("require a dns monitor"), "{error}");
+    }
+
+    #[test]
+    fn private_monitor_requires_auth_token() {
+        let private = r#"
+            [page]
+            [server]
+            {token}
+            [[monitors]]
+            id = "internal"
+            name = "Internal"
+            target = "https://internal.example"
+            interval_secs = 60
+            public = false
+        "#;
+
+        let config = parse(&private.replace("{token}", ""));
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("requires server.auth_token"), "{error}");
+
+        let config = parse(&private.replace("{token}", "auth_token = \"s3cret\""));
+        validate(&config).expect("private monitor with token is valid");
+
+        // An interpolated-but-unset token is as good as none.
+        let config = parse(&private.replace("{token}", "auth_token = \"\""));
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("requires server.auth_token"), "{error}");
+    }
+
+    #[test]
+    fn accepts_scheduled_push_monitor() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "backup"
+            name = "Backup"
+            kind = "push"
+            interval_secs = 60
+            schedule = "0 3 * * *"
+            grace_secs = 1800
+        "#,
+        );
+        validate(&config).expect("valid scheduled push monitor");
+        assert_eq!(config.monitors[0].push_grace_secs(), 1800);
+    }
+
+    #[test]
+    fn rejects_bad_schedule_combinations() {
+        for (fields, message) in [
+            ("schedule = \"0 3 * * *\"", "requires a push monitor"),
+            (
+                "kind = \"push\"\nschedule = \"99 99 * * *\"",
+                "invalid schedule",
+            ),
+            (
+                "kind = \"push\"\ngrace_secs = 600",
+                "grace_secs requires a schedule",
+            ),
+        ] {
+            let config = parse(&format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "m"
+                name = "M"
+                target = "https://example.com"
+                interval_secs = 60
+                {fields}
+            "#
+            ));
+            let error = validate(&config).unwrap_err().to_string();
+            assert!(error.contains(message), "{fields} -> {error}");
+        }
+    }
+
+    #[test]
+    fn slo_uptime_parses_to_basis_points() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://example.com"
+            interval_secs = 60
+            slo_uptime = 99.9
+            slo_window_days = 7
+        "#,
+        );
+        validate(&config).expect("valid slo");
+        assert_eq!(config.monitors[0].slo_uptime, Some(9990));
+        assert_eq!(config.monitors[0].slo_window_days(), 7);
+
+        // Out-of-range targets are rejected at parse time.
+        let bad = toml::from_str::<Config>(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://example.com"
+            interval_secs = 60
+            slo_uptime = 150.0
+        "#,
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn rejects_slo_window_without_target() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://example.com"
+            interval_secs = 60
+            slo_window_days = 30
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("requires slo_uptime"), "{error}");
     }
 }

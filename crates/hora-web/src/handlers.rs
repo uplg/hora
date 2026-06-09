@@ -11,15 +11,18 @@ use chrono::Utc;
 use serde::Deserialize;
 use utoipa::OpenApi;
 
-use hora_core::config::Kind;
+use hora_core::config::{Config, Kind};
 use hora_core::db::{self, Point};
 use hora_core::peer::{HealthReport, PeerSeen};
 
 use crate::error::AppError;
+use crate::history;
+use crate::metrics;
 use crate::render::{badge, status_color, svg_response, uptime_color};
 use crate::summary::{
     DayCell, IncidentView, MaintenanceView, MonitorView, StatusTemplate, Summary, format_permille,
 };
+use crate::text;
 use crate::{
     AppState, FAVICON_SVG, FONT_WOFF2, MAX_LATENCY_HOURS, MAX_LATENCY_POINTS, MAX_PUSH_MSG_CHARS,
     SECONDS_PER_HOUR, summary_for,
@@ -101,7 +104,9 @@ pub(crate) async fn openapi() -> Response {
 
 /// Fetch (or build) the cached summary from the request state. Infallible: a
 /// failing monitor degrades to an `unknown` card rather than failing the page.
-pub(crate) async fn state_summary(state: AppState) -> Arc<Summary> {
+/// `full` selects the authenticated view that includes private monitors; both
+/// views are cached (one slot each).
+pub(crate) async fn state_summary(state: AppState, full: bool) -> Arc<Summary> {
     let AppState {
         pool,
         config,
@@ -109,16 +114,65 @@ pub(crate) async fn state_summary(state: AppState) -> Arc<Summary> {
         ..
     } = state;
     let config = config.borrow().clone();
-    summary_for(&pool, &config, &cache).await
+    summary_for(&pool, &config, &cache, full).await
 }
 
-pub(crate) async fn page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
-    let summary = state_summary(state).await;
-    let html = StatusTemplate {
-        summary: summary.as_ref(),
+/// Whether the request carries the configured viewer token, as
+/// `Authorization: Bearer <token>` or `?token=`. With no token configured
+/// nothing is private (config validation enforces that), so every caller gets
+/// the public view and the answer is simply `false`.
+pub(crate) fn is_authenticated(
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    config: &Config,
+) -> bool {
+    let Some(expected) = &config.server.auth_token else {
+        return false;
+    };
+    let provided = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or(query_token);
+    provided.is_some_and(|token| ct_eq(token, expected.as_ref()))
+}
+
+pub(crate) async fn page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<Response, AppError> {
+    let config = state.config.borrow().clone();
+    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    let summary = state_summary(state, authenticated).await;
+
+    // Text clients (curl, wget, or an explicit text/plain Accept) get the
+    // aligned plain-text rendering; everyone else the HTML page.
+    let wants_text = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|ua| ua.starts_with("curl/") || ua.starts_with("Wget/"))
+        || headers
+            .get(header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|accept| accept.contains("text/plain") && !accept.contains("text/html"));
+
+    if wants_text {
+        let body = text::render(&summary);
+        Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
+    } else {
+        let html = StatusTemplate {
+            summary: summary.as_ref(),
+        }
+        .render()?;
+        Ok(Html(html).into_response())
     }
-    .render()?;
-    Ok(Html(html))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AuthQuery {
+    #[serde(default)]
+    pub(crate) token: Option<String>,
 }
 
 #[utoipa::path(
@@ -126,14 +180,116 @@ pub(crate) async fn page(State(state): State<AppState>) -> Result<Html<String>, 
     path = "/api/summary",
     responses((status = 200, description = "Status of every monitor", body = Summary))
 )]
-pub(crate) async fn summary_json(State(state): State<AppState>) -> Json<Arc<Summary>> {
-    Json(state_summary(state).await)
+pub(crate) async fn summary_json(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Json<Arc<Summary>> {
+    let config = state.config.borrow().clone();
+    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    Json(state_summary(state, authenticated).await)
+}
+
+pub(crate) async fn metrics_prometheus(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> impl IntoResponse {
+    let config = state.config.borrow().clone();
+    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    let summary = state_summary(state, authenticated).await;
+    let body = metrics::render(&summary);
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
+/// Recent incidents restricted to what the caller may see: incidents of
+/// private monitors - and of monitors no longer in the config - only reach
+/// authenticated viewers.
+async fn visible_incidents(
+    pool: &sqlx::SqlitePool,
+    config: &Config,
+    authenticated: bool,
+    limit: i64,
+) -> Result<Vec<db::Incident>, AppError> {
+    let mut incidents = db::recent_incidents(pool, limit).await?;
+    if !authenticated {
+        let visible: std::collections::HashSet<&str> = config
+            .monitors
+            .iter()
+            .filter(|monitor| monitor.public)
+            .map(|monitor| monitor.id.as_str())
+            .collect();
+        incidents.retain(|incident| visible.contains(incident.monitor_id.as_str()));
+    }
+    Ok(incidents)
+}
+
+/// Map of monitor id to display name, for rendering incidents.
+fn monitor_names(config: &Config) -> std::collections::HashMap<String, String> {
+    config
+        .monitors
+        .iter()
+        .map(|monitor| (monitor.id.clone(), monitor.name.clone()))
+        .collect()
+}
+
+pub(crate) async fn history_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<Html<String>, AppError> {
+    let config = state.config.borrow().clone();
+    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    let incidents = visible_incidents(&state.pool, &config, authenticated, 100).await?;
+    let html = history::HistoryTemplate {
+        title: config.page.title.clone(),
+        incidents: history::incident_rows(&incidents, &monitor_names(&config)),
+    }
+    .render()?;
+    Ok(Html(html))
+}
+
+pub(crate) async fn history_atom(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let config = state.config.borrow().clone();
+    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    let incidents = visible_incidents(&state.pool, &config, authenticated, 50).await?;
+    // Absolute feed links: scheme from the proxy's x-forwarded-proto (plain
+    // http when absent), host from the Host header.
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|proto| *proto == "https" || *proto == "http")
+        .unwrap_or("http");
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("localhost");
+    let base_url = format!("{proto}://{host}");
+    let body = history::render_atom(&incidents, &monitor_names(&config), &base_url);
+    Ok((
+        [(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")],
+        body,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct LatencyQuery {
     #[serde(default = "default_hours")]
     hours: i64,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 pub(crate) fn default_hours() -> i64 {
@@ -155,13 +311,21 @@ pub(crate) fn default_hours() -> i64 {
 pub(crate) async fn latency_json(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Query(query): Query<LatencyQuery>,
 ) -> Result<Json<Vec<Point>>, AppError> {
     let AppState { pool, config, .. } = state;
-    if !config.borrow().monitors.iter().any(|m| m.id == id) {
+    let config = config.borrow().clone();
+    // A private monitor answers exactly like a missing one (404) unless the
+    // caller is authenticated - its existence is not revealed either way.
+    let visible = config.monitors.iter().any(|monitor| {
+        monitor.id == id
+            && (monitor.public || is_authenticated(&headers, query.token.as_deref(), &config))
+    });
+    if !visible {
         return Err(AppError::NotFound("unknown monitor"));
     }
-    let LatencyQuery { hours } = query;
+    let LatencyQuery { hours, .. } = query;
     let since = Utc::now().timestamp() - hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
     let points = db::latency_series(&pool, &id, since).await?;
     // Bound the response (a 10s-interval monitor over 720h is ~260k points); the
@@ -261,7 +425,9 @@ pub(crate) async fn status_badge(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let summary = state_summary(state).await;
+    // Badges are embeddable and unauthenticated: a private monitor's badge is
+    // a 404, not a leak.
+    let summary = state_summary(state, false).await;
     let monitor = summary
         .monitors
         .iter()
@@ -287,7 +453,7 @@ pub(crate) async fn uptime_badge(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let summary = state_summary(state).await;
+    let summary = state_summary(state, false).await;
     let monitor = summary
         .monitors
         .iter()

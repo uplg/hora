@@ -1,9 +1,15 @@
-//! TLS certificate expiry monitoring.
+//! TLS certificate expiry monitoring and certificate pinning.
 //!
 //! A periodic task opens a TLS connection to each HTTPS monitor, reads the leaf
 //! certificate's `notAfter`, stores it, and emits a [`hora_notify::Event`] once
 //! expiry is within the configured window. Verification is intentionally
 //! skipped: we only read the validity dates, independent of chain trust.
+//!
+//! Additionally, if a monitor has a `cert_pin` configured, the SHA-256
+//! fingerprint of the leaf public key is compared against it. A fingerprint
+//! that matches neither the pin nor the last seen value triggers a
+//! [`hora_notify::Event::CertChanged`] alert - once per new fingerprint, since
+//! the observed value is then remembered.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,13 +91,14 @@ fn client_config() -> anyhow::Result<Arc<ClientConfig>> {
     Ok(Arc::new(config))
 }
 
-/// Connect, handshake, and return the leaf certificate's `notAfter` (unix secs).
+/// Connect, handshake, and return the leaf certificate's `notAfter` (unix secs)
+/// and the SHA-256 fingerprint of the leaf public key.
 async fn fetch(
     config: &Arc<ClientConfig>,
     host: &str,
     port: u16,
     timeout: Duration,
-) -> anyhow::Result<i64> {
+) -> anyhow::Result<(i64, String)> {
     let tcp = tokio::time::timeout(timeout, TcpStream::connect((host, port)))
         .await
         .map_err(|_elapsed| anyhow::anyhow!("tcp connect timed out"))??;
@@ -110,7 +117,27 @@ async fn fetch(
 
     let (_rest, parsed) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
         .map_err(|err| anyhow::anyhow!("failed to parse certificate: {err}"))?;
-    Ok(parsed.validity().not_after.timestamp())
+
+    let not_after = parsed.validity().not_after.timestamp();
+    let fingerprint = sha256_hex(parsed.public_key().raw);
+    Ok((not_after, fingerprint))
+}
+
+/// Compute the SHA-256 hex digest of a byte slice. Byte-by-byte formatting:
+/// digest 0.11 dropped the `LowerHex` impl on the output array.
+fn sha256_hex(data: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 /// Extract `(host, port)` from a monitor target URL (port defaults to 443).
@@ -161,7 +188,7 @@ pub fn spawn_watcher(
                 };
 
                 match fetch(&tls, &host, port, monitor.timeout()).await {
-                    Ok(not_after) => {
+                    Ok((not_after, fingerprint)) => {
                         if let Err(err) = db::upsert_cert(&pool, &monitor.id, not_after, now).await
                         {
                             warn!(monitor = %monitor.id, "failed to store cert info: {err:#}");
@@ -189,10 +216,87 @@ pub fn spawn_watcher(
                             }
                             warned.insert(monitor.id.clone(), expiring);
                         }
+
+                        // Certificate pinning: compare BEFORE storing, alert,
+                        // then remember the observed fingerprint so the same
+                        // mismatch alerts once, not every check. A change during
+                        // maintenance is muted like any other alert (a renewal
+                        // mid-window is the deploy, not an attack) but still
+                        // recorded.
+                        if let Some(expected_pin) = &monitor.cert_pin {
+                            let stored = match db::cert_pin_fingerprint(&pool, &monitor.id).await {
+                                Ok(stored) => stored,
+                                Err(err) => {
+                                    warn!(monitor = %monitor.id, "failed to read cert pin: {err:#}");
+                                    continue;
+                                }
+                            };
+                            if !muted
+                                && let Some(old) =
+                                    pin_alert(expected_pin, stored.as_deref(), &fingerprint)
+                            {
+                                notifier
+                                    .load_full()
+                                    .dispatch(
+                                        Event::CertChanged {
+                                            monitor: &monitor.name,
+                                            old_fingerprint: old,
+                                            new_fingerprint: &fingerprint,
+                                        },
+                                        monitor.notify.as_deref(),
+                                    )
+                                    .await;
+                            }
+                            if stored.as_deref() != Some(fingerprint.as_str())
+                                && let Err(err) =
+                                    db::upsert_cert_pin(&pool, &monitor.id, &fingerprint, now).await
+                            {
+                                warn!(monitor = %monitor.id, "failed to store cert pin: {err:#}");
+                            }
+                        }
                     }
                     Err(err) => warn!(monitor = %monitor.id, "cert check failed: {err:#}"),
                 }
             }
         }
     })
+}
+
+/// The pinning verdict for one check: `Some(old)` when an alert should fire,
+/// where `old` is the fingerprint to report as previous (the last seen one,
+/// falling back to the configured pin on the very first check). No alert when
+/// the observed key matches the pin, or when it was already seen - the caller
+/// stores each observed fingerprint, so a mismatch alerts once per change
+/// (and survives restarts) instead of on every check.
+fn pin_alert<'a>(expected: &'a str, stored: Option<&'a str>, observed: &str) -> Option<&'a str> {
+    if observed == expected || stored == Some(observed) {
+        return None;
+    }
+    Some(stored.unwrap_or(expected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pin_alert_fires_once_per_new_fingerprint() {
+        // Matches the pin: never alerts, whatever was seen before.
+        assert_eq!(pin_alert("aaa", None, "aaa"), None);
+        assert_eq!(pin_alert("aaa", Some("bbb"), "aaa"), None);
+        // First mismatch: alert, reporting the pin as the previous value.
+        assert_eq!(pin_alert("aaa", None, "bbb"), Some("aaa"));
+        // Same mismatch already recorded: no re-alert.
+        assert_eq!(pin_alert("aaa", Some("bbb"), "bbb"), None);
+        // The key changed again: alert with the last seen value as previous.
+        assert_eq!(pin_alert("aaa", Some("bbb"), "ccc"), Some("bbb"));
+    }
+
+    #[test]
+    fn sha256_hex_is_lowercase_hex() {
+        let digest = sha256_hex(b"hora");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(digest, sha256_hex(b"hora"));
+    }
 }

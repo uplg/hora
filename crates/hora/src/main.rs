@@ -15,8 +15,72 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
+    if run_subcommand()? {
+        return Ok(());
+    }
 
+    init_tracing();
+    serve().await
+}
+
+/// Handle a CLI subcommand. `Ok(true)` means one ran and the process should
+/// exit; plain `hora` (no arguments) returns `Ok(false)` and starts the
+/// monitor.
+fn run_subcommand() -> anyhow::Result<bool> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "import" => {
+                if args.len() < 4 || args[2] != "kuma" {
+                    eprintln!("Usage: hora import kuma <backup.json>");
+                    std::process::exit(1);
+                }
+                let json_path = &args[3];
+                let json_str = std::fs::read_to_string(json_path)
+                    .with_context(|| format!("reading {json_path}"))?;
+                let toml_out = hora_core::import::convert_kuma_to_hora(&json_str)?;
+                println!("{toml_out}");
+            }
+            "check" => {
+                // Validate the config and exit non-zero on error: meant for CI
+                // and pre-deploy hooks.
+                let config_path = config::path();
+                match config::load_from(&config_path) {
+                    Ok(_) => println!("{} is valid.", config_path.display()),
+                    Err(err) => {
+                        eprintln!("Configuration error: {err:#}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "--version" | "-V" => println!("hora {}", env!("CARGO_PKG_VERSION")),
+            "--help" | "-h" => {
+                println!("Hora - a tiny self-hosted uptime monitor");
+                println!();
+                println!("Usage: hora [COMMAND]");
+                println!();
+                println!("Commands:");
+                println!(
+                    "  import kuma <file>  Convert an Uptime Kuma backup JSON to Hora TOML (stdout)"
+                );
+                println!("  check               Validate the configuration and exit");
+                println!("  --version, -V       Show the version");
+                println!("  --help, -h          Show this help message");
+            }
+            _ => {
+                eprintln!("Unknown command: {}", args[1]);
+                eprintln!("Run 'hora --help' for usage information.");
+                std::process::exit(1);
+            }
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Run the monitor: load config, open the database, start the supervisor and
+/// background tasks, and serve the status page until a shutdown signal.
+async fn serve() -> anyhow::Result<()> {
     let config_path = config::path();
     let initial = config::load_from(&config_path).context("loading configuration")?;
     let pool = hora_core::db::connect(&initial.server.database_path)

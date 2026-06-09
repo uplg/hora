@@ -5,7 +5,83 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-06-09
+
+### Added
+
+- **Availability SLOs, error budgets and burn-rate alerts**: `slo_uptime = 99.9`
+  (+ optional `slo_window_days`, default 30) per monitor. The status page and
+  `/api/summary` show the error budget left over the window (computed from the
+  same merged daily history as the bars, so it survives raw retention); alerts
+  are Google-SRE multi-window burn rates - fast (2% of budget in 1h, confirmed
+  over 5m) and slow (5% in 6h, confirmed over 30m) - via a new `budget_burn`
+  event on every notification channel, with an exhaustion ETA. Edge-triggered:
+  one alert per episode, re-armed when the long window cools.
+- **Cron-aware push monitors**: `schedule = "0 3 * * *"` (five-field cron, UTC)
+  plus `grace_secs` (default 1800) on a push monitor alerts only when a
+  scheduled run misses its grace window, instead of the fixed
+  `interval_secs` gap - made for nightly jobs, à la Healthchecks.io.
+- **Root-cause alert grouping** (`alerts.group_window_secs`, default 30):
+  a monitor confirmed down whose `depends_on` upstream is also down waits out
+  the window; if the upstream alerts (or already has), the dependent's alert -
+  and its later recovery - fold into that single notification, transitively
+  along dependency chains. A flap inside the window sends nothing. Incident
+  records are unaffected (history stays complete). Set 0 to disable.
+- **Uptime Kuma import** now also maps `json-query` monitors (JSONPath +
+  expected value), request `headers`, `timeout`, single expected status codes,
+  `expiryNotification = false` (→ `check_cert = false`) and Kuma groups:
+  monitors under a Kuma folder get `group = "<folder name>"`. Both current and
+  legacy Kuma field spellings (`maxretries`, `accepted_statuscodes`,
+  `dns_resolve_type`) are accepted.
+- **DNS monitors** (`kind = "dns"`): resolve a hostname (A, AAAA, CNAME, MX, NS,
+  TXT, SRV, SOA or PTR via `dns_record`, system or custom `dns_resolver`) and
+  optionally **pin the expected answer** with `dns_expected` (comma-separated,
+  order-insensitive - hijack detection that does not flap on round-robin
+  rotation). Without `dns_expected`, any non-empty answer counts as up.
+- **TLS certificate pinning** (`cert_pin`, hex SHA-256 of the leaf public key):
+  a fingerprint matching neither the pin nor the last seen value fires a
+  `CertChanged` alert - once per change, surviving restarts, muted during
+  maintenance windows like other alerts. The alert carries the old and new
+  fingerprints, so a first mismatch also tells you the correct pin to configure.
+- **Automatic incident history**: confirmed down/up transitions are recorded as
+  incidents (start, end, duration, error, root cause and blast radius), served
+  on `/history` (server-rendered, no JS) and as an **Atom feed** at
+  `/history.atom`. Incidents survive restarts: a still-open incident is
+  re-attached on startup and closed on the first healthy tick. Closed incidents
+  are pruned after a year.
+- **Prometheus `/metrics`** (text exposition format): `hora_monitor_up`,
+  `hora_monitor_degraded`, `hora_monitor_uptime_ratio` (24h),
+  `hora_monitor_last_latency_ms`, `hora_monitor_latency_ms{quantile=…}`
+  (p50/p95/p99) and `hora_cert_expiry_days`, all labelled `{id, name}`.
+- **Private monitors**: `public = false` hides a monitor from the
+  unauthenticated status page, `/api/summary`, latency API, badges, `/metrics`
+  and the incident history. A viewer token (`server.auth_token`, live-reloaded,
+  sent as `Authorization: Bearer` or `?token=`) reveals the full view; both
+  views are cached. Config validation rejects `public = false` without a token.
+- **Plain-text status for terminals**: `curl status.example.com` (or an
+  `Accept: text/plain` request) returns an aligned text rendering of the status
+  page, groups, topology annotations and peers included.
+- **Long-term downsampling**: raw checks roll up into hourly buckets after
+  7 days and daily buckets after 90, kept for a year. Buckets are written once
+  (never recomputed from partially-pruned raw data) and the daily uptime bars
+  transparently read them beyond the raw retention window. Aggregates of
+  removed monitors are swept like any other orphan.
+- **ntfy, Gotify and Pushover** notification channels (`type = "ntfy" |
+  "gotify" | "pushover"`), with the shared retry/redaction policy; the Gotify
+  token travels as a header, never in the URL.
+- **`hora check`**: validate the configuration and exit non-zero on error
+  (CI-friendly), and **`hora import kuma <backup.json>`**: convert an Uptime
+  Kuma backup to Hora TOML on stdout (http/keyword, port, ping, dns and push
+  monitors; anything else becomes a commented stub). Plus `--version`/`-V`.
+
+### Changed
+
+- Down alerts of monitors whose `depends_on` upstream is also down now wait
+  out the grouping window (up to `alerts.group_window_secs`, default 30s)
+  before being sent - or folded. Root-cause alerts are unaffected. Set
+  `group_window_secs = 0` for the previous one-alert-per-monitor behaviour.
+- `/api/monitors/{id}/latency` answers 404 for private monitors without the
+  viewer token, exactly as for unknown ids.
 
 ## [0.3.0] - 2026-06-08
 

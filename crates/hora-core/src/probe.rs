@@ -4,6 +4,10 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use hickory_resolver::TokioResolver;
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::RecordType;
 use reqwest::{Client, RequestBuilder};
 use socket2::Type;
 use surge_ping::{
@@ -57,6 +61,7 @@ pub async fn run(client: &Client, monitor: &Monitor) -> Outcome {
         Kind::Http => http(client, monitor).await,
         Kind::Tcp => tcp(monitor).await,
         Kind::Icmp => icmp(monitor).await,
+        Kind::Dns => dns(monitor).await,
         // Push monitors are evaluated from stored heartbeats by the scheduler,
         // never actively probed; this arm is unreachable in practice.
         Kind::Push => Outcome::down("push monitor has no active probe".to_owned()),
@@ -248,6 +253,105 @@ async fn resolve(target: &str) -> Option<IpAddr> {
         .map(|addr| addr.ip())
 }
 
+/// DNS resolution: resolve a name and, when `dns_expected` is set, pin the
+/// answer (hijack detection). Without it any non-empty answer counts as up -
+/// answers rotate freely behind CDNs and round-robin records, so alerting on
+/// mere change would flap.
+async fn dns(monitor: &Monitor) -> Outcome {
+    let record_type = monitor
+        .dns_record
+        .as_deref()
+        .map_or(RecordType::A, |record| {
+            match record.to_uppercase().as_str() {
+                "AAAA" => RecordType::AAAA,
+                "CNAME" => RecordType::CNAME,
+                "MX" => RecordType::MX,
+                "NS" => RecordType::NS,
+                "TXT" => RecordType::TXT,
+                "SRV" => RecordType::SRV,
+                "SOA" => RecordType::SOA,
+                "PTR" => RecordType::PTR,
+                // "A", plus anything else config validation already rejected.
+                _ => RecordType::A,
+            }
+        });
+
+    let resolver = match resolver_for(monitor.dns_resolver.as_deref()) {
+        Ok(resolver) => resolver,
+        Err(err) => return Outcome::down(format!("resolver setup failed: {err}")),
+    };
+
+    let start = Instant::now();
+    let result = tokio::time::timeout(
+        monitor.timeout(),
+        resolver.lookup(monitor.target.as_str(), record_type),
+    )
+    .await;
+    let latency = millis(start.elapsed());
+
+    match result {
+        Ok(Ok(lookup)) => {
+            // The answer section may also carry the CNAME chain; keep only the
+            // requested type so assertions compare like with like.
+            let mut answers: Vec<String> = lookup
+                .answers()
+                .iter()
+                .filter(|record| record.record_type() == record_type)
+                .map(|record| record.data.to_string().trim_end_matches('.').to_owned())
+                .collect();
+            if answers.is_empty() {
+                return Outcome::down(format!("no {record_type} records found"));
+            }
+            answers.sort();
+            let answer = answers.join(",");
+
+            if let Some(expected) = &monitor.dns_expected {
+                // Both sides sorted: the assertion is order-insensitive, so
+                // rotation within a pinned record set never flaps.
+                let mut wanted: Vec<&str> = expected.split(',').map(str::trim).collect();
+                wanted.sort_unstable();
+                let wanted = wanted.join(",");
+                if answer != wanted {
+                    return Outcome {
+                        up: false,
+                        degraded: false,
+                        latency_ms: Some(latency),
+                        status_code: None,
+                        error: Some(format!("expected {wanted}, got {answer}")),
+                    };
+                }
+            }
+
+            Outcome {
+                up: true,
+                degraded: over_threshold(latency, monitor.degraded_over_ms),
+                latency_ms: Some(latency),
+                status_code: None,
+                error: None,
+            }
+        }
+        Ok(Err(err)) => Outcome::down(format!("DNS lookup failed: {err}")),
+        Err(_elapsed) => Outcome::down("DNS lookup timed out".to_owned()),
+    }
+}
+
+/// The system resolver, or a custom `host:port` UDP resolver when configured.
+fn resolver_for(custom: Option<&str>) -> anyhow::Result<TokioResolver> {
+    let Some(addr) = custom else {
+        return Ok(TokioResolver::builder_tokio()?.build()?);
+    };
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("dns_resolver must be host:port"))?;
+    let port: u16 = port.parse()?;
+    let ip: IpAddr = host.parse()?;
+    let mut connection = ConnectionConfig::udp();
+    connection.port = port;
+    let nameserver = NameServerConfig::new(ip, true, vec![connection]);
+    let config = ResolverConfig::from_parts(None, vec![], vec![nameserver]);
+    Ok(TokioResolver::builder_with_config(config, TokioRuntimeProvider::default()).build()?)
+}
+
 /// Apply every configured header to the request. reqwest *appends* headers, so
 /// each distinct header is kept - none overwrites another.
 fn with_headers(mut request: RequestBuilder, headers: &HashMap<String, Secret>) -> RequestBuilder {
@@ -361,6 +465,15 @@ mod tests {
             retention_days: None,
             group: None,
             depends_on: None,
+            public: true,
+            dns_record: None,
+            dns_expected: None,
+            dns_resolver: None,
+            cert_pin: None,
+            slo_uptime: None,
+            slo_window_days: None,
+            schedule: None,
+            grace_secs: None,
         }
     }
 

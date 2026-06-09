@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::Serialize;
 
-use crate::util::{cert_expiry_phrase, escape, latency_suffix, post_json, topology_suffix};
+use crate::util::{
+    budget_burn_phrase, cert_expiry_phrase, escape, latency_suffix, post_json, topology_suffix,
+};
 use crate::{Event, Notifier};
 
 /// Sends alerts to a Telegram chat via the Bot API.
@@ -57,6 +59,26 @@ impl TelegramNotifier {
                 "\u{1F7E1} <b>{}</b> link degraded\nunreachable from here, but seen up by {}",
                 escape(peer),
                 escape(witness),
+            ),
+            Event::CertChanged {
+                monitor,
+                old_fingerprint,
+                new_fingerprint,
+            } => format!(
+                "\u{26A0}\u{FE0F} <b>{}</b> TLS certificate changed unexpectedly\nold: <code>{}</code>\nnew: <code>{}</code>",
+                escape(monitor),
+                escape(old_fingerprint),
+                escape(new_fingerprint),
+            ),
+            Event::BudgetBurn {
+                monitor,
+                burn_rate_x10,
+                window,
+                exhausted_in_secs,
+            } => format!(
+                "\u{1F525} <b>{}</b> {}",
+                escape(monitor),
+                budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs),
             ),
         }
     }

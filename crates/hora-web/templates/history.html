@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }} · Incident history</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="alternate" type="application/atom+xml" href="/history.atom" />
+  <link rel="preload" href="/assets/CalSans-SemiBold.woff2" as="font" type="font/woff2" crossorigin />
+  <style>
+    @font-face {
+      font-family: "Cal Sans";
+      src: url("/assets/CalSans-SemiBold.woff2") format("woff2");
+      font-weight: 600;
+      font-display: swap;
+    }
+
+    :root {
+      --bg: #0b0e14;
+      --card: #11161f;
+      --border: #1d2430;
+      --text: #e6e8eb;
+      --muted: #8b93a1;
+      --up: #10b981;
+      --down: #ef4444;
+      --degraded: #f59e0b;
+      --brand: "Cal Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap {
+      width: 100%;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 20px 56px;
+    }
+
+    .top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px 16px;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      font-family: var(--brand);
+      font-size: 24px;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: 0.01em;
+    }
+
+    .feed-link {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 12px;
+      background: var(--card);
+    }
+
+    .feed-link:hover {
+      color: var(--text);
+    }
+
+    .incidents {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .incident {
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--card);
+    }
+
+    .incident.ongoing {
+      border-left-color: var(--down);
+    }
+
+    .incident.resolved {
+      border-left-color: var(--up);
+    }
+
+    .incident-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+    }
+
+    .incident-title {
+      font-weight: 600;
+    }
+
+    .incident-at {
+      color: var(--muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .incident-body {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .incident-body.cause {
+      color: var(--degraded);
+    }
+
+    .incident-body.impacted {
+      color: var(--down);
+    }
+
+    .empty-state {
+      color: var(--muted);
+      text-align: center;
+      padding: 48px 0;
+    }
+
+    footer {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      margin-top: 28px;
+    }
+
+    footer a {
+      color: var(--muted);
+      text-decoration: none;
+      border-bottom: 1px solid var(--border);
+    }
+
+    footer a:hover {
+      color: var(--text);
+    }
+  </style>
+</head>
+
+<body>
+  <main class="wrap">
+    <div class="top">
+      <h1>Incident history</h1>
+      <a class="feed-link" href="/history.atom">Atom feed</a>
+    </div>
+
+    {% if incidents.is_empty() %}
+    <p class="empty-state">No incidents recorded yet.</p>
+    {% else %}
+    <div class="incidents">
+      {% for incident in incidents %}
+      <div class="incident {% if incident.resolved %}resolved{% else %}ongoing{% endif %}">
+        <div class="incident-head">
+          <span class="incident-title">{{ incident.monitor }} · {% if incident.resolved %}Resolved{% else
+            %}Ongoing{% endif %}</span>
+          <span class="incident-at">{{ incident.started }}{% if let Some(ended) = incident.ended %} → {{ ended }}{%
+            endif %}{% if let Some(duration) = incident.duration %} · {{ duration }}{% endif %}</span>
+        </div>
+        {% if let Some(error) = incident.error %}<p class="incident-body">{{ error }}</p>{% endif %}
+        {% if let Some(cause) = incident.cause %}<p class="incident-body cause">caused by {{ cause }}</p>{% endif %}
+        {% if let Some(impacted) = incident.impacted %}<p class="incident-body impacted">impacts: {{ impacted }}</p>{%
+        endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <footer>
+      <a href="/">{{ title }}</a> · Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
+    </footer>
+  </main>
+</body>
+
+</html>

@@ -116,6 +116,31 @@ impl EmailNotifier {
                      (likely a network partition rather than an outage)."
                 ),
             ),
+            Event::CertChanged {
+                monitor,
+                old_fingerprint,
+                new_fingerprint,
+            } => (
+                format!("[TLS] {monitor} certificate changed unexpectedly"),
+                format!(
+                    "The TLS certificate for {monitor} has changed unexpectedly.\n\
+                     Old fingerprint: {old_fingerprint}\n\
+                     New fingerprint: {new_fingerprint}\n\n\
+                     This may indicate a MITM attack or an unexpected certificate renewal."
+                ),
+            ),
+            Event::BudgetBurn {
+                monitor,
+                burn_rate_x10,
+                window,
+                exhausted_in_secs,
+            } => (
+                format!("[BUDGET] {monitor} error budget burn"),
+                format!(
+                    "{monitor} is {}.",
+                    crate::util::budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
+                ),
+            ),
         }
     }
 }

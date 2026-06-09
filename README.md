@@ -16,26 +16,57 @@ Named after the **Horai**, the Greek goddesses of the hours.
 
 ## Features
 
-- **HTTP, TCP, ICMP, push & assertion probes** - per-monitor interval, timeout,
+- **HTTP, TCP, ICMP, DNS, push & assertion probes** - per-monitor interval, timeout,
   expected status and a "degraded if slower than" threshold. HTTP monitors can assert
   a **keyword** in the body or a **JSONPath** (`json_query` / `json_expected`), route
   through an HTTP/SOCKS **proxy**, and send custom headers. **ICMP** (ping) monitors
   use an unprivileged datagram socket - no `CAP_NET_RAW`, rootless-Docker friendly,
-  IPv4 and IPv6. **Push** (heartbeat) monitors flip to down when a job stops pinging
-  `/api/push/{id}`.
+  IPv4 and IPv6. **DNS** monitors resolve a hostname (any record type, custom
+  resolver) and can **pin the expected answer** (`dns_expected`) - hijack detection.
+  **Push** (heartbeat) monitors flip to down when a job stops pinging
+  `/api/push/{id}` - or, with a **cron schedule** (`schedule = "0 3 * * *"` +
+  `grace_secs`), only when a scheduled run misses its grace window: the natural
+  fit for nightly backups, à la Healthchecks.io.
 - **Dependency-aware topology** - cluster monitors into named **groups** on the status
   page, and declare upstreams with `depends_on`. When a monitor goes down its alert is
   annotated with root cause vs. symptom: _"caused by X"_ when an upstream it depends on
   is also down, or _"impacts: A, B, C"_ (the blast radius) when its upstreams are all
   healthy and it is the root cause. The dependency graph is validated acyclic at load.
+- **Root-cause alert grouping** - when a database takes ten services down with it,
+  you get **one notification** (the root cause, with its blast radius), not eleven:
+  dependent monitors confirmed down within the grouping window fold into their
+  upstream's alert, and their recoveries stay silent too. A monitor that flaps
+  inside the window sends nothing at all. Tunable via `alerts.group_window_secs`
+  (0 restores one-alert-per-monitor).
+- **Availability SLOs with error budgets & burn-rate alerts** - give a monitor
+  `slo_uptime = 99.9` and the status page shows the **error budget left** for the
+  window ("budget 21m of 43m left, 30d"). Alerting is Google-SRE style
+  **multi-window burn rate** - _"burning error budget at 14.4x (1h) - exhausted in
+  ~6h at this rate"_ - which catches slow-burning flapping that a binary down alert
+  never confirms, and stays quiet once the burn stops.
 - **Server-rendered status page** (no JavaScript framework): a compact, responsive
   grid - daily uptime bars, an inline SVG latency chart, **p95/p99 latency** with an
   optional **latency SLO** indicator, plus an **incidents/announcements** banner.
 - **JSON API** to read status and latency history from anywhere, with a generated
   **OpenAPI 3.1** document at `/api/openapi.json`.
-- **TLS certificate expiry monitoring** with advance warnings.
+- **Automatic incident history** - every confirmed down/up transition is recorded
+  (with the root-cause annotation) and served as an **HTML history page**
+  (`/history`) and an **Atom feed** (`/history.atom`) you can subscribe to - no
+  account, no JavaScript.
+- **Prometheus `/metrics`** - monitor status, 24h uptime ratio, latency quantiles
+  and certificate expiry in text exposition format, ready for Grafana/Alertmanager.
+- **Private monitors** - mark a monitor `public = false` and it disappears from the
+  unauthenticated status page, API, badges and history; a viewer token
+  (`server.auth_token`, sent as `Authorization: Bearer` or `?token=`) reveals the
+  full view. Run one Hora for a public status page *and* your internal services.
+- **Plain-text status for terminals** - `curl status.example.com` returns an
+  aligned text rendering of the page (content negotiation on `User-Agent`/`Accept`).
+- **TLS certificate expiry monitoring** with advance warnings, plus optional
+  **public-key pinning** (`cert_pin`): an unexpected key change - MITM, botched
+  renewal - alerts once per change, with the old and new fingerprints.
 - **Pluggable notifications** via a `Notifier` trait - **Telegram, Discord, Slack,
-  Matrix, a generic JSON webhook, SMTP e-mail and Free Mobile SMS** built in. Channels
+  Matrix, ntfy, Gotify, Pushover, a generic JSON webhook, SMTP e-mail and Free
+  Mobile SMS** built in. Channels
   are **named**, so you can have several of the same type and **route each monitor** to
   specific ones (`notify = [...]`). Delivery retries transient failures, and alerts fire
   only after _N_ consecutive failures (so flapping never wakes you up) and include a
@@ -47,8 +78,16 @@ Named after the **Horai**, the Greek goddesses of the hours.
 - **Live config reload**: edit `config.toml` (or send `SIGHUP`) and monitors,
   thresholds, retention _and notification channels_ are reconciled in place -
   existing checks never pause, so there is no blind window.
-- **Per-monitor retention** with automatic pruning; the database does not grow
-  forever.
+- **Per-monitor retention** with automatic pruning **and long-term downsampling**:
+  raw checks roll up into hourly buckets after 7 days and daily buckets after 90,
+  kept for a year - the daily uptime bars keep working beyond the raw retention
+  window, and the database still does not grow forever.
+- **Uptime Kuma import** - `hora import kuma backup.json` converts a Kuma backup
+  into Hora monitors (TOML on stdout): http/keyword/json-query, port, ping, dns and
+  push monitors, keyword/JSONPath assertions, headers, intervals/timeouts, expected
+  status codes, push tokens and Kuma groups (as display groups). Unsupported types
+  come out as commented stubs. `hora check` validates a config with a CI-friendly
+  exit code.
 - **`${VAR}` interpolation** in the config so secrets stay in the environment.
 - Single self-contained binary: migrations and templates are compiled in.
 
@@ -91,6 +130,18 @@ chat_id = "123456"
 and on the container: `-e HORA_TELEGRAM_TOKEN=123:abc`. Only `HORA_BIND`,
 `HORA_DATABASE_PATH` and `HORA_CONFIG` are read directly from the environment.
 
+## CLI
+
+```sh
+hora                                   # run the monitor
+hora check                             # validate the config; non-zero exit on error (CI-friendly)
+hora import kuma backup.json > out.toml  # convert an Uptime Kuma backup to Hora monitors
+hora --version
+```
+
+`hora import kuma` maps http/keyword, port, ping, dns and push monitors;
+anything else is emitted as a commented stub to review by hand.
+
 ## Upgrade
 
 ```sh
@@ -104,25 +155,8 @@ docker run -d --name hora --restart unless-stopped \
 ```
 
 Your history lives on the `hora-data` volume and survives upgrades.
-
-### Upgrading from 0.1.x → 0.2
-
-Notification config moved from per-type singletons to **named channels**, so you
-can run several of the same type and route monitors to specific ones. The fixed
-`HORA_*` secret variables are replaced by `${VAR}` interpolation.
-
-```toml
-# 0.1.x                              # 0.2
-[telegram]                           [[channels]]
-token = "…"   # or HORA_TELEGRAM_…   name = "telegram"
-chat_id = "…"                        type = "telegram"
-                                     token = "${HORA_TELEGRAM_TOKEN}"   # same env var still works
-                                     chat_id = "…"
-```
-
-`HORA_BIND` / `HORA_DATABASE_PATH` are unchanged. If you run the container as the
-non-root user for the first time on an existing volume, fix its ownership once:
-`docker run --rm -v hora-data:/data alpine chown -R 10001:10001 /data`.
+Version-specific notes (0.4 is a no-breaking-changes upgrade) are in
+[`UPGRADES.md`](UPGRADES.md).
 
 ## Configuration & live reload
 
@@ -144,7 +178,10 @@ rate-limit settings are read once at startup and still require a restart.
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /` | The HTML status page. |
+| `GET /` | The HTML status page - or an aligned plain-text rendering for curl/wget. |
+| `GET /metrics` | Prometheus metrics (text exposition format). |
+| `GET /history` | Incident history page (HTML). |
+| `GET /history.atom` | Incident history as an Atom feed. |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}?token=…` | Record a heartbeat for a push monitor. The token may instead be sent as an `X-Push-Token` header, keeping it out of proxy access logs. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
@@ -165,6 +202,11 @@ public). Responses carry a strict CSP, `X-Content-Type-Options: nosniff` and
 otherwise a fresh id is minted) echoed on the response for log correlation.
 
 Point any client (Bruno, Insomnia, Scalar, Swagger Editor…) at `/api/openapi.json`.
+
+With `server.auth_token` set, the page, `/api/summary`, `/api/monitors/{id}/latency`,
+`/metrics`, `/history` and `/history.atom` accept the token (as
+`Authorization: Bearer <token>` or `?token=`) to include monitors marked
+`public = false`; without it they serve the public subset only.
 
 ### Badges
 

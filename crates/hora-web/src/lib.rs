@@ -2,9 +2,12 @@
 
 mod error;
 mod handlers;
+mod history;
+mod metrics;
 mod render;
 mod routes;
 mod summary;
+mod text;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -48,10 +51,14 @@ pub(crate) struct Cached {
     summary: Arc<Summary>,
 }
 
-/// Lock-free reads (`value`) plus a single-flight build gate (`build`).
+/// Lock-free reads (one slot per audience) plus a single-flight build gate.
+/// The `public` slot caches the summary filtered to public monitors; the
+/// `full` slot the unfiltered view served to authenticated callers (admin
+/// page views, Prometheus scrapes) - both bust on config reload.
 #[derive(Default)]
 pub(crate) struct Cache {
-    value: ArcSwapOption<Cached>,
+    public: ArcSwapOption<Cached>,
+    full: ArcSwapOption<Cached>,
     build: Mutex<()>,
 }
 
@@ -127,22 +134,26 @@ impl ConfiguredIp {
 // --- Summary cache (lock-free read + single-flight build) ----------------
 
 /// Return a fresh-enough cached summary, or build exactly one (single-flight)
-/// and cache it. The cache busts immediately when the config is reloaded.
+/// and cache it. `full` selects the unfiltered view (private monitors
+/// included) served to authenticated callers. The cache busts immediately
+/// when the config is reloaded.
 pub(crate) async fn summary_for(
     pool: &SqlitePool,
     config: &Arc<Config>,
     cache: &Cache,
+    full: bool,
 ) -> Arc<Summary> {
-    if let Some(fresh) = fresh_summary(cache, config) {
+    let slot = if full { &cache.full } else { &cache.public };
+    if let Some(fresh) = fresh_summary(slot, config) {
         return fresh;
     }
     // Only one task builds at a time; the rest wait and reuse the result.
     let _build = cache.build.lock().await;
-    if let Some(fresh) = fresh_summary(cache, config) {
+    if let Some(fresh) = fresh_summary(slot, config) {
         return fresh;
     }
-    let summary = Arc::new(build_summary(pool, config).await);
-    cache.value.store(Some(Arc::new(Cached {
+    let summary = Arc::new(build_summary(pool, config, full).await);
+    slot.store(Some(Arc::new(Cached {
         at: Instant::now(),
         config: Arc::clone(config),
         summary: Arc::clone(&summary),
@@ -150,8 +161,11 @@ pub(crate) async fn summary_for(
     summary
 }
 
-pub(crate) fn fresh_summary(cache: &Cache, config: &Arc<Config>) -> Option<Arc<Summary>> {
-    let cached = cache.value.load_full()?;
+pub(crate) fn fresh_summary(
+    slot: &ArcSwapOption<Cached>,
+    config: &Arc<Config>,
+) -> Option<Arc<Summary>> {
+    let cached = slot.load_full()?;
     let fresh = Arc::ptr_eq(&cached.config, config) && cached.at.elapsed() < SUMMARY_CACHE_TTL;
     fresh.then(|| Arc::clone(&cached.summary))
 }

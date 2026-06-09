@@ -25,6 +25,12 @@ allowed_origins = []
 # every `rate_limit_refill_secs` seconds, up to a burst of `rate_limit_burst`.
 rate_limit_refill_secs = 1
 rate_limit_burst = 30
+# Token required to view private monitors (those with `public = false`), sent
+# as `Authorization: Bearer <token>` or `?token=`. It gates the full view on
+# the status page, /api/summary, /api/monitors/{id}/latency, /metrics,
+# /history and /history.atom; without it those endpoints only show public
+# monitors. Read live: a change applies on the next reload.
+# auth_token = "${HORA_AUTH_TOKEN}"
 
 # --- Notification channels ------------------------------------------------
 # Each channel has a unique `name` and a `type`. Several channels may share a
@@ -76,6 +82,24 @@ rate_limit_burst = 30
 # user = "12345678"                # account id, from "Notifications par SMS"
 # pass = "${FREEMOBILE_PASS}"      # API key generated in that same option
 
+# [[channels]]
+# name = "ntfy-alerts"
+# type = "ntfy"                    # ntfy.sh or self-hosted ntfy server
+# url = "https://ntfy.sh/my-topic" # topic URL
+# token = "${NTFY_TOKEN}"          # optional; for private ntfy servers
+
+# [[channels]]
+# name = "gotify-alerts"
+# type = "gotify"                  # self-hosted Gotify server
+# url = "https://gotify.example.com"
+# token = "${GOTIFY_TOKEN}"        # application token
+
+# [[channels]]
+# name = "pushover-alerts"
+# type = "pushover"                # Pushover notifications
+# token = "${PUSHOVER_TOKEN}"      # application API token
+# user = "${PUSHOVER_USER}"        # user key (recipient)
+
 # Alerting and retention policy, independent of any channel.
 [alerts]
 # Consecutive failed checks before a monitor is alerted as down. Kills flapping / false positives.
@@ -88,6 +112,12 @@ fail_threshold = 3
 cert_expiry_days = 14
 # Default history retention in days, overridable per monitor via `retention_days`.
 default_retention_days = 90
+# Root-cause alert grouping: a monitor confirmed down whose upstream
+# (`depends_on`) is also down waits this many seconds; if the upstream alerts
+# first (or already did), the dependent's alert folds into that single
+# notification - one alert per incident, not one per affected monitor. Its
+# recovery stays silent too. 0 = every monitor alerts independently.
+# group_window_secs = 30
 
 # --- Scheduled maintenance ------------------------------------------------
 # Alerts are muted for the affected monitors during the window (checks still
@@ -107,7 +137,7 @@ default_retention_days = 90
 # at = "2026-06-07T12:00:00Z"      # optional, RFC 3339
 
 # --- Monitors -------------------------------------------------------------
-# kind = "http" (default), "tcp", "icmp" or "push".
+# kind = "http" (default), "tcp", "icmp", "push" or "dns".
 # For http: target is a URL; up = 2xx (or expected_status if set).
 # For tcp:  target is "host:port"; up = TCP connect succeeds.
 # For icmp: target is a host or IP (no port); up = ICMP echo reply. Uses an
@@ -115,6 +145,7 @@ default_retention_days = 90
 #           CAP_NET_RAW (the kernel net.ipv4.ping_group_range, Docker's default,
 #           must cover the process). IPv4 and IPv6 are both supported.
 # For push: no target; the job calls POST /api/push/{id} (see below).
+# For dns:  target is a hostname; resolves and asserts expected record type/value.
 # TLS certificate expiry is checked automatically for https:// monitors.
 #
 # Topology (optional):
@@ -124,6 +155,9 @@ default_retention_days = 90
 #   - "caused by X" if an upstream it depends on is also down (symptom)
 #   - "impacts: A, B, C" if all its upstreams are up (root cause, blast radius)
 # The dependency graph must be acyclic (validated at load).
+#
+# Visibility (optional):
+#   public = false               # hide from unauthenticated viewers (requires auth_token)
 
 [[monitors]]
 id = "website"
@@ -137,11 +171,17 @@ depends_on = ["api"]
 # expected_status = 200   # optional; default: any 2xx counts as up
 # degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)
 # slo_latency_ms = 500    # optional; the 24h p95 is flagged met/breached against this
+# slo_uptime = 99.9        # optional; availability SLO (%). Shows the error budget
+#                          # left on the status page and arms burn-rate alerts
+#                          # ("burning error budget at 14.4x - exhausted in ~6h").
+# slo_window_days = 30     # optional; the SLO window (default 30 days)
 # check_cert = false      # optional; override TLS expiry checking
 # retention_days = 30     # optional; override how long this monitor's history is kept
 # headers = { Accept = "text/html", Authorization = "Bearer ${TOKEN}" }  # optional
 # notify = ["alerts-discord"]   # optional; route alerts to specific channels
 # proxy = "socks5://127.0.0.1:9050"   # optional; route requests through a proxy
+# public = false          # optional; hide from public status page
+# cert_pin = "abc123..."  # optional; SHA-256 of leaf public key (detects cert changes)
 
 [[monitors]]
 id = "api"
@@ -182,12 +222,34 @@ group = "infra"
 # The job calls: curl -fsS -X POST \
 #   "https://status.example.com/api/push/nightly-backup?token=${BACKUP_TOKEN}"
 # Optional query: &status=down&msg=...&ping=<ms>
+#
+# Cron-aware variant: declare WHEN the job runs and Hora alerts only if a
+# scheduled run misses its grace window - a 03:00 backup pinging at 03:05 is
+# fine, one still silent at 03:30 + grace is down. With `schedule` set,
+# `interval_secs` is just how often Hora re-evaluates (60 is fine).
 [[monitors]]
 id = "nightly-backup"
 name = "Nightly backup"
 kind = "push"
 interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # push_token = "${BACKUP_TOKEN}"   # optional but recommended
+# schedule = "0 3 * * *"     # five-field cron, UTC; replaces the fixed-gap rule
+# grace_secs = 1800          # how late a scheduled ping may be (default 30m)
+
+# DNS monitor: resolve a hostname; `dns_expected` pins the answer (hijack
+# detection - alerts when the answer doesn't match). Without it any non-empty
+# answer counts as up: CDN and round-robin answers rotate constantly, so
+# alerting on mere change would flap.
+# [[monitors]]
+# id = "dns-check"
+# name = "DNS Check"
+# kind = "dns"
+# target = "example.com"          # hostname to resolve
+# interval_secs = 300
+# timeout_secs = 10
+# dns_record = "A"                # optional; A (default), AAAA, CNAME, MX, NS, TXT, SRV, SOA, PTR
+# dns_expected = "1.2.3.4"        # optional; expected answer (comma-separated, order-insensitive)
+# dns_resolver = "8.8.8.8:53"     # optional; custom resolver (default: system)
 
 # --- Mutual surveillance (who watches the watcher) ------------------------
 # A [health] section makes this node emit an outbound "dead-man" heartbeat: it

@@ -1,6 +1,6 @@
 //! `SQLite` persistence layer (sqlx). All timestamps are unix epoch seconds (UTC).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +14,13 @@ use crate::config::{Config, Peer};
 use crate::probe::Outcome;
 
 const PRUNE_INTERVAL: Duration = Duration::from_hours(6);
+
+/// Raw checks roll up into hourly buckets once older than this.
+const DOWNSAMPLE_HOURLY_AFTER_DAYS: i64 = 7;
+/// Hourly buckets roll up into daily ones (and are pruned) once older than this.
+const DOWNSAMPLE_DAILY_AFTER_DAYS: i64 = 90;
+/// Daily buckets and closed incidents are kept this long.
+const AGGREGATE_RETENTION_DAYS: i64 = 365;
 
 /// Latest stored check for a monitor.
 #[derive(Debug, sqlx::FromRow)]
@@ -315,35 +322,73 @@ pub async fn availability_all(
 
 /// Daily up/down/degraded aggregates per monitor since `since`, oldest first.
 ///
+/// Reads the raw checks *and* the downsampled `checks_hourly` / `checks_daily`
+/// buckets, so the daily bars extend beyond the raw retention window. For each
+/// `(monitor, day)` the source with the most samples wins: raw is
+/// authoritative while complete, and the aggregates take over for days whose
+/// raw rows retention has already pruned (a partially pruned boundary day
+/// resolves to whichever source still holds the full count).
+///
 /// # Errors
 ///
-/// Returns an error if the query fails.
+/// Returns an error if a query fails.
 pub async fn daily_all(
     pool: &SqlitePool,
     since: i64,
 ) -> sqlx::Result<HashMap<String, Vec<DayRow>>> {
-    let rows = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
+    let raw = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
         "SELECT monitor_id, \
             strftime('%Y-%m-%d', time, 'unixepoch') AS day, \
             CAST(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS INTEGER), \
             CAST(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS INTEGER), \
             CAST(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS INTEGER) \
-         FROM checks WHERE time >= ? GROUP BY monitor_id, day ORDER BY monitor_id, day ASC",
+         FROM checks WHERE time >= ? GROUP BY monitor_id, day",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    let hourly = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
+        "SELECT monitor_id, \
+            strftime('%Y-%m-%d', hour, 'unixepoch') AS day, \
+            SUM(up_count), SUM(down_count), SUM(degraded_count) \
+         FROM checks_hourly WHERE hour >= ? GROUP BY monitor_id, day",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    let daily = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
+        "SELECT monitor_id, \
+            strftime('%Y-%m-%d', day, 'unixepoch') AS day, \
+            up_count, down_count, degraded_count \
+         FROM checks_daily WHERE day >= ?",
     )
     .bind(since)
     .fetch_all(pool)
     .await?;
 
-    let mut map: HashMap<String, Vec<DayRow>> = HashMap::new();
-    for (id, day, up, down, degraded) in rows {
-        map.entry(id).or_default().push(DayRow {
-            day,
-            up,
-            down,
-            degraded,
-        });
+    let mut best: HashMap<String, BTreeMap<String, (i64, i64, i64)>> = HashMap::new();
+    for (id, day, up, down, degraded) in raw.into_iter().chain(hourly).chain(daily) {
+        let slot = best.entry(id).or_default().entry(day).or_insert((0, 0, 0));
+        if up + down + degraded > slot.0 + slot.1 + slot.2 {
+            *slot = (up, down, degraded);
+        }
     }
-    Ok(map)
+    // BTreeMap keys are ISO dates, so iteration order is oldest-first already.
+    Ok(best
+        .into_iter()
+        .map(|(id, days)| {
+            let rows = days
+                .into_iter()
+                .map(|(day, (up, down, degraded))| DayRow {
+                    day,
+                    up,
+                    down,
+                    degraded,
+                })
+                .collect();
+            (id, rows)
+        })
+        .collect())
 }
 
 /// Latency samples per monitor since `since`, oldest first (NULLs skipped).
@@ -451,6 +496,227 @@ pub async fn cert_all(pool: &SqlitePool) -> sqlx::Result<HashMap<String, i64>> {
     Ok(rows.into_iter().collect())
 }
 
+/// Store (or refresh) the certificate pin (SHA-256 fingerprint of the leaf public key).
+///
+/// # Errors
+///
+/// Returns an error if the upsert fails.
+pub async fn upsert_cert_pin(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    fingerprint: &str,
+    checked_at: i64,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO cert_pins (monitor_id, fingerprint, checked_at) VALUES (?, ?, ?) \
+         ON CONFLICT(monitor_id) DO UPDATE SET \
+            fingerprint = excluded.fingerprint, checked_at = excluded.checked_at",
+    )
+    .bind(monitor_id)
+    .bind(fingerprint)
+    .bind(checked_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The stored certificate pin fingerprint for a monitor, if known.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn cert_pin_fingerprint(
+    pool: &SqlitePool,
+    monitor_id: &str,
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar::<_, String>("SELECT fingerprint FROM cert_pins WHERE monitor_id = ?")
+        .bind(monitor_id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// An automatically recorded incident from a down/up transition.
+#[derive(Debug, sqlx::FromRow)]
+pub struct Incident {
+    pub id: i64,
+    pub monitor_id: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub duration_s: Option<i64>,
+    pub cause: Option<String>,
+    pub impacted: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+}
+
+/// Record the start of an incident (monitor going down).
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn insert_incident_start(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    error: Option<&str>,
+    cause: Option<&str>,
+    impacted: &[String],
+) -> sqlx::Result<i64> {
+    let now = chrono::Utc::now().timestamp();
+    let impacted_json = serde_json::to_string(impacted).unwrap_or_else(|_| "[]".to_owned());
+    let result = sqlx::query(
+        "INSERT INTO incidents (monitor_id, started_at, error, cause, impacted, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(monitor_id)
+    .bind(now)
+    .bind(error)
+    .bind(cause)
+    .bind(&impacted_json)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(result.last_insert_rowid())
+}
+
+/// Record the end of an incident (monitor recovering).
+///
+/// # Errors
+///
+/// Returns an error if the update fails.
+pub async fn update_incident_end(pool: &SqlitePool, incident_id: i64) -> sqlx::Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE incidents SET ended_at = ?, duration_s = (? - started_at) WHERE id = ?")
+        .bind(now)
+        .bind(now)
+        .bind(incident_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Find the most recent open incident for a monitor (one without `ended_at`).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn find_open_incident(pool: &SqlitePool, monitor_id: &str) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM incidents WHERE monitor_id = ? AND ended_at IS NULL \
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(monitor_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Fetch recent incidents for the history page/Atom feed.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<Incident>> {
+    sqlx::query_as::<_, Incident>(
+        "SELECT id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, created_at \
+         FROM incidents ORDER BY started_at DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Aggregate raw checks into hourly buckets for long-term storage.
+///
+/// Only hours that lie *entirely* below `cutoff` are aggregated, and a bucket
+/// is written once (`INSERT OR IGNORE`): a complete hour aggregated from
+/// still-complete raw data is final. Recomputing it later (`OR REPLACE`) could
+/// silently shrink it once retention starts eating the raw rows it came from.
+///
+/// # Errors
+///
+/// Returns an error if the aggregation fails.
+pub async fn downsample_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO checks_hourly \
+            (monitor_id, hour, up_count, down_count, degraded_count, avg_latency_ms) \
+         SELECT \
+           monitor_id, \
+           (time / 3600) * 3600 AS hour, \
+           SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END), \
+           SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END), \
+           SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), \
+           CAST(AVG(latency_ms) AS INTEGER) \
+         FROM checks \
+         WHERE time < ? \
+         GROUP BY monitor_id, hour \
+         HAVING hour + 3600 <= ?",
+    )
+    .bind(cutoff)
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Aggregate hourly buckets into daily ones for even longer-term storage.
+///
+/// Same write-once rule as [`downsample_hourly`]: only days entirely below
+/// `cutoff`, inserted once. The latency average is weighted by each hour's
+/// sample count, so a quiet hour does not skew the day.
+///
+/// # Errors
+///
+/// Returns an error if the aggregation fails.
+pub async fn downsample_daily(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO checks_daily \
+            (monitor_id, day, up_count, down_count, degraded_count, avg_latency_ms) \
+         SELECT \
+           monitor_id, \
+           (hour / 86400) * 86400 AS day, \
+           SUM(up_count), \
+           SUM(down_count), \
+           SUM(degraded_count), \
+           CAST(SUM(avg_latency_ms * (up_count + degraded_count)) \
+                / NULLIF(SUM(CASE WHEN avg_latency_ms IS NOT NULL \
+                              THEN up_count + degraded_count END), 0) AS INTEGER) \
+         FROM checks_hourly \
+         WHERE hour < ? \
+         GROUP BY monitor_id, day \
+         HAVING day + 86400 <= ?",
+    )
+    .bind(cutoff)
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Prune old hourly aggregates beyond the retention period.
+///
+/// # Errors
+///
+/// Returns an error if the deletion fails.
+pub async fn prune_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM checks_hourly WHERE hour < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Prune old daily aggregates beyond the retention period.
+///
+/// # Errors
+///
+/// Returns an error if the deletion fails.
+pub async fn prune_daily(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM checks_daily WHERE day < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Current status from the recent checks (newest first): a single failure only
 /// counts as `degraded` until `threshold` consecutive failures confirm `down`.
 #[must_use]
@@ -497,8 +763,44 @@ pub fn spawn_pruner(
     })
 }
 
+/// Downsample old history and age the aggregates out. Failures are logged and
+/// non-fatal: the retention pruning in [`prune`] still runs.
+async fn roll_up_history(pool: &SqlitePool, now: i64) {
+    // Downsample before any deletion: raw checks older than 7 days roll up
+    // into hourly buckets, hourly buckets older than 90 days into daily ones.
+    // Each bucket is written exactly once (see `downsample_hourly`), so the
+    // aggregates survive after retention prunes the raw rows they came from.
+    let hourly_cutoff = now - DOWNSAMPLE_HOURLY_AFTER_DAYS * SECONDS_PER_DAY;
+    if let Err(err) = downsample_hourly(pool, hourly_cutoff).await {
+        tracing::warn!("hourly downsampling failed: {err}");
+    }
+    let daily_cutoff = now - DOWNSAMPLE_DAILY_AFTER_DAYS * SECONDS_PER_DAY;
+    if let Err(err) = downsample_daily(pool, daily_cutoff).await {
+        tracing::warn!("daily downsampling failed: {err}");
+    }
+
+    // Prune aggregates: hourly beyond 90 days (rounded down to a whole day, so
+    // only hours already rolled up into a *complete* daily bucket are dropped),
+    // daily beyond a year.
+    let hourly_prune_cutoff = (daily_cutoff / 86400) * 86400;
+    if let Err(err) = prune_hourly(pool, hourly_prune_cutoff).await {
+        tracing::warn!("hourly prune failed: {err}");
+    }
+    let yearly_cutoff = now - AGGREGATE_RETENTION_DAYS * SECONDS_PER_DAY;
+    if let Err(err) = prune_daily(pool, yearly_cutoff).await {
+        tracing::warn!("daily prune failed: {err}");
+    }
+    // Closed incidents age out with the daily aggregates; open ones are kept
+    // (they are still being displayed, and close on the next healthy tick).
+    if let Err(err) = prune_incidents(pool, yearly_cutoff).await {
+        tracing::warn!("incident prune failed: {err}");
+    }
+}
+
 async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     let now = chrono::Utc::now().timestamp();
+
+    roll_up_history(pool, now).await;
 
     // Trim each monitor's history to its retention window. Monitors are grouped
     // by cutoff (most share the default), so this is one DELETE per distinct
@@ -566,6 +868,44 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     .bind(&keep)
     .execute(pool)
     .await?;
+    sqlx::query(
+        "DELETE FROM cert_pins WHERE NOT EXISTS \
+         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = cert_pins.monitor_id)",
+    )
+    .bind(&keep)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM incidents WHERE NOT EXISTS \
+         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = incidents.monitor_id)",
+    )
+    .bind(&keep)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM checks_hourly WHERE NOT EXISTS \
+         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = checks_hourly.monitor_id)",
+    )
+    .bind(&keep)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM checks_daily WHERE NOT EXISTS \
+         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = checks_daily.monitor_id)",
+    )
+    .bind(&keep)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Drop closed incidents older than `cutoff` (by start time). Open incidents
+/// are never pruned here.
+async fn prune_incidents(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM incidents WHERE ended_at IS NOT NULL AND started_at < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -762,5 +1102,104 @@ mod tests {
 
         // The retained monitor keeps only its recent row.
         assert_eq!(latency_series(&pool, "keep", 0).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn downsampling_is_write_once_and_only_buckets_complete_hours() {
+        let pool = memory_pool().await;
+        let hour0 = 10 * 86400; // aligned on both an hour and a day
+        let hour1 = hour0 + 3600;
+
+        insert(&pool, "m", hour0 + 10, 1, Some(100)).await;
+        insert(&pool, "m", hour0 + 20, 1, Some(200)).await;
+        insert(&pool, "m", hour0 + 30, 0, None).await;
+        insert(&pool, "m", hour1 + 10, 1, Some(300)).await;
+
+        // Cutoff inside hour1: only hour0 is entirely below it, so only hour0
+        // is bucketed.
+        downsample_hourly(&pool, hour1 + 1800).await.unwrap();
+        let buckets = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT hour, up_count, down_count, avg_latency_ms FROM checks_hourly ORDER BY hour",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(buckets, vec![(hour0, 2, 1, 150)]);
+
+        // Write-once: a late raw row never rewrites an existing bucket.
+        insert(&pool, "m", hour0 + 40, 0, None).await;
+        downsample_hourly(&pool, hour1 + 3600).await.unwrap();
+        let buckets = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT hour, up_count, down_count, avg_latency_ms FROM checks_hourly ORDER BY hour",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(buckets, vec![(hour0, 2, 1, 150), (hour1, 1, 0, 300)]);
+
+        // Daily roll-up weights the latency average by sample count:
+        // (150 * 2 + 300 * 1) / 3 = 200.
+        downsample_daily(&pool, hour0 + 86400).await.unwrap();
+        let days = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT day, up_count, down_count, avg_latency_ms FROM checks_daily",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(days, vec![(hour0, 3, 1, 200)]);
+    }
+
+    #[tokio::test]
+    async fn daily_all_reads_aggregates_once_raw_is_pruned() {
+        let pool = memory_pool().await;
+        let hour0 = 10 * 86400;
+
+        insert(&pool, "m", hour0 + 10, 1, Some(100)).await;
+        insert(&pool, "m", hour0 + 20, 0, None).await;
+        downsample_hourly(&pool, hour0 + 3600).await.unwrap();
+
+        // Raw still present: counts come from it (and agree with the bucket).
+        let day_key = "1970-01-11";
+        let bars = daily_all(&pool, 0).await.unwrap();
+        assert_eq!(bars["m"][0].day, day_key);
+        assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
+
+        // Raw pruned: the hourly bucket transparently takes over.
+        sqlx::query("DELETE FROM checks")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let bars = daily_all(&pool, 0).await.unwrap();
+        assert_eq!(bars["m"][0].day, day_key);
+        assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn incidents_open_close_and_prune() {
+        let pool = memory_pool().await;
+
+        let id = insert_incident_start(&pool, "m", Some("boom"), None, &["a".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(find_open_incident(&pool, "m").await.unwrap(), Some(id));
+
+        update_incident_end(&pool, id).await.unwrap();
+        assert_eq!(find_open_incident(&pool, "m").await.unwrap(), None);
+
+        let incidents = recent_incidents(&pool, 10).await.unwrap();
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].error.as_deref(), Some("boom"));
+        assert!(incidents[0].duration_s.is_some());
+
+        // Closed incidents prune by age; open ones never do.
+        let open = insert_incident_start(&pool, "m", None, None, &[])
+            .await
+            .unwrap();
+        prune_incidents(&pool, chrono::Utc::now().timestamp() + 1000)
+            .await
+            .unwrap();
+        let incidents = recent_incidents(&pool, 10).await.unwrap();
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].id, open);
     }
 }

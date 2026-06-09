@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 use hora_core::SECONDS_PER_DAY;
 use hora_core::config::{Config, Monitor};
 use hora_core::db::{self, DayRow, Latest, Point};
-use hora_core::topology;
+use hora_core::{slo, topology};
 
 use crate::SPARK_BUCKETS;
 use crate::render::sparkline;
@@ -20,24 +20,24 @@ use crate::render::sparkline;
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct Summary {
-    title: String,
-    overall: &'static str,
-    overall_label: &'static str,
+    pub(crate) title: String,
+    pub(crate) overall: &'static str,
+    pub(crate) overall_label: &'static str,
     generated_at: String,
     #[serde(skip)]
-    updated_utc: String,
-    incidents: Vec<IncidentView>,
-    maintenances: Vec<MaintenanceView>,
+    pub(crate) updated_utc: String,
+    pub(crate) incidents: Vec<IncidentView>,
+    pub(crate) maintenances: Vec<MaintenanceView>,
     pub(crate) monitors: Vec<MonitorView>,
     /// Monitor groups: `(group_name, monitors)`. Ungrouped monitors appear under
     /// an empty-string key, always last.
-    groups: Vec<GroupView>,
-    peers: Vec<PeerView>,
+    pub(crate) groups: Vec<GroupView>,
+    pub(crate) peers: Vec<PeerView>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct GroupView {
-    name: String,
+    pub(crate) name: String,
     /// Member monitor ids, in display order. The full monitor objects live once in
     /// the top-level `monitors`; the API carries only ids here so the response is
     /// not doubled, and a caller maps ids back to the monitors to render sections.
@@ -45,21 +45,21 @@ pub(crate) struct GroupView {
     /// The rendered cards, for the server-side template only; skipped from the API
     /// (it would duplicate every monitor object).
     #[serde(skip)]
-    monitors: Vec<MonitorView>,
+    pub(crate) monitors: Vec<MonitorView>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct IncidentView {
-    title: String,
-    body: String,
-    severity: &'static str,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) severity: &'static str,
     at: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct MaintenanceView {
-    reason: String,
-    monitors: String,
+    pub(crate) reason: String,
+    pub(crate) monitors: String,
 }
 
 /// A watched peer's view for the status page: just its current status and when it
@@ -67,8 +67,8 @@ pub(crate) struct MaintenanceView {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct PeerView {
     id: String,
-    name: String,
-    status: &'static str,
+    pub(crate) name: String,
+    pub(crate) status: &'static str,
     last_seen: Option<String>,
     /// Whether this node also heartbeats the peer (the OUT side is configured).
     pings: bool,
@@ -77,28 +77,47 @@ pub(crate) struct PeerView {
 #[derive(Clone, Serialize, ToSchema)]
 pub(crate) struct MonitorView {
     pub(crate) id: String,
-    name: String,
+    pub(crate) name: String,
     pub(crate) status: &'static str,
-    last_latency_ms: Option<i64>,
+    pub(crate) last_latency_ms: Option<i64>,
     last_checked: Option<String>,
     #[serde(rename = "uptime_24h_permille")]
     pub(crate) uptime_permille: Option<i64>,
     #[serde(skip)]
     uptime_label: Option<String>,
     #[serde(rename = "latency_p50_ms")]
-    p50_ms: Option<i64>,
+    pub(crate) p50_ms: Option<i64>,
     #[serde(rename = "latency_p95_ms")]
-    p95_ms: Option<i64>,
+    pub(crate) p95_ms: Option<i64>,
     #[serde(rename = "latency_p99_ms")]
-    p99_ms: Option<i64>,
+    pub(crate) p99_ms: Option<i64>,
     #[serde(rename = "slo_latency_ms")]
     slo_latency_ms: Option<i64>,
     #[serde(skip)]
     slo_state: &'static str,
+    /// Availability SLO target, percent (e.g. 99.9).
+    #[serde(rename = "slo_uptime_pct", skip_serializing_if = "Option::is_none")]
+    slo_uptime_pct: Option<f64>,
+    #[serde(
+        rename = "error_budget_minutes_total",
+        skip_serializing_if = "Option::is_none"
+    )]
+    budget_minutes_total: Option<i64>,
+    #[serde(
+        rename = "error_budget_minutes_left",
+        skip_serializing_if = "Option::is_none"
+    )]
+    budget_minutes_left: Option<i64>,
+    #[serde(skip)]
+    budget_label: Option<String>,
+    #[serde(skip)]
+    budget_title: String,
+    #[serde(skip)]
+    budget_state: &'static str,
     /// Active maintenance window title (alerts muted); `None` outside a window.
     maintenance: Option<String>,
     #[serde(rename = "cert_expiry_days")]
-    cert_days: Option<i64>,
+    pub(crate) cert_days: Option<i64>,
     #[serde(skip)]
     cert_label: Option<String>,
     #[serde(skip)]
@@ -111,10 +130,10 @@ pub(crate) struct MonitorView {
     group: Option<String>,
     /// Upstream monitor name causing this failure (topology annotation).
     #[serde(skip_serializing_if = "Option::is_none")]
-    cause: Option<String>,
+    pub(crate) cause: Option<String>,
     /// Downstream monitor names impacted by this root-cause failure.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    impacted: Vec<String>,
+    pub(crate) impacted: Vec<String>,
 }
 
 #[derive(Clone, Serialize, ToSchema)]
@@ -142,18 +161,37 @@ pub(crate) struct SummaryCtx {
     history_days: u16,
 }
 
-pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary {
+/// Build the page/API view model. `full` includes private (`public = false`)
+/// monitors; the public variant filters them out entirely - cards, groups and
+/// daily bars alike.
+pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config, full: bool) -> Summary {
     let now = Utc::now();
     let timestamp = now.timestamp();
+    // The daily fetch also feeds the error-budget arithmetic, so it must cover
+    // the largest configured SLO window, not just the displayed history.
+    let slo_days = config
+        .monitors
+        .iter()
+        .filter(|monitor| monitor.slo_uptime.is_some())
+        .map(Monitor::slo_window_days)
+        .max()
+        .unwrap_or(0);
+    let fetch_days = config.page.history_days.max(slo_days);
     let ctx = SummaryCtx {
         now,
         timestamp,
         since_24h: timestamp - SECONDS_PER_DAY,
-        since_history: timestamp - i64::from(config.page.history_days) * SECONDS_PER_DAY,
+        since_history: timestamp - i64::from(fetch_days) * SECONDS_PER_DAY,
         threshold: i64::from(config.alerts.fail_threshold.max(1)),
         cert_threshold: i64::from(config.alerts.cert_expiry_days),
         history_days: config.page.history_days,
     };
+
+    let visible_monitors: Vec<&Monitor> = config
+        .monitors
+        .iter()
+        .filter(|monitor| full || monitor.public)
+        .collect();
 
     // The 24h/90d aggregates batch into one query each. A failed query degrades
     // to empty data ("no data" cards) rather than blacking out the page.
@@ -175,7 +213,7 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary
         "latency sparklines",
     );
     let certs = or_empty(db::cert_all(pool).await, "certificates");
-    let recent = recent_checks_map(pool, &config.monitors, ctx.threshold.max(1)).await;
+    let recent = recent_checks_map(pool, &visible_monitors, ctx.threshold.max(1)).await;
 
     let data = MonitorData {
         recent: &recent,
@@ -186,8 +224,7 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config) -> Summary
         certs: &certs,
     };
 
-    let monitors: Vec<MonitorView> = config
-        .monitors
+    let monitors: Vec<MonitorView> = visible_monitors
         .iter()
         .map(|monitor| {
             let mut view = build_monitor_view(monitor, &ctx, &data, &config.monitors);
@@ -317,7 +354,7 @@ pub(crate) fn percentile_map(
 /// less than scanning the whole history table to rank rows.
 pub(crate) async fn recent_checks_map(
     pool: &SqlitePool,
-    monitors: &[Monitor],
+    monitors: &[&Monitor],
     limit: i64,
 ) -> HashMap<String, Vec<Latest>> {
     let mut recent: HashMap<String, Vec<Latest>> = HashMap::new();
@@ -391,6 +428,7 @@ pub(crate) fn build_monitor_view(
     } else {
         (None, Vec::new())
     };
+    let budget = budget_view(monitor, ctx, daily);
 
     MonitorView {
         id: monitor.id.clone(),
@@ -405,6 +443,12 @@ pub(crate) fn build_monitor_view(
         p99_ms: pct.map(|p| p.p99),
         slo_latency_ms: monitor.slo_latency_ms,
         slo_state,
+        slo_uptime_pct: monitor.slo_uptime.map(|bp| f64::from(bp) / 100.0),
+        budget_minutes_total: budget.as_ref().map(|b| b.total),
+        budget_minutes_left: budget.as_ref().map(|b| b.left),
+        budget_label: budget.as_ref().map(|b| b.label.clone()),
+        budget_title: budget.as_ref().map(|b| b.title.clone()).unwrap_or_default(),
+        budget_state: budget.as_ref().map_or("none", |b| b.state),
         maintenance: None,
         cert_days,
         cert_label: cert_days.map(cert_label),
@@ -491,6 +535,80 @@ pub(crate) struct Percentiles {
     p50: i64,
     p95: i64,
     p99: i64,
+}
+
+/// Error-budget figures for a monitor with an availability SLO.
+struct BudgetView {
+    total: i64,
+    left: i64,
+    label: String,
+    title: String,
+    state: &'static str,
+}
+
+/// Compute the error budget over the monitor's SLO window from the merged
+/// daily rows (which extend beyond raw retention thanks to the aggregates).
+/// Coverage counts only days with data, so a young monitor shows a mostly
+/// intact budget rather than a fictional one.
+fn budget_view(monitor: &Monitor, ctx: &SummaryCtx, daily: &[DayRow]) -> Option<BudgetView> {
+    let slo_bp = monitor.slo_uptime?;
+    let window = monitor.slo_window_days();
+    let cutoff = (ctx.now - TimeDelta::days(i64::from(window)))
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut available = 0_i64;
+    let mut total = 0_i64;
+    let mut days = 0_i64;
+    // ISO dates compare lexicographically, so a string cutoff suffices.
+    for row in daily.iter().filter(|row| row.day >= cutoff) {
+        available += row.up + row.degraded;
+        total += row.up + row.down + row.degraded;
+        days += 1;
+    }
+    let covered_minutes = days.min(i64::from(window)) * 1440;
+    let budget_total = slo::budget_minutes(window, slo_bp);
+    let left = (budget_total - slo::consumed_minutes(available, total, covered_minutes)).max(0);
+    let state = if left == 0 {
+        "breached"
+    } else if left.saturating_mul(4) <= budget_total {
+        "low"
+    } else {
+        "met"
+    };
+    Some(BudgetView {
+        total: budget_total,
+        left,
+        label: format!("budget {}", format_minutes(left)),
+        title: format!(
+            "error budget: {} of {} left ({}% over {window}d)",
+            format_minutes(left),
+            format_minutes(budget_total),
+            format_slo_pct(slo_bp),
+        ),
+        state,
+    })
+}
+
+/// `"43m"`, `"3h07m"`, `"3d2h"` - budget durations at a human size.
+fn format_minutes(minutes: i64) -> String {
+    if minutes >= 2 * 1440 {
+        format!("{}d{}h", minutes / 1440, (minutes % 1440) / 60)
+    } else if minutes >= 120 {
+        format!("{}h{:02}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+/// Basis points back to a percent string without trailing zeros: 9990 → "99.9".
+fn format_slo_pct(basis_points: u32) -> String {
+    if basis_points.is_multiple_of(100) {
+        format!("{}", basis_points / 100)
+    } else if basis_points.is_multiple_of(10) {
+        format!("{}.{}", basis_points / 100, (basis_points % 100) / 10)
+    } else {
+        format!("{}.{:02}", basis_points / 100, basis_points % 100)
+    }
 }
 
 /// Whether the measured p95 meets the configured latency objective.
@@ -681,5 +799,15 @@ mod tests {
         assert_eq!(slo_state(Some(200), Some(250)), "breached");
         assert_eq!(slo_state(None, Some(150)), "none");
         assert_eq!(slo_state(Some(200), None), "none");
+    }
+
+    #[test]
+    fn budget_durations_and_pct_format() {
+        assert_eq!(format_minutes(43), "43m");
+        assert_eq!(format_minutes(187), "3h07m");
+        assert_eq!(format_minutes(3000), "2d2h");
+        assert_eq!(format_slo_pct(9990), "99.9");
+        assert_eq!(format_slo_pct(9995), "99.95");
+        assert_eq!(format_slo_pct(9900), "99");
     }
 }

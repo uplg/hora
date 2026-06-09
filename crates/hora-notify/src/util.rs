@@ -30,6 +30,42 @@ pub(crate) fn topology_suffix(cause: Option<&str>, impacted: &[&str]) -> String 
     format!("\nimpacts {}: {}", impacted.len(), impacted.join(", "))
 }
 
+/// Human phrasing for a budget-burn event, shared so every channel words the
+/// rate and the exhaustion estimate the same way:
+/// `"burning error budget at 14.4x (1h) - exhausted in ~23h at this rate"`.
+pub(crate) fn budget_burn_phrase(
+    burn_rate_x10: i64,
+    window: &str,
+    exhausted_in_secs: Option<i64>,
+) -> String {
+    let rate = if burn_rate_x10 % 10 == 0 {
+        format!("{}x", burn_rate_x10 / 10)
+    } else {
+        format!("{}.{}x", burn_rate_x10 / 10, burn_rate_x10 % 10)
+    };
+    let eta = exhausted_in_secs.map_or_else(String::new, |secs| {
+        if secs == 0 {
+            " - budget already exhausted".to_owned()
+        } else {
+            format!(" - exhausted in ~{} at this rate", human_duration(secs))
+        }
+    });
+    format!("burning error budget at {rate} ({window}){eta}")
+}
+
+/// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"` - coarse on purpose, it's an estimate.
+fn human_duration(secs: i64) -> String {
+    if secs >= 2 * 86_400 {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
+    } else if secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// Human phrasing for a certificate-expiry event.
 pub(crate) fn cert_expiry_phrase(days_left: i64) -> String {
     if days_left <= 0 {

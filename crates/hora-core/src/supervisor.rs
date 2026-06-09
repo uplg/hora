@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::coalesce::{self, AlertMsg};
 use crate::config::{self, Config, Monitor, Peer};
 use crate::notifications::{self, Notifiers};
 use crate::peer::spawn_watch;
@@ -49,6 +50,9 @@ struct Deps {
     pool: SqlitePool,
     client: Client,
     notifier: Notifiers,
+    /// Inbox of the alert coalescer (root-cause grouping); every monitor loop
+    /// gets a clone.
+    alerts: mpsc::UnboundedSender<AlertMsg>,
     last_tick: Arc<AtomicU64>,
 }
 
@@ -74,13 +78,28 @@ pub fn start(
 ) -> Handle {
     let notifier = notifications::shared(&initial, &client);
     let (tx, rx) = watch::channel(Arc::new(initial));
+    let (alerts_tx, alerts_rx) = mpsc::unbounded_channel();
+    let coalescer = coalesce::spawn(
+        rx.clone(),
+        Arc::clone(&notifier),
+        alerts_rx,
+        shutdown.clone(),
+    );
     let deps = Deps {
         pool,
         client,
         notifier: Arc::clone(&notifier),
+        alerts: alerts_tx,
         last_tick,
     };
-    let task = tokio::spawn(supervise(tx, rx.clone(), config_path, deps, shutdown));
+    let task = tokio::spawn(supervise(
+        tx,
+        rx.clone(),
+        config_path,
+        deps,
+        coalescer,
+        shutdown,
+    ));
     Handle {
         config: rx,
         notifier,
@@ -93,6 +112,7 @@ async fn supervise(
     rx: watch::Receiver<Arc<Config>>,
     config_path: PathBuf,
     deps: Deps,
+    coalescer: JoinHandle<()>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut running: HashMap<String, Running> = HashMap::new();
@@ -154,13 +174,14 @@ async fn supervise(
     }
 
     // On shutdown the monitor and peer-watch tasks observe the same signal and
-    // break; await them.
+    // break; await them, then the coalescer (which drains its queue).
     for (_, run) in running.drain() {
         let _ = run.task.await;
     }
     for (_, run) in running_peers.drain() {
         let _ = run.task.await;
     }
+    let _ = coalescer.await;
 }
 
 /// How long to wait after the first file event before reloading, so a burst of
@@ -202,10 +223,13 @@ fn reconcile(
             let task = scheduler::spawn_monitor(
                 monitor.clone(),
                 rx.clone(),
-                deps.pool.clone(),
-                client,
-                Arc::clone(&deps.notifier),
-                Arc::clone(&deps.last_tick),
+                scheduler::MonitorDeps {
+                    pool: deps.pool.clone(),
+                    client,
+                    notifier: Arc::clone(&deps.notifier),
+                    alerts: deps.alerts.clone(),
+                    last_tick: Arc::clone(&deps.last_tick),
+                },
                 shutdown.clone(),
             );
             running.insert(
