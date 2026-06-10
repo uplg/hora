@@ -17,6 +17,8 @@ on:
       - "**/Cargo.lock"
   schedule:
     - cron: "0 6 * * *"
+  # Manual runs, e.g. to re-scan after ignoring an advisory.
+  workflow_dispatch:
 
 permissions:
   contents: read
