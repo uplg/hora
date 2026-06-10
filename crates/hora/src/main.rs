@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if run_subcommand()? {
+    if run_subcommand().await? {
         return Ok(());
     }
 
@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
 /// Handle a CLI subcommand. `Ok(true)` means one ran and the process should
 /// exit; plain `hora` (no arguments) returns `Ok(false)` and starts the
 /// monitor.
-fn run_subcommand() -> anyhow::Result<bool> {
+async fn run_subcommand() -> anyhow::Result<bool> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         match args[1].as_str() {
@@ -53,6 +53,12 @@ fn run_subcommand() -> anyhow::Result<bool> {
                     }
                 }
             }
+            "test-alert" => {
+                // Tracing first: delivery failures surface as per-channel
+                // warnings from the notifiers, and that is the whole point.
+                init_tracing();
+                test_alert(args.get(2).map(String::as_str)).await?;
+            }
             "--version" | "-V" => println!("hora {}", env!("CARGO_PKG_VERSION")),
             "--help" | "-h" => {
                 println!("Hora - a tiny self-hosted uptime monitor");
@@ -64,6 +70,12 @@ fn run_subcommand() -> anyhow::Result<bool> {
                     "  import kuma <file>  Convert an Uptime Kuma backup JSON to Hora TOML (stdout)"
                 );
                 println!("  check               Validate the configuration and exit");
+                println!(
+                    "  test-alert [id]     Send a test down + recovered through the configured"
+                );
+                println!(
+                    "                      channels (all of them, or the routed ones of monitor [id])"
+                );
                 println!("  --version, -V       Show the version");
                 println!("  --help, -h          Show this help message");
             }
@@ -76,6 +88,65 @@ fn run_subcommand() -> anyhow::Result<bool> {
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Send a test `Down` then `Recovered` through the real notification chain, so
+/// an operator verifies delivery *before* the first real incident instead of
+/// during it. Without an id every configured channel is exercised; with one,
+/// the monitor's `notify` routing applies - testing exactly what would fire.
+/// Failures surface as the notifiers' own per-channel warnings.
+async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
+    let config_path = config::path();
+    let config = config::load_from(&config_path).context("loading configuration")?;
+
+    let (name, notify) = match monitor_id {
+        None => ("Hora test".to_owned(), None),
+        Some(id) => {
+            let Some(monitor) = config.monitors.iter().find(|monitor| monitor.id == id) else {
+                eprintln!("Unknown monitor {id:?}. Configured ids:");
+                for monitor in &config.monitors {
+                    eprintln!("  {}", monitor.id);
+                }
+                std::process::exit(1);
+            };
+            (monitor.name.clone(), monitor.notify.clone())
+        }
+    };
+
+    let client = hora_core::http::client(None).context("building HTTP client")?;
+    let dispatcher = hora_core::notifications::build(&config, &client);
+    let targeted: Vec<&str> = dispatcher
+        .names()
+        .filter(|channel| {
+            notify
+                .as_ref()
+                .is_none_or(|only| only.iter().any(|name| name == channel))
+        })
+        .collect();
+    if targeted.is_empty() {
+        eprintln!("No notification channel to test (none configured, or none routed).");
+        std::process::exit(1);
+    }
+
+    println!(
+        "Sending a test alert (down + recovered) as {name:?} to: {}",
+        targeted.join(", ")
+    );
+    let event = hora_core::notifications::Event::Down {
+        monitor: &name,
+        error: Some("test alert sent by `hora test-alert` - not a real incident"),
+        cause: None,
+        impacted: &[],
+    };
+    dispatcher.dispatch(event, notify.as_deref()).await;
+    dispatcher
+        .dispatch(
+            hora_core::notifications::Event::Recovered { monitor: &name },
+            notify.as_deref(),
+        )
+        .await;
+    println!("Done. A channel that stayed silent has a warning above.");
+    Ok(())
 }
 
 /// Run the monitor: load config, open the database, start the supervisor and

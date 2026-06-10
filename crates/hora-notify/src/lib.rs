@@ -121,6 +121,11 @@ impl Dispatcher {
         self.channels.len()
     }
 
+    /// The routing names of the registered channels, in configuration order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.channels.iter().map(|channel| channel.name.as_str())
+    }
+
     /// Deliver `event` to the matching channels concurrently: all of them when
     /// `only` is `None`, otherwise just those whose name appears in the list. A
     /// slow channel never holds up the others (or the monitor loop behind them).

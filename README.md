@@ -145,9 +145,17 @@ and on the container: `-e HORA_TELEGRAM_TOKEN=123:abc`. Only `HORA_BIND`,
 ```sh
 hora                                   # run the monitor
 hora check                             # validate the config; non-zero exit on error (CI-friendly)
+hora test-alert                        # send a test down + recovered through every channel
+hora test-alert website                # ... through the channels routed for monitor "website"
 hora import kuma backup.json > out.toml  # convert an Uptime Kuma backup to Hora monitors
 hora --version
 ```
+
+`hora test-alert` verifies your notification chain *before* the first real
+incident: it sends a clearly-labelled test alert (and its recovery) through the
+real dispatch path - with a monitor id, exactly the channels its `notify`
+routing would fire - and any channel that fails logs a warning saying why
+("chat not found", HTTP 403, ...).
 
 `hora import kuma` maps http/keyword, port, ping, dns and push monitors;
 anything else is emitted as a commented stub to review by hand.

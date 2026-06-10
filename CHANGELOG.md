@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   combined with `proxy`, and the probing host itself needs working IPv4 and
   IPv6. HTTP probes are steered per family by binding the client's local end
   to the family's unspecified address.
+- **`hora test-alert [monitor-id]`**: send a clearly-labelled test alert (down
+  then recovered) through the real notification chain, so delivery is verified
+  before the first real incident instead of during it. Without an id every
+  configured channel is exercised; with one, the monitor's `notify` routing
+  applies - testing exactly what would fire. A failing channel logs a warning
+  with the rejection detail; an unknown id lists the configured ones.
 
 ## [0.4.1] - 2026-06-10
 
