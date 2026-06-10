@@ -5,6 +5,61 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-10
+
+Security hardening release. See [UPGRADES.md](UPGRADES.md) for the six
+behavioural changes.
+
+### Security
+
+- **Empty access tokens fail startup**: `server.auth_token`, `push_token`,
+  `listen_token` and `ping_token` set to `""` - typically a `${VAR}`
+  interpolating an unset variable - were silently treated as "no token",
+  and an empty token would have authorized a blank `?token=`. Short-but-set
+  tokens (under 16 chars) now warn.
+- **Probe headers stop at the origin**: per-monitor `headers` (which often
+  carry credentials, e.g. an API key) are re-attached across redirects only
+  while the hop stays on the monitor's scheme/host/port - reqwest strips its
+  own well-known sensitive headers across hosts, but not arbitrary custom
+  ones. Probes follow at most 10 redirects, with the monitor's timeout
+  covering the whole chain.
+- **Anonymous viewers get categorized failure reasons**: the status page,
+  `/api/summary`, `/history` and the Atom feed collapse a public monitor's
+  stored failure detail (which can carry response-body snippets, DNS answers
+  or asserted keywords) to a safe category ("HTTP 500", "content check
+  failed"). The full reason still shows with the viewer token; a monitor can
+  opt back in with `public_error_detail = true`. Topology annotations
+  ("caused by", "impacts") never name a private monitor publicly.
+- **`${VAR}` expands after parsing, in string values only**: a `${VAR}`
+  inside a comment is no longer looked up, and a TOML syntax error can no
+  longer echo an already-expanded secret back in its message.
+- **`cert_pin` is validated and canonicalized**: it must be 64 hex chars
+  (SHA-256 of the leaf public key) and is lowercased at load, so a malformed
+  or mixed-case pin can't silently disable pinning.
+- **Tokenless push targets warn at startup**: a push monitor without
+  `push_token` (or a watched peer without `listen_token`) accepts heartbeats
+  on the id alone, and ids are not secrets - the page, API and `/healthz`
+  expose them - so anyone who can reach `/api/push` could forge heartbeats.
+- **Rate limiting keys on the TCP peer** unless `server.client_ip_header`
+  names the trusted proxy header - a direct client could mint fresh buckets
+  by rotating `X-Forwarded-For`.
+- Defence in depth: the database file is created with `0600` permissions,
+  access logs record only the request path (query strings carried tokens),
+  notifier log redaction strips every channel secret including its
+  percent-encoded forms, witness `/healthz` bodies are capped at 64 KB, and
+  a daily RustSec advisory scan (`audit.yml`) backs the `cargo-deny` gate.
+
+### Changed
+
+- The push examples and the dead-man heartbeat send the token in the
+  `X-Push-Token` header instead of `?token=`, keeping it out of access logs
+  (the query form still works).
+- `/api/monitors/{id}/latency` aggregates in SQL (epoch-anchored buckets),
+  so a wide window on a high-frequency monitor stays bounded and an
+  auto-refreshing chart doesn't jitter.
+- The `/history` page uses the same width as the status page (1500px,
+  92vw beyond 1700px) instead of a narrow 900px column.
+
 ## [0.4.0] - 2026-06-09
 
 ### Added
@@ -334,7 +389,10 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/uplg/hora/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/uplg/hora/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/uplg/hora/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/uplg/hora/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/uplg/hora/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/uplg/hora/compare/v0.2.1...v0.2.2

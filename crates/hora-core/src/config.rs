@@ -1016,36 +1016,7 @@ fn validate_token(label: &str, token: Option<&Secret>) -> anyhow::Result<()> {
 
 fn validate(config: &Config) -> anyhow::Result<()> {
     validate_token("server.auth_token", config.server.auth_token.as_ref())?;
-    let mut channel_names = HashSet::new();
-    for channel in &config.channels {
-        anyhow::ensure!(!channel.name().is_empty(), "channel name must not be empty");
-        anyhow::ensure!(
-            channel_names.insert(channel.name()),
-            "duplicate channel name: {}",
-            channel.name()
-        );
-        // These channels send credentials over the configured URL (in the URL
-        // itself, or - for Matrix - in a header); warn on cleartext http.
-        let url = match channel {
-            Channel::Discord { webhook_url, .. } | Channel::Slack { webhook_url, .. } => {
-                Some(webhook_url.as_ref())
-            }
-            Channel::Webhook { url, .. }
-            | Channel::Ntfy { url, .. }
-            | Channel::Gotify { url, .. } => Some(url.as_ref()),
-            Channel::Matrix { homeserver, .. } => Some(homeserver.as_str()),
-            Channel::Telegram { .. }
-            | Channel::FreeMobile { .. }
-            | Channel::Email { .. }
-            | Channel::Pushover { .. } => None,
-        };
-        if url.is_some_and(|url| url.starts_with("http://")) {
-            tracing::warn!(
-                "channel {}: URL uses http:// - credentials are sent in cleartext, use https",
-                channel.name()
-            );
-        }
-    }
+    let channel_names = validate_channels(config)?;
 
     for window in &config.maintenance {
         anyhow::ensure!(
@@ -1108,6 +1079,17 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             &format!("monitor {}: push_token", monitor.id),
             monitor.push_token.as_ref(),
         )?;
+        // Without a token the id alone authorizes /api/push/{id}, and ids are
+        // not secrets (a public monitor's id is served on the page and API):
+        // anyone could forge heartbeats to mask an outage. Warn, don't fail -
+        // a bare id may be acceptable on a private network.
+        if monitor.kind == Kind::Push && monitor.push_token.is_none() {
+            tracing::warn!(
+                "monitor {}: push monitor has no push_token - its id appears on the \
+                 status page/API, so anyone who can reach /api/push can forge heartbeats",
+                monitor.id
+            );
+        }
         validate_monitor_io(monitor)?;
         if let Some(routes) = &monitor.notify {
             for route in routes {
@@ -1124,6 +1106,42 @@ fn validate(config: &Config) -> anyhow::Result<()> {
 
     validate_peers(config, &seen, &channel_names)?;
     Ok(())
+}
+
+/// Validate the notification channels (unique non-empty names, cleartext-URL
+/// warnings) and return the set of valid channel names for route checks.
+fn validate_channels(config: &Config) -> anyhow::Result<HashSet<&str>> {
+    let mut channel_names = HashSet::new();
+    for channel in &config.channels {
+        anyhow::ensure!(!channel.name().is_empty(), "channel name must not be empty");
+        anyhow::ensure!(
+            channel_names.insert(channel.name()),
+            "duplicate channel name: {}",
+            channel.name()
+        );
+        // These channels send credentials over the configured URL (in the URL
+        // itself, or - for Matrix - in a header); warn on cleartext http.
+        let url = match channel {
+            Channel::Discord { webhook_url, .. } | Channel::Slack { webhook_url, .. } => {
+                Some(webhook_url.as_ref())
+            }
+            Channel::Webhook { url, .. }
+            | Channel::Ntfy { url, .. }
+            | Channel::Gotify { url, .. } => Some(url.as_ref()),
+            Channel::Matrix { homeserver, .. } => Some(homeserver.as_str()),
+            Channel::Telegram { .. }
+            | Channel::FreeMobile { .. }
+            | Channel::Email { .. }
+            | Channel::Pushover { .. } => None,
+        };
+        if url.is_some_and(|url| url.starts_with("http://")) {
+            tracing::warn!(
+                "channel {}: URL uses http:// - credentials are sent in cleartext, use https",
+                channel.name()
+            );
+        }
+    }
+    Ok(channel_names)
 }
 
 /// Validate the `[health]` section and the `[[peers]]` mesh: peers require a
@@ -1168,6 +1186,16 @@ fn validate_peers(
         )?;
         if let Some(every) = peer.expect_every_secs {
             anyhow::ensure!(every > 0, "peer {}: expect_every_secs must be > 0", peer.id);
+            // Same reasoning as the push-monitor warning: peer ids are exposed
+            // on the unauthenticated /healthz (witnesses need them), so an
+            // unprotected listen id lets anyone forge the peer's heartbeats.
+            if peer.listen_token.is_none() {
+                tracing::warn!(
+                    "peer {}: watched without a listen_token - its id appears in /healthz, \
+                     so anyone who can reach /api/push can forge its heartbeats",
+                    peer.id
+                );
+            }
             // The id appears in `/api/push/{id}`, so keep it URL-safe.
             let listen_id = peer.listen_id();
             anyhow::ensure!(

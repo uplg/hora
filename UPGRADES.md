@@ -4,7 +4,7 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
-## 0.4 → next (unreleased)
+## 0.4.0 → 0.4.1
 
 Security hardening, six behavioural changes:
 
@@ -43,8 +43,10 @@ Also: the database file is created with `0600` permissions (existing files
 keep their mode — `chmod 600` once if you care), access logs record only the
 request path (query strings carried push/viewer tokens), notifier log
 redaction strips every channel secret including its percent-encoded forms,
-and probes follow at most 10 redirects with the monitor's timeout covering
-the whole chain.
+probes follow at most 10 redirects with the monitor's timeout covering
+the whole chain, and Hora warns at startup when a push monitor or watched
+peer has no token — the id alone authorizes `/api/push/{id}`, and ids are
+discoverable on the page, the API and `/healthz`.
 
 ## 0.3 → 0.4
 

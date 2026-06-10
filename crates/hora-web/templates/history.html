@@ -42,9 +42,16 @@
 
     .wrap {
       width: 100%;
-      max-width: 900px;
+      max-width: 1500px;
       margin: 0 auto;
       padding: 40px 20px 56px;
+    }
+
+    /* On large displays, use the width instead of stranding the list in the middle. */
+    @media (min-width: 1700px) {
+      .wrap {
+        max-width: 92vw;
+      }
     }
 
     .top {
