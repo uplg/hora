@@ -13,7 +13,7 @@ use reqwest::redirect::Policy;
 ///
 /// Returns an error if the proxy URL is invalid or the client cannot be built.
 pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
-    build(proxy, Policy::default())
+    build(proxy, Policy::default(), None)
 }
 
 /// Like [`client`], but never auto-follows redirects: probes follow them
@@ -26,13 +26,31 @@ pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
 ///
 /// Returns an error if the proxy URL is invalid or the client cannot be built.
 pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
-    build(proxy, Policy::none())
+    build(proxy, Policy::none(), None)
 }
 
-fn build(proxy: Option<&str>, redirect: Policy) -> reqwest::Result<Client> {
+/// Like [`probe_client`], but restricted to one address family by binding the
+/// local end to `local` (the family's unspecified address): the connector then
+/// only attempts resolved addresses of that family. Used by dual-stack probes;
+/// never proxied - config validation rejects the combination, since through a
+/// proxy only the proxy hop's family would be tested.
+///
+/// # Errors
+///
+/// Returns an error if the client cannot be built.
+pub fn probe_client_family(local: std::net::IpAddr) -> reqwest::Result<Client> {
+    build(None, Policy::none(), Some(local))
+}
+
+fn build(
+    proxy: Option<&str>,
+    redirect: Policy,
+    local: Option<std::net::IpAddr>,
+) -> reqwest::Result<Client> {
     let mut builder = Client::builder()
         .user_agent(concat!("hora/", env!("CARGO_PKG_VERSION")))
         .redirect(redirect)
+        .local_address(local)
         // Backstop for requests without a per-request timeout (notifiers); probes
         // override this with the monitor's own timeout.
         .timeout(Duration::from_secs(15))

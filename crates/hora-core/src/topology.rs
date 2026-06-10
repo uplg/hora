@@ -171,6 +171,7 @@ mod tests {
             json_expected: None,
             max_body_kb: None,
             probe_retries: None,
+            dual_stack: None,
             notify: None,
             proxy: None,
             push_token: None,

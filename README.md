@@ -36,6 +36,12 @@ Named after the **Horai**, the Greek goddesses of the hours.
   annotated with root cause vs. symptom: _"caused by X"_ when an upstream it depends on
   is also down, or _"impacts: A, B, C"_ (the blast radius) when its upstreams are all
   healthy and it is the root cause. The dependency graph is validated acyclic at load.
+- **Dual-stack verification** - `dual_stack = true` probes IPv4 *and* IPv6
+  separately and requires both: the classic silent failure is a service whose
+  IPv6 has been dead for weeks behind a healthy IPv4 (or the reverse), invisible
+  to every single-connection check. One broken family alerts with the culprit
+  named - _"IPv6 failing: connection timed out (IPv4 ok)"_. Works for HTTP, TCP
+  and ICMP monitors with a hostname target.
 - **Root-cause alert grouping** - when a database takes ten services down with it,
   you get **one notification** (the root cause, with its blast radius), not eleven:
   dependent monitors confirmed down within the grouping window fold into their

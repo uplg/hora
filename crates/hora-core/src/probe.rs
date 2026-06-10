@@ -83,6 +83,9 @@ pub async fn run(client: &Client, monitor: &Monitor) -> Outcome {
 }
 
 async fn probe_once(client: &Client, monitor: &Monitor) -> Outcome {
+    if monitor.dual_stack() {
+        return dual_stack(monitor).await;
+    }
     match monitor.kind {
         Kind::Http => http(client, monitor).await,
         Kind::Tcp => tcp(monitor).await,
@@ -91,6 +94,123 @@ async fn probe_once(client: &Client, monitor: &Monitor) -> Outcome {
         // Push monitors are evaluated from stored heartbeats by the scheduler,
         // never actively probed; this arm is unreachable in practice.
         Kind::Push => Outcome::down("push monitor has no active probe".to_owned()),
+    }
+}
+
+/// One IP address family of a dual-stack probe.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Family {
+    V4,
+    V6,
+}
+
+impl Family {
+    fn label(self) -> &'static str {
+        match self {
+            Self::V4 => "IPv4",
+            Self::V6 => "IPv6",
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::V4 => Self::V6,
+            Self::V6 => Self::V4,
+        }
+    }
+
+    fn matches(self, ip: IpAddr) -> bool {
+        match self {
+            Self::V4 => ip.is_ipv4(),
+            Self::V6 => ip.is_ipv6(),
+        }
+    }
+
+    /// The family's unspecified address; binding a client's local end to it
+    /// restricts its connections to this family.
+    fn unspecified(self) -> IpAddr {
+        match self {
+            Self::V4 => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            Self::V6 => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        }
+    }
+}
+
+/// Probe both address families concurrently and merge the outcomes: a service
+/// whose IPv6 (or IPv4) is silently dead behind a healthy sibling goes down
+/// with the broken family named in the reason.
+async fn dual_stack(monitor: &Monitor) -> Outcome {
+    let (v4, v6) = tokio::join!(
+        probe_family(monitor, Family::V4),
+        probe_family(monitor, Family::V6)
+    );
+    combine(&v4, &v6)
+}
+
+async fn probe_family(monitor: &Monitor, family: Family) -> Outcome {
+    match monitor.kind {
+        // The per-monitor client cannot be steered per family, so each probe
+        // builds its own family-bound one; negligible at probing cadence.
+        Kind::Http => match crate::http::probe_client_family(family.unspecified()) {
+            Ok(client) => http(&client, monitor).await,
+            Err(err) => Outcome::down(format!("could not build probe client: {err}")),
+        },
+        Kind::Tcp => tcp_family(monitor, family).await,
+        Kind::Icmp => icmp_family(monitor, Some(family)).await,
+        // Config validation restricts dual_stack to the three kinds above.
+        Kind::Dns | Kind::Push => {
+            Outcome::down("dual_stack unsupported for this monitor kind".to_owned())
+        }
+    }
+}
+
+/// Merge the two per-family outcomes of a dual-stack probe. Both up → up, with
+/// the *worst* latency (so `degraded_over_ms` judges the slower path). One
+/// family down → down: the dual-stack contract is broken even though some
+/// clients still reach the service; the reason names the failing family and
+/// the latency reflects the surviving path. Both down → down with both reasons.
+fn combine(v4: &Outcome, v6: &Outcome) -> Outcome {
+    match (v4.up, v6.up) {
+        (true, true) => Outcome {
+            up: true,
+            degraded: v4.degraded || v6.degraded,
+            latency_ms: match (v4.latency_ms, v6.latency_ms) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+            status_code: v4.status_code.or(v6.status_code),
+            error: None,
+        },
+        (false, true) => one_family_down(Family::V4, v4, v6),
+        (true, false) => one_family_down(Family::V6, v6, v4),
+        (false, false) => Outcome {
+            up: false,
+            degraded: false,
+            latency_ms: None,
+            status_code: v4.status_code.or(v6.status_code),
+            error: Some(format!(
+                "IPv4 and IPv6 failing: {}; {}",
+                v4.error.as_deref().unwrap_or("unknown error"),
+                v6.error.as_deref().unwrap_or("unknown error")
+            )),
+        },
+    }
+}
+
+/// The down outcome for a single broken family: the failure's detail and
+/// status code, the healthy family's latency.
+fn one_family_down(failed: Family, failure: &Outcome, healthy: &Outcome) -> Outcome {
+    Outcome {
+        up: false,
+        degraded: false,
+        latency_ms: healthy.latency_ms,
+        status_code: failure.status_code,
+        error: Some(format!(
+            "{} failing: {} ({} ok)",
+            failed.label(),
+            failure.error.as_deref().unwrap_or("unknown error"),
+            failed.other().label()
+        )),
     }
 }
 
@@ -277,8 +397,24 @@ fn json_value_eq(value: &serde_json::Value, expected: &str) -> bool {
 }
 
 async fn tcp(monitor: &Monitor) -> Outcome {
+    tcp_connect(monitor, monitor.target.as_str()).await
+}
+
+/// TCP for one address family: resolve the `host:port` target ourselves and
+/// connect to the first address of that family.
+async fn tcp_family(monitor: &Monitor, family: Family) -> Outcome {
+    let Ok(addrs) = tokio::net::lookup_host(&monitor.target).await else {
+        return Outcome::down("could not resolve host".to_owned());
+    };
+    match addrs.into_iter().find(|addr| family.matches(addr.ip())) {
+        Some(addr) => tcp_connect(monitor, addr).await,
+        None => Outcome::down(format!("no {} address for host", family.label())),
+    }
+}
+
+async fn tcp_connect<A: tokio::net::ToSocketAddrs>(monitor: &Monitor, addr: A) -> Outcome {
     let start = Instant::now();
-    match tokio::time::timeout(monitor.timeout(), TcpStream::connect(&monitor.target)).await {
+    match tokio::time::timeout(monitor.timeout(), TcpStream::connect(addr)).await {
         Ok(Ok(_stream)) => {
             let latency = millis(start.elapsed());
             Outcome {
@@ -299,8 +435,16 @@ async fn tcp(monitor: &Monitor) -> Outcome {
 /// datagram identifier collisions between concurrent monitors. The address family
 /// (IPv4/IPv6) follows the resolved address.
 async fn icmp(monitor: &Monitor) -> Outcome {
-    let Some(addr) = resolve(&monitor.target).await else {
-        return Outcome::down("could not resolve host".to_owned());
+    icmp_family(monitor, None).await
+}
+
+/// ICMP to the first resolved address - of one specific family when given.
+async fn icmp_family(monitor: &Monitor, family: Option<Family>) -> Outcome {
+    let Some(addr) = resolve(&monitor.target, family).await else {
+        return Outcome::down(match family {
+            Some(family) => format!("no {} address for host", family.label()),
+            None => "could not resolve host".to_owned(),
+        });
     };
 
     let kind = if addr.is_ipv4() { ICMP::V4 } else { ICMP::V6 };
@@ -339,16 +483,18 @@ async fn icmp(monitor: &Monitor) -> Outcome {
 
 /// Resolve an ICMP target to a single IP: an IP literal is used directly,
 /// otherwise DNS is consulted and the first address is taken (so an IPv4-only or
-/// IPv6-only host resolves to the family it actually has).
-async fn resolve(target: &str) -> Option<IpAddr> {
+/// IPv6-only host resolves to the family it actually has). With a `family`, only
+/// addresses of that family qualify.
+async fn resolve(target: &str, family: Option<Family>) -> Option<IpAddr> {
+    let wanted = |ip: IpAddr| family.is_none_or(|family| family.matches(ip));
     if let Ok(ip) = target.parse::<IpAddr>() {
-        return Some(ip);
+        return wanted(ip).then_some(ip);
     }
     tokio::net::lookup_host((target, 0u16))
         .await
         .ok()?
-        .next()
         .map(|addr| addr.ip())
+        .find(|ip| wanted(*ip))
 }
 
 /// DNS resolution: resolve a name and, when `dns_expected` is set, pin the
@@ -573,6 +719,17 @@ pub fn public_reason(reason: &str) -> &str {
     if reason.starts_with("icmp") {
         return "ping failed";
     }
+    // Dual-stack failures embed the failing family's detail (which may be a raw
+    // socket error); keep only which family broke. Checked longest-prefix first.
+    if reason.starts_with("IPv4 and IPv6 failing") {
+        return "IPv4 and IPv6 failing";
+    }
+    if reason.starts_with("IPv4 failing") {
+        return "IPv4 failing (IPv6 ok)";
+    }
+    if reason.starts_with("IPv6 failing") {
+        return "IPv6 failing (IPv4 ok)";
+    }
     "check failed"
 }
 
@@ -707,6 +864,7 @@ mod tests {
             depends_on: None,
             public: true,
             public_error_detail: false,
+            dual_stack: None,
             dns_record: None,
             dns_expected: None,
             dns_resolver: None,
@@ -769,12 +927,100 @@ mod tests {
     async fn resolve_parses_ip_literals() {
         // IP literals short-circuit before any DNS lookup (no network in tests).
         assert_eq!(
-            resolve("127.0.0.1").await,
+            resolve("127.0.0.1", None).await,
             Some("127.0.0.1".parse().unwrap())
         );
         assert_eq!(
-            resolve("2606:4700:4700::1111").await,
+            resolve("2606:4700:4700::1111", None).await,
             Some("2606:4700:4700::1111".parse().unwrap())
+        );
+        // A family filter rejects a literal of the other family.
+        assert_eq!(
+            resolve("127.0.0.1", Some(Family::V4)).await,
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert_eq!(resolve("127.0.0.1", Some(Family::V6)).await, None);
+    }
+
+    fn outcome(up: bool, latency_ms: Option<i64>, error: Option<&str>) -> Outcome {
+        Outcome {
+            up,
+            degraded: false,
+            latency_ms,
+            status_code: None,
+            error: error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn combine_requires_both_families() {
+        // Both up: up, with the worst latency.
+        let both = combine(
+            &outcome(true, Some(20), None),
+            &outcome(true, Some(35), None),
+        );
+        assert!(both.up);
+        assert_eq!(both.latency_ms, Some(35));
+        assert_eq!(both.error, None);
+
+        // One family broken: down, the reason names it, the latency is the
+        // surviving path's.
+        let v6_dead = combine(
+            &outcome(true, Some(20), None),
+            &outcome(false, None, Some("connection timed out")),
+        );
+        assert!(!v6_dead.up);
+        assert_eq!(v6_dead.latency_ms, Some(20));
+        assert_eq!(
+            v6_dead.error.as_deref(),
+            Some("IPv6 failing: connection timed out (IPv4 ok)")
+        );
+
+        let v4_dead = combine(
+            &outcome(false, None, Some("connection refused")),
+            &outcome(true, Some(12), None),
+        );
+        assert!(!v4_dead.up);
+        assert_eq!(
+            v4_dead.error.as_deref(),
+            Some("IPv4 failing: connection refused (IPv6 ok)")
+        );
+
+        // Both down: both reasons, no latency.
+        let dark = combine(
+            &outcome(false, None, Some("timeout")),
+            &outcome(false, None, Some("refused")),
+        );
+        assert!(!dark.up);
+        assert_eq!(dark.latency_ms, None);
+        assert_eq!(
+            dark.error.as_deref(),
+            Some("IPv4 and IPv6 failing: timeout; refused")
+        );
+    }
+
+    #[test]
+    fn combine_keeps_either_degraded() {
+        let mut slow_v6 = outcome(true, Some(900), None);
+        slow_v6.degraded = true;
+        let both = combine(&outcome(true, Some(20), None), &slow_v6);
+        assert!(both.up);
+        assert!(both.degraded);
+    }
+
+    #[test]
+    fn public_reason_collapses_dual_stack_detail() {
+        assert_eq!(
+            public_reason("IPv6 failing: Connection refused (os error 61) (IPv4 ok)"),
+            "IPv6 failing (IPv4 ok)"
+        );
+        assert_eq!(
+            public_reason("IPv4 failing: no IPv4 address for host (IPv6 ok)"),
+            "IPv4 failing (IPv6 ok)"
+        );
+        assert_eq!(
+            public_reason("IPv4 and IPv6 failing: timeout; refused"),
+            "IPv4 and IPv6 failing"
         );
     }
 }

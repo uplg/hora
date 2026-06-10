@@ -194,6 +194,11 @@ depends_on = ["api"]
 # public_error_detail = true  # optional; publish the raw failure reason (default:
 #                             # anonymous viewers see a safe category only)
 # cert_pin = "abc123..."  # optional; SHA-256 of leaf public key (detects cert changes)
+# dual_stack = true       # optional; probe IPv4 AND IPv6 and require both - catches
+#                         # the service whose IPv6 has been dead for weeks behind a
+#                         # healthy IPv4 ("IPv6 failing: connection timed out (IPv4
+#                         # ok)"). http/tcp/icmp with a hostname target; no proxy.
+#                         # The probing host itself needs working IPv4 and IPv6.
 
 [[monitors]]
 id = "api"

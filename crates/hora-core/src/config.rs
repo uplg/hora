@@ -620,6 +620,14 @@ pub struct Monitor {
     /// record every raw probe result. Not applicable to push monitors.
     #[serde(default)]
     pub probe_retries: Option<u32>,
+    /// Probe both address families and require both to pass - the classic
+    /// silent failure is a service whose IPv6 has been dead for weeks behind a
+    /// healthy IPv4. One broken family marks the monitor down, naming it in
+    /// the reason ("IPv6 failing: connection timed out (IPv4 ok)"). For http,
+    /// tcp and icmp monitors with a hostname target; not combinable with
+    /// `proxy`. The probing host itself needs working IPv4 *and* IPv6.
+    #[serde(default)]
+    pub dual_stack: Option<bool>,
     /// Restrict this monitor's alerts to these channel names (e.g. `["ops"]`).
     /// Unset = every configured channel.
     #[serde(default)]
@@ -714,6 +722,7 @@ impl std::fmt::Debug for Monitor {
             .field("json_expected", &self.json_expected)
             .field("max_body_kb", &self.max_body_kb)
             .field("probe_retries", &self.probe_retries)
+            .field("dual_stack", &self.dual_stack)
             .field("notify", &self.notify)
             .field("proxy", &self.proxy.as_deref().map(redact_url_credentials))
             .field("push_token", &self.push_token)
@@ -760,6 +769,12 @@ impl Monitor {
     #[must_use]
     pub fn interval(&self) -> Duration {
         Duration::from_secs(self.interval_secs)
+    }
+
+    /// Whether this monitor probes both address families (default off).
+    #[must_use]
+    pub fn dual_stack(&self) -> bool {
+        self.dual_stack.unwrap_or(false)
     }
 
     /// Whether this monitor should have its TLS certificate expiry checked.
@@ -1344,7 +1359,46 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
             monitor.id
         );
     }
+    if monitor.dual_stack() {
+        validate_dual_stack(monitor)?;
+    }
     validate_schedule_and_slo(monitor)?;
+    Ok(())
+}
+
+/// `dual_stack` needs a probe that can be steered per address family: an
+/// active kind, no proxy in the way, and a hostname target (an IP literal has
+/// a single family by construction). Runs after the per-kind target checks,
+/// so the target is already known to be well-shaped.
+fn validate_dual_stack(monitor: &Monitor) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(monitor.kind, Kind::Http | Kind::Tcp | Kind::Icmp),
+        "monitor {}: dual_stack requires an http, tcp or icmp monitor",
+        monitor.id
+    );
+    anyhow::ensure!(
+        monitor.proxy.is_none(),
+        "monitor {}: dual_stack cannot go through a proxy (only the proxy hop's family would be tested)",
+        monitor.id
+    );
+    let host = match monitor.kind {
+        Kind::Http => reqwest::Url::parse(&monitor.target)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned)),
+        Kind::Tcp => monitor
+            .target
+            .rsplit_once(':')
+            .map(|(host, _port)| host.to_owned()),
+        _ => Some(monitor.target.clone()),
+    };
+    // URL and tcp hosts may carry an IPv6 literal in brackets.
+    let host = host.unwrap_or_default();
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    anyhow::ensure!(
+        bare.parse::<std::net::IpAddr>().is_err(),
+        "monitor {}: dual_stack requires a hostname target (an IP literal has a single address family)",
+        monitor.id
+    );
     Ok(())
 }
 
@@ -1706,6 +1760,59 @@ mod tests {
         );
         let error = validate(&config).unwrap_err().to_string();
         assert!(error.contains("require an http monitor"), "got: {error}");
+    }
+
+    #[test]
+    fn dual_stack_validation() {
+        let base = |body: &str| {
+            format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "x"
+                name = "X"
+                interval_secs = 60
+                dual_stack = true
+                {body}
+            "#
+            )
+        };
+
+        // Hostname targets pass for the three active kinds.
+        for body in [
+            "target = \"https://example.com\"",
+            "kind = \"tcp\"\ntarget = \"db.example.com:5432\"",
+            "kind = \"icmp\"\ntarget = \"gw.example.com\"",
+        ] {
+            validate(&parse(&base(body))).expect("hostname target valid");
+        }
+
+        // An IP literal has a single family - rejected, brackets included.
+        for body in [
+            "target = \"https://192.0.2.1/health\"",
+            "target = \"https://[2001:db8::1]/health\"",
+            "kind = \"tcp\"\ntarget = \"192.0.2.1:5432\"",
+            "kind = \"icmp\"\ntarget = \"2001:db8::1\"",
+        ] {
+            let error = validate(&parse(&base(body))).unwrap_err().to_string();
+            assert!(error.contains("requires a hostname"), "got: {error}");
+        }
+
+        // Wrong kind, and proxy combination.
+        let error = validate(&parse(&base("kind = \"dns\"\ntarget = \"example.com\"")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires an http, tcp or icmp monitor"),
+            "got: {error}"
+        );
+        let error = validate(&parse(&base(
+            "target = \"https://example.com\"\nproxy = \"http://127.0.0.1:8080\"",
+        )))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot go through a proxy"), "got: {error}");
     }
 
     #[test]

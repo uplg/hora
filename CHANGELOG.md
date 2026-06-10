@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Dual-stack verification** (`dual_stack = true`): http, tcp and icmp
+  monitors can probe IPv4 and IPv6 separately (concurrently) and require both
+  families to pass - catching the service whose IPv6 has been silently dead
+  behind a healthy IPv4, or the reverse. One broken family confirms down with
+  the culprit named ("IPv6 failing: connection timed out (IPv4 ok)") and the
+  surviving family's latency recorded; when both families answer, the recorded
+  latency is the slower path's, so `degraded_over_ms` judges the worst case.
+  Anonymous viewers see the collapsed category ("IPv6 failing (IPv4 ok)").
+  Requires a hostname target (an IP literal has a single family), cannot be
+  combined with `proxy`, and the probing host itself needs working IPv4 and
+  IPv6. HTTP probes are steered per family by binding the client's local end
+  to the family's unspecified address.
+
 ## [0.4.1] - 2026-06-10
 
 Security hardening release. See [UPGRADES.md](UPGRADES.md) for the six
