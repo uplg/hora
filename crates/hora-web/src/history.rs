@@ -65,6 +65,10 @@ pub(crate) fn render_atom(
     monitor_names: &HashMap<String, String>,
     base_url: &str,
 ) -> String {
+    // `base_url` is built from the client-supplied Host header, so escape it
+    // before it lands in XML attributes/elements - an unescaped `"` or `<` would
+    // otherwise break out of an `href` or inject feed elements.
+    let base_url = xml_escape(base_url);
     let mut out = String::with_capacity(4096);
     let _ = writeln!(out, "<?xml version=\"1.0\" encoding=\"utf-8\"?>");
     let _ = writeln!(out, "<feed xmlns=\"http://www.w3.org/2005/Atom\">");
@@ -179,6 +183,15 @@ mod tests {
         assert_eq!(format_duration(42), "42s");
         assert_eq!(format_duration(90), "1m 30s");
         assert_eq!(format_duration(3720), "1h 2m");
+    }
+
+    #[test]
+    fn atom_escapes_host_derived_base_url() {
+        // base_url comes from the client's Host header; a crafted one must not
+        // break out of the href attribute or inject feed elements.
+        let xml = render_atom(&[], &HashMap::new(), "http://x\"><inject");
+        assert!(!xml.contains("\"><inject"), "{xml}");
+        assert!(xml.contains("&quot;&gt;&lt;inject"), "{xml}");
     }
 
     #[test]

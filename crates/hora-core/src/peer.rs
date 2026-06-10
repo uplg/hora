@@ -434,11 +434,30 @@ async fn confirm_down(client: &Client, config: &Config, target: &Peer) -> Verdic
 /// Fetch a witness's `/healthz` report, or `None` if it is unreachable or replies
 /// with something other than a healthy report.
 async fn fetch_witness(client: &Client, url: &str) -> Option<HealthReport> {
-    let response = client.get(url).timeout(WITNESS_TIMEOUT).send().await.ok()?;
+    /// A healthy report is a small JSON object; cap the body so a compromised
+    /// peer can't stream hundreds of MB into memory within the timeout.
+    const MAX_REPORT_BYTES: usize = 64 * 1024;
+
+    let mut response = client.get(url).timeout(WITNESS_TIMEOUT).send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
-    response.json::<HealthReport>().await.ok()
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > MAX_REPORT_BYTES {
+                    return None; // Oversized: treat as an unreachable/unhealthy witness.
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            // A transport error mid-body is not a clean end of stream; a report
+            // we could not fully read must not vouch for a healthy witness.
+            Err(_) => return None,
+        }
+    }
+    serde_json::from_slice::<HealthReport>(&body).ok()
 }
 
 /// Deliver an event to the peer's routed channels (or all, if unrouted).

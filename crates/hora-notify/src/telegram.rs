@@ -106,7 +106,14 @@ impl Notifier for TelegramNotifier {
             text: &text,
             parse_mode: "HTML",
         };
-        post_json(&self.client, &url, &body, "telegram", &self.token).await;
+        post_json(
+            &self.client,
+            &url,
+            &body,
+            "telegram",
+            &[self.token.as_str()],
+        )
+        .await;
     }
 }
 

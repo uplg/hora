@@ -102,6 +102,6 @@ impl Notifier for GotifyNotifier {
                 .header("X-Gotify-Key", &self.token)
                 .json(&payload)
         };
-        send_retrying(build, "gotify", &self.token).await;
+        send_retrying(build, "gotify", &[self.token.as_str()]).await;
     }
 }

@@ -143,10 +143,12 @@ pub(crate) fn make_request_span(request: &Request<Body>) -> tracing::Span {
         .get(REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("unknown");
+    // Log only the path, never the query: push and viewer tokens travel as
+    // `?token=...`, and the full URI would leak them into the access log.
     tracing::info_span!(
         "request",
         method = %request.method(),
-        uri = %request.uri(),
+        path = %request.uri().path(),
         request_id,
     )
 }
@@ -217,10 +219,16 @@ mod tests {
         router(AppState::new(pool, rx, Arc::new(AtomicU64::new(0))))
     }
 
+    /// The rate limiter keys on the peer address; oneshot has no real
+    /// connection, so supply one.
+    fn fake_peer() -> axum::extract::ConnectInfo<std::net::SocketAddr> {
+        axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 12345)))
+    }
+
     fn get(uri: &str) -> Request<Body> {
         Request::builder()
             .uri(uri)
-            .header("x-forwarded-for", "1.2.3.4")
+            .extension(fake_peer())
             .body(Body::empty())
             .expect("request")
     }
@@ -234,7 +242,7 @@ mod tests {
         Request::builder()
             .method("POST")
             .uri(uri)
-            .header("x-forwarded-for", "1.2.3.4")
+            .extension(fake_peer())
             .body(Body::empty())
             .expect("request")
     }

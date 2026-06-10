@@ -20,7 +20,7 @@ use hora_core::config::Config;
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, watch};
 use tower_governor::errors::GovernorError;
-use tower_governor::key_extractor::{KeyExtractor, SmartIpKeyExtractor};
+use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
 
 use crate::summary::{Summary, build_summary};
 
@@ -91,8 +91,14 @@ impl AppState {
 
 /// Rate-limit key extractor that trusts a configured header (e.g.
 /// `cf-connecting-ip` behind Cloudflare) for the client IP, falling back to the
-/// smart detection (x-forwarded-for / x-real-ip / forwarded / peer) when it is
-/// absent or unparseable.
+/// real TCP peer address when it is absent or unparseable.
+///
+/// The fallback is deliberately the peer socket - *not* `x-forwarded-for` or
+/// other forwarded headers - because a direct client can set those freely: a
+/// smart extractor would let an attacker mint a fresh rate-limit bucket per
+/// request (and inflate the keyed-bucket map) simply by rotating the header.
+/// Forwarded headers are honored only when an operator behind a trusted proxy
+/// names one via `server.client_ip_header`.
 #[derive(Clone)]
 pub(crate) struct ConfiguredIp {
     header: Option<HeaderName>,
@@ -112,13 +118,13 @@ impl KeyExtractor for ConfiguredIp {
         {
             return Ok(ip);
         }
-        SmartIpKeyExtractor.extract(req)
+        PeerIpKeyExtractor.extract(req)
     }
 }
 
 impl ConfiguredIp {
     /// Parse the configured header name once; an invalid name is ignored (with a
-    /// warning) and the extractor behaves like `SmartIpKeyExtractor`.
+    /// warning) and the extractor falls back to the peer address.
     pub(crate) fn from_config(name: Option<&str>) -> Self {
         let header = name.and_then(|name| {
             name.parse::<HeaderName>()
@@ -174,13 +180,17 @@ pub(crate) fn fresh_summary(
 mod tests {
     use super::*;
     #[test]
-    fn configured_ip_prefers_header_then_falls_back() {
-        let extractor = ConfiguredIp::from_config(Some("cf-connecting-ip"));
+    fn configured_ip_prefers_header_then_falls_back_to_peer() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
 
-        // Header present: it wins over x-forwarded-for.
+        let extractor = ConfiguredIp::from_config(Some("cf-connecting-ip"));
+        let peer = SocketAddr::from(([198, 51, 100, 9], 4444));
+
+        // Header present: it wins over the peer address.
         let with_header = Request::builder()
             .header("cf-connecting-ip", "203.0.113.7")
-            .header("x-forwarded-for", "10.0.0.1")
+            .extension(ConnectInfo(peer))
             .body(())
             .expect("request");
         assert_eq!(
@@ -188,14 +198,13 @@ mod tests {
             "203.0.113.7".parse::<IpAddr>().unwrap()
         );
 
-        // Header absent: fall back to x-forwarded-for.
+        // Header absent: fall back to the real peer address, NOT a spoofable
+        // x-forwarded-for the client supplied.
         let without_header = Request::builder()
             .header("x-forwarded-for", "10.0.0.1")
+            .extension(ConnectInfo(peer))
             .body(())
             .expect("request");
-        assert_eq!(
-            extractor.extract(&without_header).unwrap(),
-            "10.0.0.1".parse::<IpAddr>().unwrap()
-        );
+        assert_eq!(extractor.extract(&without_header).unwrap(), peer.ip());
     }
 }

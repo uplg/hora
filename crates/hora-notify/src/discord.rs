@@ -139,7 +139,7 @@ impl Notifier for DiscordNotifier {
             &self.webhook_url,
             &payload,
             "discord",
-            &self.webhook_url,
+            &[self.webhook_url.as_str()],
         )
         .await;
     }

@@ -96,34 +96,36 @@ async fn probe_once(client: &Client, monitor: &Monitor) -> Outcome {
 
 async fn http(client: &Client, monitor: &Monitor) -> Outcome {
     let start = Instant::now();
-    let request = with_headers(
-        client.get(&monitor.target).timeout(monitor.timeout()),
-        &monitor.headers,
-    );
-    let result = request.send().await;
-    let latency = millis(start.elapsed());
-
-    match result {
-        Ok(response) => {
-            let code = response.status().as_u16();
-            let status_ok = match monitor.expected_status {
-                Some(expected) => code == expected,
-                None => response.status().is_success(),
-            };
-            // Read the body only when we need it: to detail a failure, or to run
-            // a keyword/JSON assertion. Assertions get a larger budget.
-            let assertions = monitor.keyword.is_some() || monitor.json_query.is_some();
-            let body = if !status_ok || assertions {
-                let cap = if assertions {
-                    monitor.assertion_body_cap()
-                } else {
-                    MAX_BODY_SNIPPET
-                };
-                read_body(response, cap).await
+    // One deadline for the whole request - every redirect hop and the body read -
+    // so a chain of slow redirects can't outlive the monitor's timeout. Latency is
+    // taken when the final response's headers arrive, before the body read, to
+    // match the single-request timing this replaced.
+    let attempt = async {
+        let response = send_following_redirects(client, monitor).await?;
+        let latency = millis(start.elapsed());
+        let code = response.status().as_u16();
+        let status_ok = match monitor.expected_status {
+            Some(expected) => code == expected,
+            None => response.status().is_success(),
+        };
+        // Read the body only when we need it: to detail a failure, or to run
+        // a keyword/JSON assertion. Assertions get a larger budget.
+        let assertions = monitor.keyword.is_some() || monitor.json_query.is_some();
+        let body = if !status_ok || assertions {
+            let cap = if assertions {
+                monitor.assertion_body_cap()
             } else {
-                Vec::new()
+                MAX_BODY_SNIPPET
             };
+            read_body(response, cap).await
+        } else {
+            Vec::new()
+        };
+        Ok::<_, HttpError>((code, status_ok, body, latency))
+    };
 
+    match tokio::time::timeout(monitor.timeout(), attempt).await {
+        Ok(Ok((code, status_ok, body, latency))) => {
             let (up, error) = if !status_ok {
                 let snippet = snippet(&body);
                 let detail = if snippet.is_empty() {
@@ -147,8 +149,78 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
                 error,
             }
         }
-        Err(err) => Outcome::down(describe(&err).to_owned()),
+        Ok(Err(HttpError::TooManyRedirects)) => Outcome::down("too many redirects".to_owned()),
+        Ok(Err(HttpError::Request(err))) => Outcome::down(describe(&err).to_owned()),
+        Err(_elapsed) => Outcome::down("request timed out".to_owned()),
     }
+}
+
+/// reqwest's default redirect ceiling; we follow them ourselves (below) and keep
+/// the same bound.
+const MAX_REDIRECTS: usize = 10;
+
+/// Either a transport error or our own redirect-budget exhaustion. The probe
+/// client never auto-follows, so reqwest can't produce a "too many redirects"
+/// error of its own.
+enum HttpError {
+    Request(reqwest::Error),
+    TooManyRedirects,
+}
+
+/// Send the monitor's GET, following redirects manually so the configured
+/// headers - which may carry credentials (an API key, a bearer token) - are
+/// re-attached only while the redirect stays on the original origin. reqwest
+/// strips its own well-known sensitive headers across hosts but not arbitrary
+/// custom ones, so without this a malicious or compromised target could 30x us
+/// to an attacker host and harvest the header. Cross-origin hops are still
+/// followed, just without the headers.
+async fn send_following_redirects(
+    client: &Client,
+    monitor: &Monitor,
+) -> Result<reqwest::Response, HttpError> {
+    let Ok(target) = reqwest::Url::parse(&monitor.target) else {
+        // Config validation rejects non-URL http targets; degrade gracefully by
+        // letting reqwest surface the error on send.
+        return client
+            .get(&monitor.target)
+            .timeout(monitor.timeout())
+            .send()
+            .await
+            .map_err(HttpError::Request);
+    };
+    let mut url = target.clone();
+    for _ in 0..=MAX_REDIRECTS {
+        // The per-request timeout overrides the client's 15s notifier backstop,
+        // which may be *shorter* than the monitor's own; the caller's outer
+        // deadline still bounds the whole chain.
+        let mut request = client.get(url.clone()).timeout(monitor.timeout());
+        if same_origin(&target, &url) {
+            request = with_headers(request, &monitor.headers);
+        }
+        let response = request.send().await.map_err(HttpError::Request)?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        // A 3xx without a usable Location (or 304 Not Modified) is the final
+        // response; hand it back rather than chase nothing.
+        let next = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|location| url.join(location).ok());
+        match next {
+            Some(next) => url = next,
+            None => return Ok(response),
+        }
+    }
+    Err(HttpError::TooManyRedirects)
+}
+
+/// Whether `url` shares an origin (scheme + host + port) with the original
+/// `target` - the rule that decides whether the monitor's (possibly
+/// credential-bearing) headers are re-attached across a redirect.
+fn same_origin(target: &reqwest::Url, url: &reqwest::Url) -> bool {
+    target.origin() == url.origin()
 }
 
 /// Run the configured keyword/JSON assertions against the body; the first that
@@ -338,6 +410,10 @@ async fn dns(monitor: &Monitor) -> Outcome {
                 wanted.sort_unstable();
                 let wanted = wanted.join(",");
                 if answer != wanted {
+                    // The answer is remote-controlled (TXT records run to tens of
+                    // KB and may span lines); snippet() bounds and single-lines it
+                    // exactly like an HTTP failure body.
+                    let answer = snippet(answer.as_bytes());
                     return Outcome {
                         up: false,
                         degraded: false,
@@ -429,6 +505,77 @@ fn snippet(body: &[u8]) -> String {
         .collect()
 }
 
+/// The public form of a stored failure reason. Stored reasons keep full
+/// operator detail - response-body snippets, DNS answers, asserted keywords,
+/// raw socket errors - which anonymous viewers of a public monitor must not
+/// see: snippets and DNS answers are remote-controlled, keywords and JSON
+/// queries reveal operator config. Known-safe reasons pass through verbatim;
+/// detailed ones collapse to their category; anything unrecognized (raw TCP
+/// errors, free-form push messages, legacy rows) falls back to "check failed".
+///
+/// Must track the reasons produced in this file and the scheduler's heartbeat
+/// misses; an unmatched new reason degrades safely to the fallback.
+#[must_use]
+pub fn public_reason(reason: &str) -> &str {
+    // Static reasons carry no detail; they are their own category.
+    const VERBATIM: &[&str] = &[
+        "request timed out",
+        "connection failed",
+        "connection timed out",
+        "too many redirects",
+        "invalid response body",
+        "request error",
+        "could not resolve host",
+        "DNS lookup timed out",
+        "missing heartbeat",
+    ];
+    // "HTTP 500: <body snippet>" keeps the status, drops the snippet. Anchored
+    // to a numeric status: `checks.error` also stores free-form push messages,
+    // so a bare "HTTP <anything>" prefix must not become a passthrough that
+    // lets a push-token holder place arbitrary text on the public page.
+    if let Some(rest) = reason.strip_prefix("HTTP ") {
+        let code = rest.find(':').map_or(rest, |colon| &rest[..colon]);
+        if code.parse::<u16>().is_ok() {
+            return &reason[..5 + code.len()];
+        }
+    }
+    if VERBATIM.contains(&reason) {
+        return reason;
+    }
+    // Same anchoring: only the record types the DNS probe actually queries.
+    if let Some(record) = reason
+        .strip_prefix("no ")
+        .and_then(|rest| rest.strip_suffix(" records found"))
+        && ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SRV", "SOA", "PTR"].contains(&record)
+    {
+        return reason;
+    }
+    // "missed scheduled heartbeat (was due 03:00 UTC + 30m grace)" reveals the
+    // job's schedule; keep the category only.
+    if reason.starts_with("missed scheduled heartbeat") {
+        return "missed scheduled heartbeat";
+    }
+    // Keyword and JSON assertions embed the configured keyword/query.
+    if reason.starts_with("keyword ")
+        || reason.starts_with("JSON query")
+        || reason.starts_with("invalid JSON query")
+        || reason == "response is not valid JSON"
+    {
+        return "content check failed";
+    }
+    // The DNS pin mismatch embeds the remote-controlled answer.
+    if reason.starts_with("expected ") {
+        return "unexpected DNS answer";
+    }
+    if reason.starts_with("DNS lookup failed") || reason.starts_with("resolver setup failed") {
+        return "DNS lookup failed";
+    }
+    if reason.starts_with("icmp") {
+        return "ping failed";
+    }
+    "check failed"
+}
+
 /// A concise, URL-free description of a request error. The raw error embeds the
 /// target URL (which may carry credentials), so we categorize instead.
 fn describe(err: &reqwest::Error) -> &'static str {
@@ -448,6 +595,72 @@ fn describe(err: &reqwest::Error) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_reason_collapses_detail() {
+        // Remote-controlled or config-revealing detail is dropped.
+        assert_eq!(public_reason("HTTP 500: secret stack trace"), "HTTP 500");
+        assert_eq!(
+            public_reason("expected 1.2.3.4, got 6.6.6.6"),
+            "unexpected DNS answer"
+        );
+        assert_eq!(
+            public_reason("keyword missing: internal-marker"),
+            "content check failed"
+        );
+        assert_eq!(
+            public_reason("JSON query $.status != ok"),
+            "content check failed"
+        );
+        assert_eq!(
+            public_reason("missed scheduled heartbeat (was due 03:00 UTC + 30m grace)"),
+            "missed scheduled heartbeat"
+        );
+        assert_eq!(
+            public_reason("DNS lookup failed: proto error: io error"),
+            "DNS lookup failed"
+        );
+        // Unknown text (raw TCP errors, push messages) falls back to generic.
+        assert_eq!(
+            public_reason("Connection refused (os error 61)"),
+            "check failed"
+        );
+        // Safe statics pass through verbatim.
+        assert_eq!(public_reason("HTTP 503"), "HTTP 503");
+        assert_eq!(public_reason("request timed out"), "request timed out");
+        assert_eq!(public_reason("no A records found"), "no A records found");
+        // A push msg crafted to look like a safe shape must not pass through:
+        // the HTTP branch is anchored to a numeric status, the DNS one to the
+        // record types the probe queries.
+        assert_eq!(
+            public_reason("HTTP looks legit but is a push msg"),
+            "check failed"
+        );
+        assert_eq!(public_reason("HTTP 99999: nope"), "check failed");
+        assert_eq!(
+            public_reason("no big deal, just injected records found"),
+            "check failed"
+        );
+    }
+
+    #[test]
+    fn same_origin_governs_header_forwarding() {
+        let parse = |u: &str| reqwest::Url::parse(u).unwrap();
+        let target = parse("https://api.example.com/v1");
+
+        // Same host, scheme and port (path differs): headers stay attached.
+        assert!(same_origin(
+            &target,
+            &parse("https://api.example.com/login")
+        ));
+        // Different host, scheme or port: headers are dropped.
+        assert!(!same_origin(&target, &parse("https://evil.example.com/v1")));
+        assert!(!same_origin(&target, &parse("http://api.example.com/v1")));
+        assert!(!same_origin(
+            &target,
+            &parse("https://api.example.com:8443/v1")
+        ));
+    }
 
     #[test]
     fn threshold_detects_slow() {
@@ -493,6 +706,7 @@ mod tests {
             group: None,
             depends_on: None,
             public: true,
+            public_error_detail: false,
             dns_record: None,
             dns_expected: None,
             dns_resolver: None,

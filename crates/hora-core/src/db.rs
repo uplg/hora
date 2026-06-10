@@ -60,6 +60,10 @@ pub fn migrator() -> sqlx::migrate::Migrator {
 ///
 /// Returns an error if the database cannot be opened or migrations fail.
 pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
+    // The database holds failure snippets, push payloads and incident detail, so
+    // create it private (0600) rather than at the process umask. SQLite then
+    // mirrors that mode onto the -wal/-shm sidecars it spawns.
+    precreate_private(database_path)?;
     let options = SqliteConnectOptions::new()
         .filename(database_path)
         .create_if_missing(true)
@@ -85,6 +89,44 @@ pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
 
     migrator().run(&pool).await?;
     Ok(pool)
+}
+
+/// Create the database file with owner-only (0600) permissions before sqlx opens
+/// it, so secrets in the time series aren't world-readable. A no-op for an
+/// in-memory database, an existing file, or a non-Unix platform (where file
+/// modes don't apply).
+#[cfg(unix)]
+fn precreate_private(database_path: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // `file:` URIs are skipped wholesale: parsing them (query params, mode=memory)
+    // isn't worth it for a spelling Hora never documents. An operator who points a
+    // `file:` URI at a real on-disk database owns its permissions.
+    if database_path == ":memory:" || database_path.starts_with("file:") {
+        return Ok(());
+    }
+    let path = std::path::Path::new(database_path);
+    if path.exists() {
+        return Ok(());
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        // Lost a race to create it: another opener won, the file now exists.
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("creating database file {database_path}")),
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn precreate_private(_database_path: &str) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Insert one probe result.
@@ -236,7 +278,15 @@ pub async fn daily(pool: &SqlitePool, monitor_id: &str, since: i64) -> sqlx::Res
     .await
 }
 
-/// Latency samples since `since`, oldest first (rows without latency are skipped).
+/// Latency samples since `since`, averaged into time buckets of `bucket_secs`
+/// (must be `>= 1`), oldest first (rows without latency are skipped). Aggregating
+/// in SQL caps the rows materialized at `window / bucket_secs` however dense the
+/// checks are, so a wide window on a high-frequency monitor can't pull hundreds
+/// of thousands of rows into memory. Buckets are anchored to the epoch, not to
+/// `since`, so two consecutive requests group the same rows identically and an
+/// auto-refreshing chart doesn't jitter. Ordering by the group key (`MIN(time)`
+/// is monotone in it) lets `SQLite` reuse the GROUP BY sort instead of building
+/// a second temp b-tree.
 ///
 /// # Errors
 ///
@@ -245,13 +295,16 @@ pub async fn latency_series(
     pool: &SqlitePool,
     monitor_id: &str,
     since: i64,
+    bucket_secs: i64,
 ) -> sqlx::Result<Vec<Point>> {
     sqlx::query_as::<_, Point>(
-        "SELECT time AS t, latency_ms FROM checks \
-         WHERE monitor_id = ? AND time >= ? AND latency_ms IS NOT NULL ORDER BY time ASC",
+        "SELECT MIN(time) AS t, CAST(AVG(latency_ms) AS INTEGER) AS latency_ms FROM checks \
+         WHERE monitor_id = ?1 AND time >= ?2 AND latency_ms IS NOT NULL \
+         GROUP BY time / ?3 ORDER BY time / ?3",
     )
     .bind(monitor_id)
     .bind(since)
+    .bind(bucket_secs)
     .fetch_all(pool)
     .await
 }
@@ -962,7 +1015,7 @@ mod tests {
             vec![1, 0]
         );
 
-        let series = latency_series(&pool, "m", 0).await.unwrap();
+        let series = latency_series(&pool, "m", 0, 1).await.unwrap();
         assert_eq!(series.len(), 2);
         assert_eq!(series[0].latency_ms, 10);
     }
@@ -1103,7 +1156,7 @@ mod tests {
         assert_eq!(cert_not_after(&pool, "gone").await.unwrap(), None);
 
         // The retained monitor keeps only its recent row.
-        assert_eq!(latency_series(&pool, "keep", 0).await.unwrap().len(), 1);
+        assert_eq!(latency_series(&pool, "keep", 0, 1).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

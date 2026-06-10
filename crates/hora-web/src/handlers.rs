@@ -210,7 +210,11 @@ pub(crate) async fn metrics_prometheus(
 
 /// Recent incidents restricted to what the caller may see: incidents of
 /// private monitors - and of monitors no longer in the config - only reach
-/// authenticated viewers.
+/// authenticated viewers. For anonymous viewers the surviving incidents are
+/// also sanitized: failure reasons collapse to their safe category (the stored
+/// reason carries body snippets and DNS answers) unless the monitor opts in
+/// with `public_error_detail`, and topology annotations drop any name that is
+/// not a public monitor's.
 async fn visible_incidents(
     pool: &sqlx::SqlitePool,
     config: &Config,
@@ -219,13 +223,47 @@ async fn visible_incidents(
 ) -> Result<Vec<db::Incident>, AppError> {
     let mut incidents = db::recent_incidents(pool, limit).await?;
     if !authenticated {
-        let visible: std::collections::HashSet<&str> = config
+        let public: Vec<&hora_core::config::Monitor> = config
             .monitors
             .iter()
             .filter(|monitor| monitor.public)
+            .collect();
+        let visible: std::collections::HashSet<&str> =
+            public.iter().map(|monitor| monitor.id.as_str()).collect();
+        // cause/impacted store display names; allow ids too in case older rows
+        // recorded those.
+        let nameable: std::collections::HashSet<&str> = public
+            .iter()
+            .flat_map(|monitor| [monitor.id.as_str(), monitor.name.as_str()])
+            .collect();
+        // Monitors that opted into publishing their full failure detail.
+        let detailed: std::collections::HashSet<&str> = public
+            .iter()
+            .filter(|monitor| monitor.public_error_detail)
             .map(|monitor| monitor.id.as_str())
             .collect();
         incidents.retain(|incident| visible.contains(incident.monitor_id.as_str()));
+        for incident in &mut incidents {
+            if !detailed.contains(incident.monitor_id.as_str()) {
+                incident.error = incident
+                    .error
+                    .as_deref()
+                    .map(|reason| hora_core::probe::public_reason(reason).to_owned());
+            }
+            incident.cause = incident
+                .cause
+                .take()
+                .filter(|cause| nameable.contains(cause.as_str()));
+            // `impacted` is a JSON list of names; keep the public ones only.
+            incident.impacted = incident.impacted.as_deref().and_then(|json| {
+                let names: Vec<String> = serde_json::from_str::<Vec<String>>(json)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|name| nameable.contains(name.as_str()))
+                    .collect();
+                (!names.is_empty()).then(|| serde_json::to_string(&names).unwrap_or_default())
+            });
+        }
     }
     Ok(incidents)
 }
@@ -326,10 +364,17 @@ pub(crate) async fn latency_json(
         return Err(AppError::NotFound("unknown monitor"));
     }
     let LatencyQuery { hours, .. } = query;
-    let since = Utc::now().timestamp() - hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
-    let points = db::latency_series(&pool, &id, since).await?;
-    // Bound the response (a 10s-interval monitor over 720h is ~260k points); the
-    // shape is preserved by sampling evenly.
+    let window = hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
+    let since = Utc::now().timestamp() - window;
+    // Average into at most MAX_LATENCY_POINTS buckets in SQL, so a 10s-interval
+    // monitor over 720h (~260k raw rows) never materializes more than the cap.
+    // Ceiling division keeps the bucket count under the cap even for short
+    // windows, where flooring would produce up to ~2x the buckets.
+    let max_points = i64::try_from(MAX_LATENCY_POINTS).expect("MAX_LATENCY_POINTS fits in i64");
+    // (Manual ceil: `i64::div_ceil` is still unstable.)
+    let bucket_secs = ((window + max_points - 1) / max_points).max(1);
+    let points = db::latency_series(&pool, &id, since, bucket_secs).await?;
+    // The SQL already respects the cap; downsample stays as a pure backstop.
     Ok(Json(downsample(points, MAX_LATENCY_POINTS)))
 }
 

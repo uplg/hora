@@ -213,7 +213,7 @@ fn reconcile(
         if !running.contains_key(&monitor.id) {
             // Each monitor gets its own client so it can carry its own proxy.
             // The proxy URL is validated at config load, so this rarely fails.
-            let client = match crate::http::client(monitor.proxy.as_deref()) {
+            let client = match crate::http::probe_client(monitor.proxy.as_deref()) {
                 Ok(client) => client,
                 Err(err) => {
                     warn!(monitor = %monitor.id, "monitor not started, bad proxy: {err:#}");

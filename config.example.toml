@@ -26,8 +26,9 @@ allowed_origins = []
 rate_limit_refill_secs = 1
 rate_limit_burst = 30
 # Token required to view private monitors (those with `public = false`), sent
-# as `Authorization: Bearer <token>` or `?token=`. It gates the full view on
-# the status page, /api/summary, /api/monitors/{id}/latency, /metrics,
+# as `Authorization: Bearer <token>` (preferred - a `?token=` query also works,
+# but URLs end up in browser history and intermediary logs). It gates the full
+# view on the status page, /api/summary, /api/monitors/{id}/latency, /metrics,
 # /history and /history.atom; without it those endpoints only show public
 # monitors. Read live: a change applies on the next reload.
 # auth_token = "${HORA_AUTH_TOKEN}"
@@ -163,6 +164,10 @@ default_retention_days = 90
 #
 # Visibility (optional):
 #   public = false               # hide from unauthenticated viewers (requires auth_token)
+#   public_error_detail = true   # show the raw failure reason to anonymous viewers;
+#                                # by default they only see a safe category ("HTTP 500",
+#                                # "content check failed") since the stored detail can
+#                                # carry response snippets or asserted keywords
 
 [[monitors]]
 id = "website"
@@ -186,6 +191,8 @@ depends_on = ["api"]
 # notify = ["alerts-discord"]   # optional; route alerts to specific channels
 # proxy = "socks5://127.0.0.1:9050"   # optional; route requests through a proxy
 # public = false          # optional; hide from public status page
+# public_error_detail = true  # optional; publish the raw failure reason (default:
+#                             # anonymous viewers see a safe category only)
 # cert_pin = "abc123..."  # optional; SHA-256 of leaf public key (detects cert changes)
 
 [[monitors]]
@@ -224,9 +231,10 @@ group = "infra"
 # degraded_over_ms = 200         # optional; flag slow round-trips as degraded
 
 # Heartbeat / push monitor: down if no ping arrives within `interval_secs`.
-# The job calls: curl -fsS -X POST \
-#   "https://status.example.com/api/push/nightly-backup?token=${BACKUP_TOKEN}"
-# Optional query: &status=down&msg=...&ping=<ms>
+# The job calls: curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \
+#   "https://status.example.com/api/push/nightly-backup"
+# The header keeps the token out of proxy/access logs (`?token=` also works).
+# Optional query: ?status=down&msg=...&ping=<ms>
 #
 # Cron-aware variant: declare WHEN the job runs and Hora alerts only if a
 # scheduled run misses its grace window - a 03:00 backup pinging at 03:05 is

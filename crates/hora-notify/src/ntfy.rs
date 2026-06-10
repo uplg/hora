@@ -101,6 +101,12 @@ impl Notifier for NtfyNotifier {
             }
             req
         };
-        send_retrying(build, "ntfy", &self.url).await;
+        // The topic URL itself is the capability; the bearer token must not
+        // surface either if the server echoes it in a rejection body.
+        let mut secrets = vec![self.url.as_str()];
+        if let Some(token) = &self.token {
+            secrets.push(token.as_str());
+        }
+        send_retrying(build, "ntfy", &secrets).await;
     }
 }

@@ -93,7 +93,7 @@ impl Notifier for FreeMobileNotifier {
         send_retrying(
             || self.client.get(ENDPOINT).query(&params),
             "freemobile",
-            &self.pass,
+            &[self.pass.as_str(), self.user.as_str()],
         )
         .await;
     }

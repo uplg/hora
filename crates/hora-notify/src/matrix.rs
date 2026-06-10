@@ -125,7 +125,7 @@ impl Notifier for MatrixNotifier {
                     .json(&body)
             },
             "matrix",
-            &self.access_token,
+            &[self.access_token.as_str()],
         )
         .await;
     }

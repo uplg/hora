@@ -163,6 +163,11 @@ pub(crate) struct SummaryCtx {
     threshold: i64,
     cert_threshold: i64,
     history_days: u16,
+    /// Authenticated view: full failure reasons and private topology names.
+    /// The public variant collapses reasons to safe categories (see
+    /// `probe::public_reason`) - unless the monitor opts in with
+    /// `public_error_detail` - and never names a private monitor.
+    full: bool,
 }
 
 /// Build the page/API view model. `full` includes private (`public = false`)
@@ -189,6 +194,7 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config, full: bool
         threshold: i64::from(config.alerts.fail_threshold.max(1)),
         cert_threshold: i64::from(config.alerts.cert_expiry_days),
         history_days: config.page.history_days,
+        full,
     };
 
     let visible_monitors: Vec<&Monitor> = config
@@ -428,7 +434,7 @@ pub(crate) fn build_monitor_view(
 
     let latest = recent.first();
     let (cause, impacted) = if status == "down" {
-        topology_context(monitor, ctx.threshold, data.recent, all_monitors)
+        topology_context(monitor, ctx.threshold, data.recent, all_monitors, ctx.full)
     } else {
         (None, Vec::new())
     };
@@ -439,7 +445,15 @@ pub(crate) fn build_monitor_view(
         name: monitor.name.clone(),
         status,
         last_latency_ms: latest.and_then(|l| l.latency_ms),
-        last_error: latest.and_then(|l| l.error.clone()),
+        // The stored reason carries operator detail (body snippets, DNS
+        // answers); anonymous viewers get the safe category instead.
+        last_error: latest.and_then(|l| l.error.as_deref()).map(|reason| {
+            if ctx.full || monitor.public_error_detail {
+                reason.to_owned()
+            } else {
+                hora_core::probe::public_reason(reason).to_owned()
+            }
+        }),
         last_checked: latest.and_then(|l| iso(l.time)),
         uptime_permille,
         uptime_label: uptime_permille.map(format_permille),
@@ -467,13 +481,19 @@ pub(crate) fn build_monitor_view(
 }
 
 /// Compute topology annotation for a down monitor: the nearest down upstream
-/// name (`cause`) or the list of impacted dependent names.
+/// name (`cause`) or the list of impacted dependent names. The public variant
+/// (`full = false`) names only public monitors - a private upstream/dependent
+/// must not leak its name through a public card's annotation. The graph is
+/// still walked in full, so a public down ancestor further up is still named.
 fn topology_context(
     monitor: &Monitor,
     threshold: i64,
     recent_map: &HashMap<String, Vec<Latest>>,
     all_monitors: &[Monitor],
+    full: bool,
 ) -> (Option<String>, Vec<String>) {
+    let nameable = |id: &str| full || all_monitors.iter().any(|m| m.id == id && m.public);
+
     let upstreams = topology::transitive_upstreams(all_monitors, &monitor.id);
     for up_id in &upstreams {
         let recent = recent_map
@@ -481,6 +501,7 @@ fn topology_context(
             .map(Vec::as_slice)
             .unwrap_or_default();
         if db::derive_status(recent, threshold) == "down"
+            && nameable(up_id)
             && let Some(name) = topology::monitor_name(all_monitors, up_id)
         {
             return (Some(name.to_owned()), Vec::new());
@@ -490,6 +511,7 @@ fn topology_context(
     let dependents = topology::transitive_dependents(all_monitors, &monitor.id);
     let impacted: Vec<String> = dependents
         .iter()
+        .filter(|dep_id| nameable(dep_id))
         .filter_map(|dep_id| topology::monitor_name(all_monitors, dep_id).map(String::from))
         .collect();
 
@@ -805,6 +827,57 @@ mod tests {
         assert_eq!(slo_state(Some(200), Some(250)), "breached");
         assert_eq!(slo_state(None, Some(150)), "none");
         assert_eq!(slo_state(Some(200), None), "none");
+    }
+
+    #[test]
+    fn topology_context_hides_private_names_from_public_view() {
+        let config = hora_core::config::parse(
+            r#"
+            [page]
+            [server]
+            auth_token = "seekrit-long-token"
+            [[monitors]]
+            id = "db"
+            name = "Internal DB"
+            target = "https://db.internal"
+            interval_secs = 60
+            public = false
+            [[monitors]]
+            id = "edge"
+            name = "Edge"
+            target = "https://example.com"
+            interval_secs = 60
+            depends_on = ["db"]
+            [[monitors]]
+            id = "worker"
+            name = "Worker"
+            target = "https://worker.internal"
+            interval_secs = 60
+            public = false
+            depends_on = ["db"]
+        "#,
+        )
+        .expect("config");
+        // Everything is down (3 failed checks meets the threshold).
+        let recent: HashMap<String, Vec<Latest>> = ["db", "edge", "worker"]
+            .into_iter()
+            .map(|id| (id.to_owned(), vec![check(0), check(0), check(0)]))
+            .collect();
+
+        // Authenticated: the private upstream is named as the cause.
+        let edge = &config.monitors[1];
+        let (cause, _) = topology_context(edge, 3, &recent, &config.monitors, true);
+        assert_eq!(cause.as_deref(), Some("Internal DB"));
+        // Public: a private monitor's name never leaves through a cause.
+        let (cause, _) = topology_context(edge, 3, &recent, &config.monitors, false);
+        assert_eq!(cause, None);
+
+        // Impacted lists drop private dependents in the public view.
+        let db = &config.monitors[0];
+        let (_, impacted) = topology_context(db, 3, &recent, &config.monitors, true);
+        assert_eq!(impacted.len(), 2, "{impacted:?}");
+        let (_, impacted) = topology_context(db, 3, &recent, &config.monitors, false);
+        assert_eq!(impacted, vec!["Edge".to_owned()]);
     }
 
     #[test]

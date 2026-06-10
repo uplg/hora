@@ -134,7 +134,14 @@ impl Notifier for WebhookNotifier {
 
     async fn notify(&self, event: Event<'_>) {
         let payload = Self::payload(event);
-        post_json(&self.client, &self.url, &payload, "webhook", &self.url).await;
+        post_json(
+            &self.client,
+            &self.url,
+            &payload,
+            "webhook",
+            &[self.url.as_str()],
+        )
+        .await;
     }
 }
 

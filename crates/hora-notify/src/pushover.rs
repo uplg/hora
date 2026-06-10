@@ -95,6 +95,12 @@ impl Notifier for PushoverNotifier {
                 "priority": priority,
             }))
         };
-        send_retrying(build, "pushover", &self.token).await;
+        // The user key is a quasi-secret too: it lets anyone message the user.
+        send_retrying(
+            build,
+            "pushover",
+            &[self.token.as_str(), self.user.as_str()],
+        )
+        .await;
     }
 }

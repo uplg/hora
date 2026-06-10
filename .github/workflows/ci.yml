@@ -44,6 +44,9 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   # Build & publish the image once checks pass - tags only, so it builds once.
+  # RustSec advisory scanning lives in audit.yml (path-filtered + scheduled);
+  # releases stay gated on advisories regardless, since `deny` checks the same
+  # database on every run.
   docker:
     needs: [check, deny]
     if: startsWith(github.ref, 'refs/tags/v')

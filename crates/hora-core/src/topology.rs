@@ -179,6 +179,7 @@ mod tests {
             group: None,
             depends_on: depends_on.map(|v| v.into_iter().map(String::from).collect()),
             public: true,
+            public_error_detail: false,
             dns_record: None,
             dns_expected: None,
             dns_resolver: None,

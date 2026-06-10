@@ -188,7 +188,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /history.atom` | Incident history as an Atom feed. |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
-| `POST /api/push/{id}?token=…` | Record a heartbeat for a push monitor. The token may instead be sent as an `X-Push-Token` header, keeping it out of proxy access logs. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
+| `POST /api/push/{id}` | Record a heartbeat for a push monitor. Send the token as an `X-Push-Token` header (preferred - it stays out of proxy access logs) or as `?token=…`. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge for a monitor. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge for a monitor. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code (`utoipa`). |

@@ -269,7 +269,10 @@ pub fn spawn_watcher(
 /// stores each observed fingerprint, so a mismatch alerts once per change
 /// (and survives restarts) instead of on every check.
 fn pin_alert<'a>(expected: &'a str, stored: Option<&'a str>, observed: &str) -> Option<&'a str> {
-    if observed == expected || stored == Some(observed) {
+    // Case-insensitive on the configured pin: `parse()` canonicalizes it to
+    // lowercase, but a mixed-case pin from any other path must not silently
+    // disable pinning. `stored` is always our own lowercase sha256_hex.
+    if observed.eq_ignore_ascii_case(expected) || stored == Some(observed) {
         return None;
     }
     Some(stored.unwrap_or(expected))

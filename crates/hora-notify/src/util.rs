@@ -83,16 +83,16 @@ pub(crate) fn cert_expiry_phrase(days_left: i64) -> String {
 const MAX_ATTEMPTS: u32 = 3;
 
 /// Send a request and log (never panic) on failure. `build` produces a fresh
-/// request on each attempt, so it can be retried; `secret` is stripped from any
-/// logged text so a token in the URL or a header never reaches the logs. On
-/// rejection a bounded snippet of the response body is logged (it usually says
-/// *why*, e.g. "chat not found").
+/// request on each attempt, so it can be retried; every `secrets` entry is
+/// stripped from any logged text so a token in the URL, a header or a query
+/// never reaches the logs. On rejection a bounded snippet of the response body
+/// is logged (it usually says *why*, e.g. "chat not found").
 ///
 /// Transient failures (a network error, an HTTP 5xx, or 429) are retried with a
 /// short backoff. Client errors (4xx other than 429) are permanent, so they are
 /// reported immediately without retrying. Every notifier goes through here, so
 /// they all share one retry and redaction policy.
-pub(crate) async fn send_retrying<F>(build: F, channel: &str, secret: &str)
+pub(crate) async fn send_retrying<F>(build: F, channel: &str, secrets: &[&str])
 where
     F: Fn() -> RequestBuilder,
 {
@@ -108,7 +108,7 @@ where
                     continue;
                 }
                 let body = response.text().await.unwrap_or_default();
-                let detail = redact(&snippet(&body), secret);
+                let detail = redact(&snippet(&body), secrets);
                 warn!("{channel} rejected the notification (HTTP {status}): {detail}");
                 return;
             }
@@ -119,7 +119,7 @@ where
                 }
                 warn!(
                     "{channel} request failed after {attempt} attempts: {}",
-                    redact(&err.to_string(), secret)
+                    redact(&err.to_string(), secrets)
                 );
                 return;
             }
@@ -133,9 +133,9 @@ pub(crate) async fn post_json<T: Serialize>(
     url: &str,
     payload: &T,
     channel: &str,
-    secret: &str,
+    secrets: &[&str],
 ) {
-    send_retrying(|| client.post(url).json(payload), channel, secret).await;
+    send_retrying(|| client.post(url).json(payload), channel, secrets).await;
 }
 
 /// Exponential backoff between delivery attempts: 200ms, then 400ms. Kept short
@@ -145,14 +145,48 @@ async fn backoff(attempt: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }
 
-/// Strip `secret` from `text`. Empty secret = no-op (a `str::replace("", …)` would
-/// otherwise splice the replacement between every character).
-fn redact(text: &str, secret: &str) -> String {
-    if secret.is_empty() {
-        text.to_owned()
-    } else {
-        text.replace(secret, "<redacted>")
+/// Strip every secret from `text` - raw, and in the two percent-encoded forms
+/// a URL serializer may have written it in (strict RFC 3986 `%XX`, and
+/// form-urlencoding where space is `+`), since an error that echoes a URL
+/// echoes the *encoded* secret, not the one the operator typed. Empty secrets
+/// are skipped (a `str::replace("", …)` would otherwise splice the replacement
+/// between every character).
+fn redact(text: &str, secrets: &[&str]) -> String {
+    let mut out = text.to_owned();
+    for secret in secrets {
+        if secret.is_empty() {
+            continue;
+        }
+        out = out.replace(secret, "<redacted>");
+        for encoded in [percent_encode(secret, false), percent_encode(secret, true)] {
+            if encoded != *secret {
+                out = out.replace(&encoded, "<redacted>");
+            }
+        }
     }
+    out
+}
+
+/// Percent-encode `value` byte-wise: every byte outside the unreserved set
+/// becomes `%XX` (uppercase hex, as URL serializers emit). `form` selects
+/// `application/x-www-form-urlencoded` (reqwest's query/form serializer):
+/// space is `+` and `*` stays bare; the strict RFC 3986 variant keeps `~` bare
+/// instead.
+fn percent_encode(value: &str, form: bool) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' => out.push(byte as char),
+            b'~' if !form => out.push('~'),
+            b'*' if form => out.push('*'),
+            b' ' if form => out.push('+'),
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// A bounded, single-line snippet of a response body for log output.
@@ -189,12 +223,33 @@ mod tests {
     }
 
     #[test]
-    fn redact_strips_secret_and_handles_empty() {
+    fn redact_strips_secrets_and_handles_empty() {
         assert_eq!(
-            redact("token abc123 failed", "abc123"),
+            redact("token abc123 failed", &["abc123"]),
             "token <redacted> failed"
         );
         // An empty secret must not splice <redacted> between every character.
-        assert_eq!(redact("hello", ""), "hello");
+        assert_eq!(redact("hello", &[""]), "hello");
+        // Every secret in the set is stripped, not just the first.
+        assert_eq!(
+            redact("url https://h/t1 token t0k3n", &["https://h/t1", "t0k3n"]),
+            "url <redacted> token <redacted>"
+        );
+    }
+
+    #[test]
+    fn redact_strips_encoded_forms() {
+        // A secret echoed back inside a URL appears percent-encoded.
+        assert_eq!(
+            redact("GET /send?pass=p%40ss%3Aword failed", &["p@ss:word"]),
+            "GET /send?pass=<redacted> failed"
+        );
+        // Form-urlencoding writes a space as `+`.
+        assert_eq!(
+            redact("pass=my+pass rejected", &["my pass"]),
+            "pass=<redacted> rejected"
+        );
+        // And as %20 in strict RFC 3986 contexts (URL paths).
+        assert_eq!(redact("at /my%20pass/x", &["my pass"]), "at /<redacted>/x");
     }
 }

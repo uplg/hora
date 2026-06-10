@@ -4,6 +4,48 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.4 → next (unreleased)
+
+Security hardening, six behavioural changes:
+
+- **Empty tokens fail startup.** `server.auth_token`, `push_token`,
+  `listen_token` and `ping_token` set to `""` — typically a `${VAR}`
+  interpolating an unset variable — were silently treated as "no token"; an
+  empty token would have authorized a blank `?token=`. Hora now refuses to
+  start; set the variable or remove the key.
+- **`cert_pin` is validated.** It must be 64 hex chars (the SHA-256 of the
+  leaf public key); anything else fails startup instead of silently never
+  matching.
+- **Probe headers stop at the origin.** Per-monitor `headers` (which often
+  carry credentials) are no longer sent when a redirect leaves the monitor's
+  scheme/host/port. A monitor that redirects to a sibling host expecting the
+  same header will now fail; point `target` at the final host.
+- **Rate limiting falls back to the TCP peer, not `X-Forwarded-For`.** A
+  direct client could mint fresh buckets by rotating the header. Behind a
+  reverse proxy you must set `server.client_ip_header` (e.g.
+  `cf-connecting-ip`), otherwise all visitors now share the proxy's bucket.
+- **Anonymous viewers see categorized failure reasons.** The status page,
+  `/api/summary`, `/history` and the Atom feed show a public monitor's
+  failure as a safe category ("HTTP 500", "content check failed", "unexpected
+  DNS answer") instead of the stored detail, which can carry response-body
+  snippets and DNS answers. The full reason still shows with the viewer
+  token, a monitor can opt back in with `public_error_detail = true` (e.g. a
+  push monitor whose `msg` is meant for the page), and topology annotations
+  ("caused by", "impacts") never name a private monitor publicly either.
+- **`${VAR}` expands after parsing, in string values only.** A `${VAR}`
+  inside a comment is no longer looked up (commented-out examples stop
+  warning about unset variables, and a TOML syntax error can no longer echo
+  an expanded secret). Unquoted interpolation outside a string — e.g.
+  `interval_secs = ${X}` — is no longer supported; quote it or set the value
+  directly.
+
+Also: the database file is created with `0600` permissions (existing files
+keep their mode — `chmod 600` once if you care), access logs record only the
+request path (query strings carried push/viewer tokens), notifier log
+redaction strips every channel secret including its percent-encoded forms,
+and probes follow at most 10 redirects with the monitor's timeout covering
+the whole chain.
+
 ## 0.3 → 0.4
 
 No breaking changes, one behavioural one. Opt-in additions: the `dns` monitor

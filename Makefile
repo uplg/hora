@@ -1,9 +1,9 @@
 # Local quality gate — mirrors .github/workflows/ci.yml so you can run the exact
 # same checks before pushing. `make gate` must be green for CI to pass.
-.PHONY: gate fmt clippy deny test fix
+.PHONY: gate fmt clippy deny audit test fix
 
-# The full gate: formatting, lints, license/advisory/ban checks, and tests.
-gate: fmt clippy deny test
+# The full gate: formatting, lints, license/advisory/ban checks, vuln audit, tests.
+gate: fmt clippy deny audit test
 
 fmt:
 	cargo fmt --all -- --check
@@ -13,6 +13,9 @@ clippy:
 
 deny:
 	cargo deny check
+
+audit:
+	cargo audit
 
 test:
 	cargo test --workspace --locked

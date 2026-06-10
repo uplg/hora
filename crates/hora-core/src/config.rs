@@ -1,7 +1,6 @@
 //! Configuration: parsed from a TOML file, with environment overrides for secrets.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -664,6 +663,14 @@ pub struct Monitor {
     /// set `false` to hide it from unauthenticated viewers (requires a token).
     #[serde(default = "default_true")]
     pub public: bool,
+    /// Show this monitor's full failure detail to anonymous viewers. By default
+    /// the public page collapses failure reasons to a safe category ("HTTP 500",
+    /// "content check failed"), since the stored detail can carry response-body
+    /// snippets, DNS answers or asserted keywords. Opt in per monitor when that
+    /// detail is fine to publish (e.g. a push monitor whose `msg` is meant for
+    /// the page). Authenticated viewers always see the full reason.
+    #[serde(default)]
+    pub public_error_detail: bool,
     /// DNS monitor: the record type to query (e.g. `"A"`, `"AAAA"`, `"CNAME"`).
     #[serde(default)]
     pub dns_record: Option<String>,
@@ -717,6 +724,7 @@ impl std::fmt::Debug for Monitor {
             .field("group", &self.group)
             .field("depends_on", &self.depends_on)
             .field("public", &self.public)
+            .field("public_error_detail", &self.public_error_detail)
             .field("dns_record", &self.dns_record)
             .field("dns_expected", &self.dns_expected)
             .field("dns_resolver", &self.dns_resolver)
@@ -897,17 +905,59 @@ pub fn load_from(path: &Path) -> anyhow::Result<Config> {
 /// Returns an error if the TOML is invalid or a monitor is misconfigured
 /// (empty/duplicate id, zero interval).
 pub fn parse(toml_str: &str) -> anyhow::Result<Config> {
-    // `${VAR}` is expanded from the environment first, so secrets (channel
-    // tokens/URLs) can stay out of the file: `webhook_url = "${OPS_DISCORD}"`.
-    let expanded = expand_env(toml_str);
-    let mut config: Config = toml::from_str(&expanded).context("parsing config TOML")?;
+    // Parse first, expand `${VAR}` afterwards - in string values only - so
+    // secrets (channel tokens/URLs) can stay out of the file:
+    // `webhook_url = "${OPS_DISCORD}"`. Expanding the raw text instead would
+    // also hydrate comments (warning about unset variables in commented-out
+    // examples) and let a syntax error echo an already-expanded secret back,
+    // since TOML errors quote the offending line.
+    let mut table: toml::Table = toml::from_str(toml_str).context("parsing config TOML")?;
+    expand_env_table(&mut table);
+    let mut config: Config = table.try_into().context("reading config values")?;
     apply_env_overrides(&mut config);
+    // Canonicalize cert pins to lowercase hex so the comparison in
+    // `cert::pin_alert` (against the lowercase `sha256_hex`) matches whatever
+    // case the operator typed; `validate` then rejects a malformed pin outright.
+    for monitor in &mut config.monitors {
+        if let Some(pin) = &mut monitor.cert_pin {
+            pin.make_ascii_lowercase();
+        }
+    }
     validate(&config)?;
     Ok(config)
 }
 
+/// Expand `${VAR}` in every string value of the document, recursively. Keys,
+/// comments and non-string values are never touched, so a `${VAR}` in a
+/// commented-out example neither warns nor pulls a secret into the file's
+/// parse context.
+fn expand_env_table(table: &mut toml::Table) {
+    for (_key, value) in table.iter_mut() {
+        expand_env_value(value);
+    }
+}
+
+fn expand_env_value(value: &mut toml::Value) {
+    match value {
+        toml::Value::String(text) => {
+            if text.contains('$') {
+                *text = expand_env(text);
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                expand_env_value(item);
+            }
+        }
+        toml::Value::Table(table) => expand_env_table(table),
+        _ => {}
+    }
+}
+
 /// Substitute `${VAR}` with the environment value (empty if unset). `$$` is a
-/// literal `$`, so `$${id}` yields a literal `${id}`.
+/// literal `$`, so `$${id}` yields a literal `${id}`. Runs on already-parsed
+/// string values, so the result needs no TOML escaping - a value with quotes
+/// or newlines is stored verbatim and can't break parsing or inject config.
 fn expand_env(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
@@ -921,10 +971,7 @@ fn expand_env(input: &str) -> String {
             if let Some(end) = body.find('}') {
                 let name = &body[..end];
                 if let Ok(value) = std::env::var(name) {
-                    // Escape for a TOML basic string (the intended use is
-                    // `key = "${VAR}"`), so a value with a quote or newline
-                    // can't break parsing or inject config.
-                    out.push_str(&toml_escape(&value));
+                    out.push_str(&value);
                 } else {
                     tracing::warn!("config references unset environment variable {name:?}");
                 }
@@ -942,25 +989,6 @@ fn expand_env(input: &str) -> String {
     out
 }
 
-/// Escape a value so it is safe inside a TOML basic (double-quoted) string.
-fn toml_escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\u{:04X}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// Infrastructure overrides honoured by the Docker image; secrets come from the
 /// config (optionally via `${VAR}`), not from fixed variables.
 fn apply_env_overrides(config: &mut Config) {
@@ -972,7 +1000,22 @@ fn apply_env_overrides(config: &mut Config) {
     }
 }
 
+/// A configured access token must be non-empty: an empty one (often the result
+/// of an unset `${VAR}` expanding to "") would authorize a blank `?token=`, since
+/// the constant-time compare treats `"" == ""` as a match. Short-but-set tokens
+/// are the operator's call, so they only warn.
+fn validate_token(label: &str, token: Option<&Secret>) -> anyhow::Result<()> {
+    if let Some(token) = token {
+        anyhow::ensure!(!token.is_empty(), "{label} must not be empty");
+        if token.as_ref().len() < 16 {
+            tracing::warn!("{label} is short (under 16 chars); prefer a long random token");
+        }
+    }
+    Ok(())
+}
+
 fn validate(config: &Config) -> anyhow::Result<()> {
+    validate_token("server.auth_token", config.server.auth_token.as_ref())?;
     let mut channel_names = HashSet::new();
     for channel in &config.channels {
         anyhow::ensure!(!channel.name().is_empty(), "channel name must not be empty");
@@ -1046,17 +1089,25 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             monitor.id
         );
         // A private monitor without a configured token would be visible to no
-        // one at all - fail fast rather than silently hide it.
+        // one at all - fail fast rather than silently hide it. (Emptiness is
+        // already rejected by validate_token above, so presence is enough.)
         anyhow::ensure!(
-            monitor.public
-                || config
-                    .server
-                    .auth_token
-                    .as_ref()
-                    .is_some_and(|t| !t.is_empty()),
+            monitor.public || config.server.auth_token.is_some(),
             "monitor {}: public = false requires server.auth_token to be set",
             monitor.id
         );
+        // Anonymous viewers never see a private monitor, so the opt-in is inert;
+        // warn rather than fail, since `public` may be toggled temporarily.
+        if monitor.public_error_detail && !monitor.public {
+            tracing::warn!(
+                "monitor {}: public_error_detail has no effect on a private monitor",
+                monitor.id
+            );
+        }
+        validate_token(
+            &format!("monitor {}: push_token", monitor.id),
+            monitor.push_token.as_ref(),
+        )?;
         validate_monitor_io(monitor)?;
         if let Some(routes) = &monitor.notify {
             for route in routes {
@@ -1107,6 +1158,14 @@ fn validate_peers(
             "peer {}: set ping_url (to heartbeat it) and/or expect_every_secs (to watch it)",
             peer.id
         );
+        validate_token(
+            &format!("peer {}: listen_token", peer.id),
+            peer.listen_token.as_ref(),
+        )?;
+        validate_token(
+            &format!("peer {}: ping_token", peer.id),
+            peer.ping_token.as_ref(),
+        )?;
         if let Some(every) = peer.expect_every_secs {
             anyhow::ensure!(every > 0, "peer {}: expect_every_secs must be > 0", peer.id);
             // The id appears in `/api/push/{id}`, so keep it URL-safe.
@@ -1248,6 +1307,15 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
         "monitor {}: dns_record/dns_expected/dns_resolver require a dns monitor",
         monitor.id
     );
+    // A malformed pin (wrong length, non-hex) can never match the observed
+    // fingerprint, which silently disables pinning after one spurious alert.
+    if let Some(pin) = &monitor.cert_pin {
+        anyhow::ensure!(
+            pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_hexdigit()),
+            "monitor {}: cert_pin must be 64 hex chars (SHA-256 of the leaf public key)",
+            monitor.id
+        );
+    }
     validate_schedule_and_slo(monitor)?;
     Ok(())
 }
@@ -1722,17 +1790,30 @@ mod tests {
     }
 
     #[test]
-    fn toml_escape_neutralises_special_chars() {
-        assert_eq!(toml_escape("plain-token_123"), "plain-token_123");
-        assert_eq!(toml_escape("a\"b"), "a\\\"b");
-        assert_eq!(toml_escape("line1\nline2"), "line1\\nline2");
-    }
-
-    #[test]
     fn expand_env_dollar_escape() {
         // `$$` is a literal `$`, so `$${id}` is a literal `${id}` (no env lookup).
         assert_eq!(expand_env("$${id}"), "${id}");
         assert_eq!(expand_env("a$$b"), "a$b");
+    }
+
+    #[test]
+    fn env_expansion_only_touches_string_values() {
+        // Expansion runs on the parsed document, so a `${VAR}` inside a comment
+        // is never looked up or hydrated (raw-text expansion used to splice
+        // values - and unset-variable warnings - into commented-out examples).
+        let toml = r#"
+            [page]
+            [server]
+            # auth_token = "${HORA_SURELY_UNSET_COMMENTED_EXAMPLE}"
+            [[monitors]]
+            id = "x"
+            name = "$${literal}"
+            target = "https://example.com"
+            interval_secs = 60
+        "#;
+        let config = super::parse(toml).expect("a commented ${VAR} must not affect parsing");
+        // `$$` in a real string value still unescapes to a literal `$`.
+        assert_eq!(config.monitors[0].name, "${literal}");
     }
 
     #[test]
@@ -2298,10 +2379,80 @@ mod tests {
         let config = parse(&private.replace("{token}", "auth_token = \"s3cret\""));
         validate(&config).expect("private monitor with token is valid");
 
-        // An interpolated-but-unset token is as good as none.
+        // An interpolated-but-unset token expands to "" - now rejected outright
+        // (an empty token would authorize a blank `?token=`), not silently treated
+        // as "no token".
         let config = parse(&private.replace("{token}", "auth_token = \"\""));
         let error = validate(&config).unwrap_err().to_string();
-        assert!(error.contains("requires server.auth_token"), "{error}");
+        assert!(error.contains("auth_token must not be empty"), "{error}");
+    }
+
+    #[test]
+    fn cert_pin_must_be_hex_and_is_lowercased() {
+        let cfg = |pin: &str| {
+            format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "web"
+                name = "Web"
+                target = "https://example.com"
+                interval_secs = 60
+                cert_pin = "{pin}"
+            "#
+            )
+        };
+
+        // Wrong length / non-hex is rejected at load.
+        let err = super::parse(&cfg("abc")).unwrap_err().to_string();
+        assert!(err.contains("cert_pin must be 64 hex"), "{err}");
+
+        // A valid pin typed in upper case is normalized to lowercase, so it
+        // matches the lowercase fingerprint Hora computes from the cert.
+        let config = super::parse(&cfg(&"A".repeat(64))).expect("valid pin");
+        let lower = "a".repeat(64);
+        assert_eq!(config.monitors[0].cert_pin.as_deref(), Some(lower.as_str()));
+    }
+
+    #[test]
+    fn public_error_detail_parses_and_defaults_off() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "a"
+            name = "A"
+            target = "https://example.com"
+            interval_secs = 60
+            [[monitors]]
+            id = "b"
+            name = "B"
+            target = "https://example.org"
+            interval_secs = 60
+            public_error_detail = true
+        "#,
+        );
+        assert!(!config.monitors[0].public_error_detail);
+        assert!(config.monitors[1].public_error_detail);
+    }
+
+    #[test]
+    fn empty_access_token_is_rejected() {
+        let toml = r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "beat"
+            name = "Beat"
+            kind = "push"
+            interval_secs = 60
+            push_token = ""
+        "#;
+        let config = parse(toml);
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("push_token must not be empty"), "{err}");
     }
 
     #[test]

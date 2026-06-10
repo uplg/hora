@@ -101,7 +101,7 @@ impl Notifier for SlackNotifier {
             &self.webhook_url,
             &payload,
             "slack",
-            &self.webhook_url,
+            &[self.webhook_url.as_str()],
         )
         .await;
     }
