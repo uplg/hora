@@ -198,7 +198,10 @@ depends_on = ["api"]
 #                         # the service whose IPv6 has been dead for weeks behind a
 #                         # healthy IPv4 ("IPv6 failing: connection timed out (IPv4
 #                         # ok)"). http/tcp/icmp with a hostname target; no proxy.
-#                         # The probing host itself needs working IPv4 and IPv6.
+#                         # The probing host itself needs working IPv4 and IPv6 -
+#                         # in Docker, default bridge networks have NO IPv6, so this
+#                         # would blame the container's network, not your service:
+#                         # enable IPv6 on the network (or host networking) first.
 
 [[monitors]]
 id = "api"

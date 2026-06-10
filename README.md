@@ -41,7 +41,11 @@ Named after the **Horai**, the Greek goddesses of the hours.
   IPv6 has been dead for weeks behind a healthy IPv4 (or the reverse), invisible
   to every single-connection check. One broken family alerts with the culprit
   named - _"IPv6 failing: connection timed out (IPv4 ok)"_. Works for HTTP, TCP
-  and ICMP monitors with a hostname target.
+  and ICMP monitors with a hostname target. The **probing host itself needs
+  working IPv4 and IPv6**: in Docker, default bridge networks have *no IPv6*,
+  so a dual-stack monitor would blame your container's network, not your
+  service - enable IPv6 on the daemon/compose network (or use host networking)
+  first.
 - **Root-cause alert grouping** - when a database takes ten services down with it,
   you get **one notification** (the root cause, with its blast radius), not eleven:
   dependent monitors confirmed down within the grouping window fold into their
