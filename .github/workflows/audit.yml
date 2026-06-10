@@ -30,6 +30,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      # Pre-install cargo-audit as a prebuilt release binary (~5s): without it,
+      # audit-check falls back to `cargo install` and recompiles the scanner
+      # from source (~3min) on every run - 98% of the daily job for a 3s scan.
+      # A cache is the wrong tool here: the daily cron would keep a "latest"
+      # binary warm forever, and the advisory DB must stay fresh anyway.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
