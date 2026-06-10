@@ -4,6 +4,20 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.4.1 → 0.4.2
+
+No behavioural changes: both additions are opt-in.
+
+- **`dual_stack = true`** (per monitor) requires the *probing host* to have
+  working IPv4 **and** IPv6. In Docker this is the catch: default bridge
+  networks have no IPv6, so a dual-stack monitor would report
+  "IPv6 failing" about your container's network, not your service. Enable
+  IPv6 on the daemon/compose network (or use host networking) before
+  turning it on.
+- **`hora test-alert`** sends a clearly-labelled test notification through
+  the real chain - safe to run anytime; it never touches the database, the
+  incident history or the uptime numbers.
+
 ## 0.4.0 → 0.4.1
 
 Security hardening, six behavioural changes:
