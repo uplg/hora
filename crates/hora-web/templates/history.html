@@ -148,6 +148,31 @@
       color: var(--text);
     }
 
+    /* The captured failing response, collapsed by default. */
+    .snapshot {
+      margin-top: 6px;
+    }
+
+    .snapshot summary {
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .snapshot pre {
+      margin: 6px 0 0;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
     .empty-state {
       color: var(--muted);
       text-align: center;
@@ -200,6 +225,12 @@
         {% if let Some(impacted) = incident.impacted %}<p class="incident-body impacted">impacts: {{ impacted }}</p>{%
         endif %}
         {% if let Some(note) = incident.note %}<p class="incident-body note">{{ note }}</p>{% endif %}
+        {% if let Some(snapshot) = incident.snapshot %}
+        <details class="snapshot">
+          <summary>what the service answered</summary>
+          <pre>{{ snapshot }}</pre>
+        </details>
+        {% endif %}
       </div>
       {% endfor %}
     </div>

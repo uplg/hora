@@ -66,7 +66,10 @@ Named after the **Horai**, the Greek goddesses of the hours.
 - **Automatic incident history** - every confirmed down/up transition is recorded
   (with the root-cause annotation) and served as an **HTML history page**
   (`/history`) and an **Atom feed** (`/history.atom`) you can subscribe to - no
-  account, no JavaScript.
+  account, no JavaScript. Incidents carry a **failure snapshot** - the status
+  line, headers and body start the service actually answered when the down was
+  confirmed, the first question at 9am about the 3am alert - and free-form
+  **operator annotations** (`hora annotate 42 "fiber cut"`).
 - **Prometheus `/metrics`** - monitor status, 24h uptime ratio, latency quantiles
   and certificate expiry in text exposition format, ready for Grafana/Alertmanager.
 - **Private monitors** - mark a monitor `public = false` and it disappears from the

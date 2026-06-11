@@ -20,6 +20,14 @@ use crate::config::{Kind, Monitor, Secret};
 /// Maximum length (chars) of the response-body snippet kept on failure.
 const MAX_BODY_SNIPPET: usize = 300;
 
+/// Bounds of the failure snapshot ("what did the service actually answer?")
+/// captured when an HTTP probe fails with a response: at most this many
+/// headers, each line clipped, and this many chars of body. ~6 KiB worst case,
+/// stored only on confirmed incidents.
+const MAX_SNAPSHOT_HEADERS: usize = 24;
+const MAX_SNAPSHOT_HEADER_CHARS: usize = 160;
+const MAX_SNAPSHOT_BODY_CHARS: usize = 2048;
+
 /// Result of a single probe.
 #[derive(Debug)]
 pub struct Outcome {
@@ -28,6 +36,10 @@ pub struct Outcome {
     pub latency_ms: Option<i64>,
     pub status_code: Option<i64>,
     pub error: Option<String>,
+    /// The failing HTTP response (status line, headers, start of the body),
+    /// bounded; only set when the probe got a response back. Stored on the
+    /// incident when the down is confirmed.
+    pub snapshot: Option<String>,
 }
 
 impl Outcome {
@@ -50,6 +62,7 @@ impl Outcome {
             latency_ms: None,
             status_code: None,
             error: Some(error),
+            snapshot: None,
         }
     }
 }
@@ -180,6 +193,7 @@ fn combine(v4: &Outcome, v6: &Outcome) -> Outcome {
             },
             status_code: v4.status_code.or(v6.status_code),
             error: None,
+            snapshot: None,
         },
         (false, true) => one_family_down(Family::V4, v4, v6),
         (true, false) => one_family_down(Family::V6, v6, v4),
@@ -193,6 +207,7 @@ fn combine(v4: &Outcome, v6: &Outcome) -> Outcome {
                 v4.error.as_deref().unwrap_or("unknown error"),
                 v6.error.as_deref().unwrap_or("unknown error")
             )),
+            snapshot: v4.snapshot.clone().or_else(|| v6.snapshot.clone()),
         },
     }
 }
@@ -211,6 +226,7 @@ fn one_family_down(failed: Family, failure: &Outcome, healthy: &Outcome) -> Outc
             failure.error.as_deref().unwrap_or("unknown error"),
             failed.other().label()
         )),
+        snapshot: failure.snapshot.clone(),
     }
 }
 
@@ -229,23 +245,26 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
             None => response.status().is_success(),
         };
         // Read the body only when we need it: to detail a failure, or to run
-        // a keyword/JSON assertion. Assertions get a larger budget.
+        // a keyword/JSON assertion. Assertions get a larger budget. The head
+        // (status line + headers) is captured first - reading the body
+        // consumes the response - in case this turns into a failure snapshot.
         let assertions = monitor.keyword.is_some() || monitor.json_query.is_some();
-        let body = if !status_ok || assertions {
+        let (head, body) = if !status_ok || assertions {
+            let head = snapshot_head(&response);
             let cap = if assertions {
                 monitor.assertion_body_cap()
             } else {
-                MAX_BODY_SNIPPET
+                MAX_SNAPSHOT_BODY_CHARS
             };
-            read_body(response, cap).await
+            (head, read_body(response, cap).await)
         } else {
-            Vec::new()
+            (String::new(), Vec::new())
         };
-        Ok::<_, HttpError>((code, status_ok, body, latency))
+        Ok::<_, HttpError>((code, status_ok, head, body, latency))
     };
 
     match tokio::time::timeout(monitor.timeout(), attempt).await {
-        Ok(Ok((code, status_ok, body, latency))) => {
+        Ok(Ok((code, status_ok, head, body, latency))) => {
             let (up, error) = if !status_ok {
                 let snippet = snippet(&body);
                 let detail = if snippet.is_empty() {
@@ -267,6 +286,9 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
                 latency_ms: Some(latency),
                 status_code: Some(i64::from(code)),
                 error,
+                // The service answered something and the check failed: keep
+                // what it answered for the incident record.
+                snapshot: (!up).then(|| render_snapshot(&head, &body)),
             }
         }
         Ok(Err(HttpError::TooManyRedirects)) => Outcome::down("too many redirects".to_owned()),
@@ -423,6 +445,7 @@ async fn tcp_connect<A: tokio::net::ToSocketAddrs>(monitor: &Monitor, addr: A) -
                 latency_ms: Some(latency),
                 status_code: None,
                 error: None,
+                snapshot: None,
             }
         }
         Ok(Err(err)) => Outcome::down(err.to_string()),
@@ -474,6 +497,7 @@ async fn icmp_family(monitor: &Monitor, family: Option<Family>) -> Outcome {
                 latency_ms: Some(latency),
                 status_code: None,
                 error: None,
+                snapshot: None,
             }
         }
         Err(SurgeError::Timeout { .. }) => Outcome::down("request timed out".to_owned()),
@@ -556,6 +580,13 @@ async fn dns(monitor: &Monitor) -> Outcome {
                 wanted.sort_unstable();
                 let wanted = wanted.join(",");
                 if answer != wanted {
+                    // The full (but still bounded) answer goes into the failure
+                    // snapshot - "what did it actually answer?" applies to DNS
+                    // pins too, and TXT answers rarely fit the inline reason.
+                    let snapshot: String = format!("DNS answer: {answer}")
+                        .chars()
+                        .take(MAX_SNAPSHOT_BODY_CHARS)
+                        .collect();
                     // The answer is remote-controlled (TXT records run to tens of
                     // KB and may span lines); snippet() bounds and single-lines it
                     // exactly like an HTTP failure body.
@@ -566,6 +597,7 @@ async fn dns(monitor: &Monitor) -> Outcome {
                         latency_ms: Some(latency),
                         status_code: None,
                         error: Some(format!("expected {wanted}, got {answer}")),
+                        snapshot: Some(snapshot),
                     };
                 }
             }
@@ -576,6 +608,7 @@ async fn dns(monitor: &Monitor) -> Outcome {
                 latency_ms: Some(latency),
                 status_code: None,
                 error: None,
+                snapshot: None,
             }
         }
         Ok(Err(err)) => Outcome::down(format!("DNS lookup failed: {err}")),
@@ -631,6 +664,51 @@ async fn read_body(mut response: reqwest::Response, cap: usize) -> Vec<u8> {
         }
     }
     buf
+}
+
+/// The status line and (bounded) headers of a response, captured before the
+/// body read consumes it.
+fn snapshot_head(response: &reqwest::Response) -> String {
+    render_head(response.version(), response.status(), response.headers())
+}
+
+/// Format the status line and headers of the failure snapshot. Header values
+/// are clipped per line and the count is capped, so a hostile response can't
+/// bloat the incident record.
+fn render_head(
+    version: reqwest::Version,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> String {
+    let mut head = format!("{version:?} {status}");
+    for (name, value) in headers.iter().take(MAX_SNAPSHOT_HEADERS) {
+        let value = value.to_str().unwrap_or("<binary>");
+        head.push('\n');
+        head.extend(
+            format!("{name}: {value}")
+                .chars()
+                .take(MAX_SNAPSHOT_HEADER_CHARS),
+        );
+    }
+    let dropped = headers.len().saturating_sub(MAX_SNAPSHOT_HEADERS);
+    if dropped > 0 {
+        let _ = std::fmt::Write::write_fmt(&mut head, format_args!("\n({dropped} more headers)"));
+    }
+    head
+}
+
+/// Assemble the stored failure snapshot: status line and headers, a blank
+/// line, then the start of the body (lossy UTF-8, bounded in chars).
+fn render_snapshot(head: &str, body: &[u8]) -> String {
+    let text: String = String::from_utf8_lossy(body)
+        .chars()
+        .take(MAX_SNAPSHOT_BODY_CHARS)
+        .collect();
+    if text.trim().is_empty() {
+        head.to_owned()
+    } else {
+        format!("{head}\n\n{text}")
+    }
 }
 
 /// Collapse a byte body into a bounded, single-line snippet for failure detail.
@@ -949,6 +1027,7 @@ mod tests {
             latency_ms,
             status_code: None,
             error: error.map(str::to_owned),
+            snapshot: None,
         }
     }
 
@@ -1006,6 +1085,54 @@ mod tests {
         let both = combine(&outcome(true, Some(20), None), &slow_v6);
         assert!(both.up);
         assert!(both.degraded);
+    }
+
+    #[test]
+    fn snapshot_renders_status_headers_and_body_bounded() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("content-type", "text/html".parse().unwrap());
+        headers.insert("retry-after", "120".parse().unwrap());
+
+        let head = render_head(
+            reqwest::Version::HTTP_2,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            &headers,
+        );
+        assert_eq!(
+            head,
+            "HTTP/2.0 503 Service Unavailable\ncontent-type: text/html\nretry-after: 120"
+        );
+
+        // Body appended after a blank line; an empty body leaves the head alone.
+        let full = render_snapshot(&head, b"<html>maintenance</html>");
+        assert_eq!(full, format!("{head}\n\n<html>maintenance</html>"));
+        assert_eq!(render_snapshot(&head, b"  \n "), head);
+
+        // A hostile response can't bloat the record: the body is clipped to
+        // the cap, oversized header values per line, excess headers counted.
+        let huge = vec![b'x'; 100_000];
+        let clipped = render_snapshot(&head, &huge);
+        assert_eq!(
+            clipped.len(),
+            head.len() + 2 + MAX_SNAPSHOT_BODY_CHARS,
+            "body bounded"
+        );
+        let mut many = reqwest::header::HeaderMap::new();
+        for i in 0..30 {
+            many.append(
+                "x-filler",
+                format!("{i}-{}", "v".repeat(500)).parse().unwrap(),
+            );
+        }
+        let head = render_head(
+            reqwest::Version::HTTP_11,
+            reqwest::StatusCode::BAD_GATEWAY,
+            &many,
+        );
+        let lines: Vec<&str> = head.lines().collect();
+        assert_eq!(lines.len(), 1 + MAX_SNAPSHOT_HEADERS + 1);
+        assert_eq!(lines[lines.len() - 1], "(6 more headers)");
+        assert!(lines[1].len() <= MAX_SNAPSHOT_HEADER_CHARS);
     }
 
     #[test]

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Failure snapshots**: when an HTTP probe confirms a down *with a response*
+  (bad status or failed assertion), the incident records what the service
+  actually answered - status line, headers and the start of the body, bounded
+  at capture time (24 headers, 160 chars/line, 2 KiB of body). Shown on
+  `/history` in a collapsed "what the service answered" block, and as the
+  status line in `hora incidents`. Same privacy rule as failure reasons:
+  anonymous viewers never see it unless the monitor sets
+  `public_error_detail`. DNS pin mismatches snapshot the full (bounded)
+  answer too - TXT records rarely fit the inline reason - and a dual-stack
+  down keeps the failing family's snapshot.
+
 - **Ad-hoc silences** (`hora silence`, `POST /api/silence`): mute alerts for
   some monitors (comma-separated ids, or `all`) for a duration like `10m` or
   `1h30m` (max 7 days, with an optional reason) - the scriptable counterpart

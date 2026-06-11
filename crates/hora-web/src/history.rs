@@ -30,6 +30,7 @@ pub(crate) struct IncidentRow {
     cause: Option<String>,
     impacted: Option<String>,
     note: Option<String>,
+    snapshot: Option<String>,
 }
 
 /// Build the view rows: ids resolved to display names (falling back to the id
@@ -58,6 +59,7 @@ pub(crate) fn incident_rows(
                 .filter(|impacted| !impacted.is_empty())
                 .map(|impacted| impacted.join(", ")),
             note: incident.note.clone(),
+            snapshot: incident.snapshot.clone(),
         })
         .collect()
 }
@@ -223,6 +225,7 @@ mod tests {
             impacted: Some(r#"["API","Web"]"#.to_owned()),
             error: Some("boom".to_owned()),
             note: Some("fiber cut".to_owned()),
+            snapshot: Some("HTTP/2 503\n\nmaintenance".to_owned()),
             created_at: 1000,
         };
         let names = HashMap::from([("db".to_owned(), "Database".to_owned())]);
@@ -245,6 +248,7 @@ mod tests {
             impacted: None,
             error: None,
             note: None,
+            snapshot: None,
             created_at: 1000,
         };
         let rows = incident_rows(&[orphan], &HashMap::new());

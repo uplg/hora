@@ -308,8 +308,15 @@ async fn open_incident_record(
     cause: Option<&str>,
     impacted: &[String],
 ) -> Option<i64> {
-    match db::insert_incident_start(pool, &monitor.id, outcome.error.as_deref(), cause, impacted)
-        .await
+    match db::insert_incident_start(
+        pool,
+        &monitor.id,
+        outcome.error.as_deref(),
+        cause,
+        impacted,
+        outcome.snapshot.as_deref(),
+    )
+    .await
     {
         Ok(incident_id) => Some(incident_id),
         Err(err) => {
@@ -548,6 +555,7 @@ fn up_heartbeat() -> Outcome {
         latency_ms: None,
         status_code: None,
         error: None,
+        snapshot: None,
     }
 }
 

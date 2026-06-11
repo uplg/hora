@@ -243,6 +243,14 @@ async fn list_incidents(limit: i64) -> anyhow::Result<()> {
         if let Some(error) = &incident.error {
             println!("      error: {error}");
         }
+        // The full snapshot lives on /history; the status line is enough here.
+        if let Some(first_line) = incident
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.lines().next())
+        {
+            println!("      answered: {first_line}");
+        }
         if let Some(note) = &incident.note {
             println!("      note:  {note}");
         }

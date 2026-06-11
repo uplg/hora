@@ -604,6 +604,9 @@ pub struct Incident {
     pub error: Option<String>,
     /// Operator-written annotation ("fiber cut"), set via `hora annotate`.
     pub note: Option<String>,
+    /// What the service actually answered: the failing response's status line,
+    /// headers and body start, captured (bounded) when the down was confirmed.
+    pub snapshot: Option<String>,
     pub created_at: i64,
 }
 
@@ -618,18 +621,21 @@ pub async fn insert_incident_start(
     error: Option<&str>,
     cause: Option<&str>,
     impacted: &[String],
+    snapshot: Option<&str>,
 ) -> sqlx::Result<i64> {
     let now = chrono::Utc::now().timestamp();
     let impacted_json = serde_json::to_string(impacted).unwrap_or_else(|_| "[]".to_owned());
     let result = sqlx::query(
-        "INSERT INTO incidents (monitor_id, started_at, error, cause, impacted, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO incidents \
+            (monitor_id, started_at, error, cause, impacted, snapshot, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(monitor_id)
     .bind(now)
     .bind(error)
     .bind(cause)
     .bind(&impacted_json)
+    .bind(snapshot)
     .bind(now)
     .execute(pool)
     .await?;
@@ -678,7 +684,7 @@ pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec
     // "last" - so `hora annotate last` annotates the incident listed first.
     sqlx::query_as::<_, Incident>(
         "SELECT id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, note, \
-            created_at \
+            snapshot, created_at \
          FROM incidents ORDER BY started_at DESC, id DESC LIMIT ?",
     )
     .bind(limit)
@@ -1424,9 +1430,16 @@ mod tests {
     async fn incidents_open_close_and_prune() {
         let pool = memory_pool().await;
 
-        let id = insert_incident_start(&pool, "m", Some("boom"), None, &["a".to_owned()])
-            .await
-            .unwrap();
+        let id = insert_incident_start(
+            &pool,
+            "m",
+            Some("boom"),
+            None,
+            &["a".to_owned()],
+            Some("HTTP/2 503\n\n<html>maintenance</html>"),
+        )
+        .await
+        .unwrap();
         assert_eq!(find_open_incident(&pool, "m").await.unwrap(), Some(id));
 
         update_incident_end(&pool, id).await.unwrap();
@@ -1435,10 +1448,14 @@ mod tests {
         let incidents = recent_incidents(&pool, 10).await.unwrap();
         assert_eq!(incidents.len(), 1);
         assert_eq!(incidents[0].error.as_deref(), Some("boom"));
+        assert_eq!(
+            incidents[0].snapshot.as_deref(),
+            Some("HTTP/2 503\n\n<html>maintenance</html>")
+        );
         assert!(incidents[0].duration_s.is_some());
 
         // Closed incidents prune by age; open ones never do.
-        let open = insert_incident_start(&pool, "m", None, None, &[])
+        let open = insert_incident_start(&pool, "m", None, None, &[], None)
             .await
             .unwrap();
         prune_incidents(&pool, chrono::Utc::now().timestamp() + 1000)
@@ -1452,10 +1469,10 @@ mod tests {
     #[tokio::test]
     async fn incident_notes_set_clear_and_resolve_last() {
         let pool = memory_pool().await;
-        let first = insert_incident_start(&pool, "m", None, None, &[])
+        let first = insert_incident_start(&pool, "m", None, None, &[], None)
             .await
             .unwrap();
-        let second = insert_incident_start(&pool, "m", None, None, &[])
+        let second = insert_incident_start(&pool, "m", None, None, &[], None)
             .await
             .unwrap();
 

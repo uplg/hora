@@ -260,6 +260,9 @@ async fn visible_incidents(
                     .error
                     .as_deref()
                     .map(|reason| hora_core::probe::public_reason(reason).to_owned());
+                // The captured response (headers, body start) is operator
+                // detail like the full reason: same opt-in to publish it.
+                incident.snapshot = None;
             }
             incident.cause = incident
                 .cause
