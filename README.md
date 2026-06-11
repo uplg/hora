@@ -151,6 +151,12 @@ hora                                   # run the monitor
 hora check                             # validate the config; non-zero exit on error (CI-friendly)
 hora test-alert                        # send a test down + recovered through every channel
 hora test-alert website                # ... through the channels routed for monitor "website"
+hora silence api,web 10m "deploying"   # mute alerts ad hoc (checks keep recording)
+hora silence list                      # show the active silences
+hora silence clear                     # remove every silence
+hora incidents                         # list recent incidents with their ids
+hora annotate last "fiber cut"         # attach a note to an incident (shown on /history)
+hora backup /mnt/nas/hora-backup.db    # consistent snapshot of the database (VACUUM INTO)
 hora import kuma backup.json > out.toml  # convert an Uptime Kuma backup to Hora monitors
 hora --version
 ```
@@ -160,6 +166,21 @@ incident: it sends a clearly-labelled test alert (and its recovery) through the
 real dispatch path - with a monitor id, exactly the channels its `notify`
 routing would fire - and any channel that fails logs a warning saying why
 ("chat not found", HTTP 403, ...).
+
+`hora silence` mutes alerts for some monitors (or `all`) for a duration like
+`10m` or `1h30m` (max 7 days) - the scriptable, ad-hoc counterpart of a
+configured `[[maintenance]]` window, made for deploy hooks. Checks keep being
+recorded; only the alerting is muted. The same action is available over HTTP
+as `POST /api/silence` for CI pipelines.
+
+`hora annotate <id|last> "<note>"` attaches a free-form note to an incident
+("fiber cut, ETA 6pm"), displayed on `/history` and in the Atom feed - notes
+are written for visitors and shown to anonymous viewers too. An empty note
+clears it; `hora incidents` lists recent incidents with their ids.
+
+`hora backup <dest>` snapshots the database with SQLite's `VACUUM INTO`:
+consistent and compacted, safe while the daemon is running, and a one-liner in
+a cron job pointed at a NAS mount.
 
 `hora import kuma` maps http/keyword, port, ping, dns and push monitors;
 anything else is emitted as a commented stub to review by hand.
@@ -207,6 +228,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. Send the token as an `X-Push-Token` header (preferred - it stays out of proxy access logs) or as `?token=…`. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
+| `POST /api/silence?monitors=api,web&duration=10m` | Mute alerts ad hoc (deploy hook): `monitors` is a comma-separated id list or `all`, `duration` like `10m`/`1h30m` (max 7d), optional `reason`. **Requires `server.auth_token`** (as `Authorization: Bearer` or `?token=`); without one configured the endpoint is closed. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge for a monitor. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge for a monitor. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code (`utoipa`). |

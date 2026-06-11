@@ -59,26 +59,36 @@ async fn run_subcommand() -> anyhow::Result<bool> {
                 init_tracing();
                 test_alert(args.get(2).map(String::as_str)).await?;
             }
-            "--version" | "-V" => println!("hora {}", env!("CARGO_PKG_VERSION")),
-            "--help" | "-h" => {
-                println!("Hora - a tiny self-hosted uptime monitor");
-                println!();
-                println!("Usage: hora [COMMAND]");
-                println!();
-                println!("Commands:");
-                println!(
-                    "  import kuma <file>  Convert an Uptime Kuma backup JSON to Hora TOML (stdout)"
-                );
-                println!("  check               Validate the configuration and exit");
-                println!(
-                    "  test-alert [id]     Send a test down + recovered through the configured"
-                );
-                println!(
-                    "                      channels (all of them, or the routed ones of monitor [id])"
-                );
-                println!("  --version, -V       Show the version");
-                println!("  --help, -h          Show this help message");
+            "backup" => {
+                let Some(dest) = args.get(2) else {
+                    eprintln!("Usage: hora backup <destination.db>");
+                    std::process::exit(1);
+                };
+                backup(dest).await?;
             }
+            "incidents" => {
+                let limit = args
+                    .get(2)
+                    .map_or(Ok(20), |raw| raw.parse::<i64>())
+                    .unwrap_or_else(|_| {
+                        eprintln!("Usage: hora incidents [limit]");
+                        std::process::exit(1);
+                    });
+                list_incidents(limit.max(1)).await?;
+            }
+            "annotate" => {
+                if args.len() < 4 {
+                    eprintln!("Usage: hora annotate <incident-id|last> <note>");
+                    eprintln!("An empty note (\"\") clears the annotation.");
+                    std::process::exit(1);
+                }
+                annotate(&args[2], &args[3..].join(" ")).await?;
+            }
+            "silence" => {
+                silence(&args[2..]).await?;
+            }
+            "--version" | "-V" => println!("hora {}", env!("CARGO_PKG_VERSION")),
+            "--help" | "-h" => print_help(),
             _ => {
                 eprintln!("Unknown command: {}", args[1]);
                 eprintln!("Run 'hora --help' for usage information.");
@@ -147,6 +157,227 @@ async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
         .await;
     println!("Done. A channel that stayed silent has a warning above.");
     Ok(())
+}
+
+fn print_help() {
+    println!("Hora - a tiny self-hosted uptime monitor");
+    println!();
+    println!("Usage: hora [COMMAND]");
+    println!();
+    println!("Commands:");
+    println!("  import kuma <file>  Convert an Uptime Kuma backup JSON to Hora TOML (stdout)");
+    println!("  check               Validate the configuration and exit");
+    println!("  test-alert [id]     Send a test down + recovered through the configured");
+    println!("                      channels (all of them, or the routed ones of monitor [id])");
+    println!("  silence <ids> <for> [reason]  Mute alerts for monitors (comma-separated ids");
+    println!("                      or 'all') for a duration like 10m or 1h30m (max 7d)");
+    println!("  silence list        Show the active silences");
+    println!("  silence clear       Remove every silence");
+    println!("  incidents [limit]   List recent incidents with their ids");
+    println!("  annotate <id> <note>  Attach a note to an incident ('last' targets the");
+    println!("                      most recent one; an empty note clears it)");
+    println!("  backup <dest.db>    Snapshot the database with VACUUM INTO");
+    println!("  --version, -V       Show the version");
+    println!("  --help, -h          Show this help message");
+}
+
+/// Open the daemon's database for a CLI subcommand. Refuses to *create* one: a
+/// missing file means the config points somewhere the daemon never wrote (a
+/// different working directory, usually), and silently creating an empty
+/// database there would only hide the mistake.
+async fn open_database() -> anyhow::Result<(hora_core::config::Config, hora_core::db::SqlitePool)> {
+    let config_path = config::path();
+    let config = config::load_from(&config_path).context("loading configuration")?;
+    let path = &config.server.database_path;
+    if path != ":memory:" && !path.starts_with("file:") && !std::path::Path::new(path).exists() {
+        anyhow::bail!(
+            "database {path} not found - run from the daemon's working directory, \
+             or point HORA_CONFIG at its config"
+        );
+    }
+    let pool = hora_core::db::connect(path)
+        .await
+        .context("opening database")?;
+    Ok((config, pool))
+}
+
+/// Snapshot the database to `dest` via `VACUUM INTO`: consistent and compacted,
+/// safe while the daemon runs. Meant for cron ("a one-statement answer to 'what
+/// if I lose a year of history?'").
+async fn backup(dest: &str) -> anyhow::Result<()> {
+    let config_path = config::path();
+    let config = config::load_from(&config_path).context("loading configuration")?;
+    let source = &config.server.database_path;
+    hora_core::db::backup_into(source, dest).await?;
+    let size = std::fs::metadata(dest).map_or(0, |meta| meta.len());
+    println!("Backed up {source} to {dest} ({} KiB).", size / 1024);
+    Ok(())
+}
+
+/// List recent incidents with their ids - the lookup companion of `annotate`.
+async fn list_incidents(limit: i64) -> anyhow::Result<()> {
+    let (config, pool) = open_database().await?;
+    let incidents = hora_core::db::recent_incidents(&pool, limit).await?;
+    if incidents.is_empty() {
+        println!("No incidents recorded.");
+        return Ok(());
+    }
+    for incident in incidents {
+        let name = config
+            .monitors
+            .iter()
+            .find(|monitor| monitor.id == incident.monitor_id)
+            .map_or(incident.monitor_id.as_str(), |monitor| {
+                monitor.name.as_str()
+            });
+        let span = match incident.ended_at {
+            Some(ended) => format!(
+                "{} -> {} ({})",
+                format_epoch(incident.started_at),
+                format_epoch(ended),
+                format_secs(incident.duration_s.unwrap_or(0))
+            ),
+            None => format!("{} -> ongoing", format_epoch(incident.started_at)),
+        };
+        println!("#{}  {name}  {span}", incident.id);
+        if let Some(error) = &incident.error {
+            println!("      error: {error}");
+        }
+        if let Some(note) = &incident.note {
+            println!("      note:  {note}");
+        }
+    }
+    Ok(())
+}
+
+/// Attach (or clear, with an empty note) an annotation on an incident, shown
+/// on /history and in the Atom feed. `last` targets the most recent incident.
+async fn annotate(id_arg: &str, note: &str) -> anyhow::Result<()> {
+    let (_, pool) = open_database().await?;
+    let id = if id_arg == "last" {
+        let Some(id) = hora_core::db::latest_incident_id(&pool).await? else {
+            eprintln!("No incidents recorded yet.");
+            std::process::exit(1);
+        };
+        id
+    } else {
+        id_arg.parse().unwrap_or_else(|_| {
+            eprintln!("Invalid incident id {id_arg:?} (a number, or 'last').");
+            std::process::exit(1);
+        })
+    };
+    if !hora_core::db::set_incident_note(&pool, id, note).await? {
+        eprintln!("No incident #{id}. 'hora incidents' lists the recent ones.");
+        std::process::exit(1);
+    }
+    if note.is_empty() {
+        println!("Cleared the note on incident #{id}.");
+    } else {
+        println!("Annotated incident #{id}: {note}");
+    }
+    Ok(())
+}
+
+/// `hora silence <ids|all> <duration> [reason]` / `list` / `clear`: ad-hoc
+/// alert muting (a deploy window) written straight into the daemon's database,
+/// picked up on its next tick. The HTTP counterpart is `POST /api/silence`.
+async fn silence(args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let (_, pool) = open_database().await?;
+            let now = chrono::Utc::now().timestamp();
+            let silences = hora_core::db::active_silences(&pool, now).await?;
+            if silences.is_empty() {
+                println!("No active silences.");
+            }
+            for silence in silences {
+                let target = if silence.monitor_id == "*" {
+                    "all monitors"
+                } else {
+                    &silence.monitor_id
+                };
+                let reason = silence
+                    .reason
+                    .map(|reason| format!(" - {reason}"))
+                    .unwrap_or_default();
+                println!(
+                    "{target}: until {} ({} left){reason}",
+                    format_epoch(silence.until),
+                    format_secs(silence.until - now)
+                );
+            }
+        }
+        Some("clear") => {
+            let (_, pool) = open_database().await?;
+            let cleared =
+                hora_core::db::clear_silences(&pool, chrono::Utc::now().timestamp()).await?;
+            println!("Cleared {cleared} active silence(s).");
+        }
+        Some(ids) if args.len() >= 2 => {
+            let Some(duration_secs) = hora_core::parse_duration(&args[1])
+                .filter(|secs| *secs <= hora_core::MAX_SILENCE_SECS)
+            else {
+                eprintln!(
+                    "Invalid duration {:?} (use e.g. 10m, 1h30m; max 7d).",
+                    args[1]
+                );
+                std::process::exit(1);
+            };
+            let (config, pool) = open_database().await?;
+            let monitors: Vec<&str> = if ids == "all" || ids == "*" {
+                vec!["*"]
+            } else {
+                let ids: Vec<&str> = ids.split(',').map(str::trim).collect();
+                // Fail on a typo'd id rather than silencing nothing.
+                for id in &ids {
+                    if !config.monitors.iter().any(|monitor| monitor.id == *id) {
+                        eprintln!("Unknown monitor {id:?}. Configured ids:");
+                        for monitor in &config.monitors {
+                            eprintln!("  {}", monitor.id);
+                        }
+                        std::process::exit(1);
+                    }
+                }
+                ids
+            };
+            let reason = (args.len() > 2).then(|| args[2..].join(" "));
+            let until =
+                chrono::Utc::now().timestamp() + i64::try_from(duration_secs).unwrap_or(i64::MAX);
+            for id in &monitors {
+                hora_core::db::insert_silence(&pool, id, until, reason.as_deref()).await?;
+            }
+            let target = if monitors == ["*"] {
+                "all monitors".to_owned()
+            } else {
+                monitors.join(", ")
+            };
+            println!("Silenced {target} until {}.", format_epoch(until));
+        }
+        _ => {
+            eprintln!("Usage: hora silence <ids|all> <duration> [reason]");
+            eprintln!("       hora silence list");
+            eprintln!("       hora silence clear");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+fn format_epoch(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0).map_or_else(
+        || timestamp.to_string(),
+        |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    )
+}
+
+fn format_secs(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    }
 }
 
 /// Run the monitor: load config, open the database, start the supervisor and

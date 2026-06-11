@@ -29,6 +29,7 @@ pub(crate) struct IncidentRow {
     error: Option<String>,
     cause: Option<String>,
     impacted: Option<String>,
+    note: Option<String>,
 }
 
 /// Build the view rows: ids resolved to display names (falling back to the id
@@ -56,6 +57,7 @@ pub(crate) fn incident_rows(
                 .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
                 .filter(|impacted| !impacted.is_empty())
                 .map(|impacted| impacted.join(", ")),
+            note: incident.note.clone(),
         })
         .collect()
 }
@@ -141,6 +143,13 @@ pub(crate) fn render_atom(
                 format_duration(duration_s)
             );
         }
+        if let Some(note) = &incident.note {
+            let _ = write!(
+                content,
+                "<p><strong>Note:</strong> {}</p>",
+                xml_escape(note)
+            );
+        }
 
         let _ = writeln!(out, "    <content type=\"html\">{content}</content>");
         let _ = writeln!(out, "  </entry>");
@@ -213,6 +222,7 @@ mod tests {
             cause: None,
             impacted: Some(r#"["API","Web"]"#.to_owned()),
             error: Some("boom".to_owned()),
+            note: Some("fiber cut".to_owned()),
             created_at: 1000,
         };
         let names = HashMap::from([("db".to_owned(), "Database".to_owned())]);
@@ -222,6 +232,7 @@ mod tests {
         assert!(rows[0].resolved);
         assert_eq!(rows[0].duration.as_deref(), Some("1m 30s"));
         assert_eq!(rows[0].impacted.as_deref(), Some("API, Web"));
+        assert_eq!(rows[0].note.as_deref(), Some("fiber cut"));
 
         // Unknown id (monitor removed from config): fall back to the id.
         let orphan = Incident {
@@ -233,6 +244,7 @@ mod tests {
             cause: None,
             impacted: None,
             error: None,
+            note: None,
             created_at: 1000,
         };
         let rows = incident_rows(&[orphan], &HashMap::new());

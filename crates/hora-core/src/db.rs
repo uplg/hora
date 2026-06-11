@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use sqlx::SqlitePool;
+// Re-exported so the CLI can hold a pool without depending on sqlx directly.
+pub use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tokio::sync::watch;
 
@@ -601,6 +602,8 @@ pub struct Incident {
     pub cause: Option<String>,
     pub impacted: Option<String>,
     pub error: Option<String>,
+    /// Operator-written annotation ("fiber cut"), set via `hora annotate`.
+    pub note: Option<String>,
     pub created_at: i64,
 }
 
@@ -670,13 +673,180 @@ pub async fn find_open_incident(pool: &SqlitePool, monitor_id: &str) -> sqlx::Re
 ///
 /// Returns an error if the query fails.
 pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<Incident>> {
+    // The id tie-break keeps the order deterministic when incidents share a
+    // start second (a cascade), and matches what [`latest_incident_id`] calls
+    // "last" - so `hora annotate last` annotates the incident listed first.
     sqlx::query_as::<_, Incident>(
-        "SELECT id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, created_at \
-         FROM incidents ORDER BY started_at DESC LIMIT ?",
+        "SELECT id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, note, \
+            created_at \
+         FROM incidents ORDER BY started_at DESC, id DESC LIMIT ?",
     )
     .bind(limit)
     .fetch_all(pool)
     .await
+}
+
+/// Set (or, with an empty string, clear) the operator note on an incident.
+/// Returns whether the incident exists.
+///
+/// # Errors
+///
+/// Returns an error if the update fails.
+pub async fn set_incident_note(pool: &SqlitePool, id: i64, note: &str) -> sqlx::Result<bool> {
+    let note = (!note.is_empty()).then_some(note);
+    let result = sqlx::query("UPDATE incidents SET note = ? WHERE id = ?")
+        .bind(note)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The id of the most recently started incident, if any (`hora annotate last`).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn latest_incident_id(pool: &SqlitePool) -> sqlx::Result<Option<i64>> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM incidents ORDER BY started_at DESC, id DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// An ad-hoc alert silence, created via `hora silence` or `POST /api/silence`.
+#[derive(Debug, sqlx::FromRow)]
+pub struct Silence {
+    pub id: i64,
+    /// A monitor id, or `*` for every monitor.
+    pub monitor_id: String,
+    pub until: i64,
+    pub reason: Option<String>,
+    pub created_at: i64,
+}
+
+/// Record an ad-hoc silence: alerts for `monitor_id` (or `*` for all) are
+/// muted until `until`.
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn insert_silence(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    until: i64,
+    reason: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query("INSERT INTO silences (monitor_id, until, reason, created_at) VALUES (?, ?, ?, ?)")
+        .bind(monitor_id)
+        .bind(until)
+        .bind(reason)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Whether an active silence (its own or the `*` wildcard) covers `monitor_id`
+/// at `now`.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn is_silenced(pool: &SqlitePool, monitor_id: &str, now: i64) -> sqlx::Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM silences \
+         WHERE (monitor_id = ?1 OR monitor_id = '*') AND until > ?2)",
+    )
+    .bind(monitor_id)
+    .bind(now)
+    .fetch_one(pool)
+    .await
+}
+
+/// All silences still active at `now`, soonest to expire first.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn active_silences(pool: &SqlitePool, now: i64) -> sqlx::Result<Vec<Silence>> {
+    sqlx::query_as::<_, Silence>(
+        "SELECT id, monitor_id, until, reason, created_at FROM silences \
+         WHERE until > ? ORDER BY until ASC",
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await
+}
+
+/// Delete every silence (active or expired), returning how many were active.
+///
+/// # Errors
+///
+/// Returns an error if the deletion fails.
+pub async fn clear_silences(pool: &SqlitePool, now: i64) -> sqlx::Result<u64> {
+    let active = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM silences WHERE until > ?")
+        .bind(now)
+        .fetch_one(pool)
+        .await?;
+    sqlx::query("DELETE FROM silences").execute(pool).await?;
+    Ok(u64::try_from(active).unwrap_or(0))
+}
+
+/// Drop silences that have expired before `cutoff`.
+async fn prune_silences(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM silences WHERE until < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Copy the database into `dest` with `VACUUM INTO`: a consistent, compacted
+/// snapshot taken through `SQLite` itself, safe while the daemon is writing
+/// (a WAL reader does not block the writer). The source is opened read-only,
+/// so a backup never creates or migrates a database.
+///
+/// # Errors
+///
+/// Returns an error if `dest` already exists, the source cannot be opened, or
+/// the copy fails.
+pub async fn backup_into(database_path: &str, dest: &str) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    // VACUUM INTO requires a fresh file; checking first gives a clearer error
+    // than SQLite's "output file already exists".
+    anyhow::ensure!(
+        !std::path::Path::new(dest).exists(),
+        "destination {dest} already exists; refusing to overwrite a backup"
+    );
+    let options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .read_only(true)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .with_context(|| format!("opening {database_path} read-only"))?;
+    sqlx::query("VACUUM INTO ?")
+        .bind(dest)
+        .execute(&pool)
+        .await
+        .with_context(|| format!("copying into {dest}"))?;
+    pool.close().await;
+
+    // The live database is created 0600 (it holds failure snippets and incident
+    // detail); the snapshot deserves the same, but SQLite creates it at the
+    // process umask - tighten it after the fact.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {dest}"))?;
+    }
+    Ok(())
 }
 
 /// Aggregate raw checks into hourly buckets for long-term storage.
@@ -849,6 +1019,10 @@ async fn roll_up_history(pool: &SqlitePool, now: i64) {
     // (they are still being displayed, and close on the next healthy tick).
     if let Err(err) = prune_incidents(pool, yearly_cutoff).await {
         tracing::warn!("incident prune failed: {err}");
+    }
+    // Expired silences are dead weight the moment they lapse.
+    if let Err(err) = prune_silences(pool, now).await {
+        tracing::warn!("silence prune failed: {err}");
     }
 }
 
@@ -1273,5 +1447,92 @@ mod tests {
         let incidents = recent_incidents(&pool, 10).await.unwrap();
         assert_eq!(incidents.len(), 1);
         assert_eq!(incidents[0].id, open);
+    }
+
+    #[tokio::test]
+    async fn incident_notes_set_clear_and_resolve_last() {
+        let pool = memory_pool().await;
+        let first = insert_incident_start(&pool, "m", None, None, &[])
+            .await
+            .unwrap();
+        let second = insert_incident_start(&pool, "m", None, None, &[])
+            .await
+            .unwrap();
+
+        // `last` resolves to the most recently started incident.
+        assert_eq!(latest_incident_id(&pool).await.unwrap(), Some(second));
+
+        assert!(set_incident_note(&pool, first, "fiber cut").await.unwrap());
+        let incidents = recent_incidents(&pool, 10).await.unwrap();
+        let annotated = incidents.iter().find(|i| i.id == first).unwrap();
+        assert_eq!(annotated.note.as_deref(), Some("fiber cut"));
+
+        // An empty note clears; an unknown id reports "not found".
+        assert!(set_incident_note(&pool, first, "").await.unwrap());
+        let incidents = recent_incidents(&pool, 10).await.unwrap();
+        assert_eq!(incidents.iter().find(|i| i.id == first).unwrap().note, None);
+        assert!(!set_incident_note(&pool, 999, "nope").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn silences_cover_wildcard_expire_and_clear() {
+        let pool = memory_pool().await;
+        let now = 1000;
+
+        insert_silence(&pool, "api", now + 600, Some("deploying"))
+            .await
+            .unwrap();
+        assert!(is_silenced(&pool, "api", now).await.unwrap());
+        assert!(!is_silenced(&pool, "web", now).await.unwrap());
+        // Expiry is a hard edge: at `until` the silence is over.
+        assert!(!is_silenced(&pool, "api", now + 600).await.unwrap());
+
+        // The wildcard covers every monitor.
+        insert_silence(&pool, "*", now + 300, None).await.unwrap();
+        assert!(is_silenced(&pool, "web", now).await.unwrap());
+
+        let active = active_silences(&pool, now).await.unwrap();
+        assert_eq!(active.len(), 2);
+        // Soonest to expire first.
+        assert_eq!(active[0].monitor_id, "*");
+        assert_eq!(active[1].reason.as_deref(), Some("deploying"));
+
+        // The expired row is swept by the pruner; the active ones survive.
+        prune_silences(&pool, now + 450).await.unwrap();
+        assert_eq!(active_silences(&pool, 0).await.unwrap().len(), 1);
+
+        assert_eq!(clear_silences(&pool, now).await.unwrap(), 1);
+        assert!(!is_silenced(&pool, "api", now).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn backup_into_snapshots_and_refuses_overwrite() {
+        let dir = std::env::temp_dir();
+        let src = dir.join(format!("hora-test-backup-src-{}.db", std::process::id()));
+        let dest = dir.join(format!("hora-test-backup-dest-{}.db", std::process::id()));
+        for path in [&src, &dest] {
+            let _ = std::fs::remove_file(path);
+        }
+        let src_s = src.to_str().unwrap();
+        let dest_s = dest.to_str().unwrap();
+
+        let pool = connect(src_s).await.unwrap();
+        insert(&pool, "m", 100, 1, Some(10)).await;
+        backup_into(src_s, dest_s).await.unwrap();
+
+        // The snapshot is a self-sufficient database with the data.
+        let copy = connect(dest_s).await.unwrap();
+        assert_eq!(recent_checks(&copy, "m", 10).await.unwrap().len(), 1);
+        copy.close().await;
+
+        // An existing destination is never overwritten.
+        let err = backup_into(src_s, dest_s).await.unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+
+        pool.close().await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{src_s}{suffix}"));
+            let _ = std::fs::remove_file(format!("{dest_s}{suffix}"));
+        }
     }
 }

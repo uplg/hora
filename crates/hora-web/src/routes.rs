@@ -16,7 +16,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
     favicon, font, healthz, history_atom, history_page, latency_json, metrics_prometheus, openapi,
-    page, push, status_badge, summary_json, uptime_badge,
+    page, push, silence, status_badge, summary_json, uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -29,7 +29,8 @@ pub fn router(state: AppState) -> Router {
     let mut api = Router::new()
         .route("/api/summary", get(summary_json))
         .route("/api/monitors/{id}/latency", get(latency_json))
-        .route("/api/push/{id}", post(push));
+        .route("/api/push/{id}", post(push))
+        .route("/api/silence", post(silence));
 
     // Parameters are clamped to >= 1, so `finish` always succeeds; if it ever
     // did not, the API simply runs without a rate limit rather than panicking.
@@ -181,6 +182,10 @@ mod tests {
     use tokio::sync::watch;
     use tower::ServiceExt as _;
     async fn test_app() -> Router {
+        test_app_with_pool().await.0
+    }
+
+    async fn test_app_with_pool() -> (Router, sqlx::SqlitePool) {
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(":memory:")
             .create_if_missing(true);
@@ -194,6 +199,7 @@ mod tests {
             r#"
             [page]
             [server]
+            auth_token = "0123456789abcdef"
             [health]
             id = "test-node"
             [[peers]]
@@ -216,7 +222,8 @@ mod tests {
         )
         .expect("config");
         let (_tx, rx) = watch::channel(Arc::new(config));
-        router(AppState::new(pool, rx, Arc::new(AtomicU64::new(0))))
+        let app = router(AppState::new(pool.clone(), rx, Arc::new(AtomicU64::new(0))));
+        (app, pool)
     }
 
     /// The rate limiter keys on the peer address; oneshot has no real
@@ -297,6 +304,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn silence_requires_the_viewer_token() {
+        let res = test_app()
+            .await
+            .oneshot(push("/api/silence?monitors=web&duration=10m"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn silence_mutes_the_monitor_in_the_database() {
+        let (app, pool) = test_app_with_pool().await;
+        let res = app
+            .oneshot(push(
+                "/api/silence?monitors=web&duration=10m&reason=deploy&token=0123456789abcdef",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let now = chrono::Utc::now().timestamp();
+        assert!(hora_core::db::is_silenced(&pool, "web", now).await.unwrap());
+        assert!(
+            !hora_core::db::is_silenced(&pool, "beat", now)
+                .await
+                .unwrap()
+        );
+        // Within the requested window, never past it.
+        assert!(
+            !hora_core::db::is_silenced(&pool, "web", now + 601)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn silence_all_uses_the_wildcard() {
+        let (app, pool) = test_app_with_pool().await;
+        let res = app
+            .oneshot(push(
+                "/api/silence?monitors=all&duration=5m&token=0123456789abcdef",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let now = chrono::Utc::now().timestamp();
+        assert!(
+            hora_core::db::is_silenced(&pool, "beat", now)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn silence_rejects_unknown_monitor_and_bad_duration() {
+        let res = test_app()
+            .await
+            .oneshot(push(
+                "/api/silence?monitors=nope&duration=10m&token=0123456789abcdef",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let res = test_app()
+            .await
+            .oneshot(push(
+                "/api/silence?monitors=web&duration=tomorrow&token=0123456789abcdef",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

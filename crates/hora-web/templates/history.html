@@ -143,6 +143,11 @@
       color: var(--down);
     }
 
+    /* Operator notes are the human story of the incident: full text color. */
+    .incident-body.note {
+      color: var(--text);
+    }
+
     .empty-state {
       color: var(--muted);
       text-align: center;
@@ -194,6 +199,7 @@
         {% if let Some(cause) = incident.cause %}<p class="incident-body cause">caused by {{ cause }}</p>{% endif %}
         {% if let Some(impacted) = incident.impacted %}<p class="incident-body impacted">impacts: {{ impacted }}</p>{%
         endif %}
+        {% if let Some(note) = incident.note %}<p class="incident-body note">{{ note }}</p>{% endif %}
       </div>
       {% endfor %}
     </div>

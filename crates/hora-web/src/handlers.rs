@@ -42,7 +42,15 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         title = "Hora API",
         description = "Read-only JSON API of a Hora uptime monitor."
     ),
-    paths(summary_json, latency_json, push, status_badge, uptime_badge, healthz),
+    paths(
+        summary_json,
+        latency_json,
+        push,
+        silence,
+        status_badge,
+        uptime_badge,
+        healthz
+    ),
     components(schemas(
         Summary,
         MonitorView,
@@ -51,7 +59,8 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         DayCell,
         Point,
         HealthReport,
-        PeerSeen
+        PeerSeen,
+        SilenceResponse
     ))
 )]
 struct ApiDoc;
@@ -243,6 +252,8 @@ async fn visible_incidents(
             .map(|monitor| monitor.id.as_str())
             .collect();
         incidents.retain(|incident| visible.contains(incident.monitor_id.as_str()));
+        // Operator notes (`hora annotate`) deliberately survive sanitization:
+        // they are written *for* visitors, unlike the captured failure detail.
         for incident in &mut incidents {
             if !detailed.contains(incident.monitor_id.as_str()) {
                 incident.error = incident
@@ -455,6 +466,102 @@ pub(crate) async fn push(
         .map(|msg| msg.chars().take(MAX_PUSH_MSG_CHARS).collect::<String>());
     db::insert_push(&state.pool, &id, status, query.ping, msg.as_deref()).await?;
     Ok("ok")
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SilenceQuery {
+    /// Comma-separated monitor ids, or `all` (stored as the `*` wildcard).
+    monitors: String,
+    /// How long to mute, e.g. `10m`, `1h30m`. Capped at 7 days.
+    duration: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct SilenceResponse {
+    /// The silenced monitor ids (`["*"]` for all).
+    monitors: Vec<String>,
+    /// When the silence expires (unix epoch seconds, UTC).
+    until: i64,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/silence",
+    params(
+        ("monitors" = String, Query, description = "Comma-separated monitor ids, or `all`"),
+        ("duration" = String, Query, description = "How long to mute (e.g. 10m, 1h30m; max 7d)"),
+        ("reason" = Option<String>, Query, description = "Optional note recorded with the silence"),
+        ("token" = Option<String>, Query, description = "Viewer token (or Authorization: Bearer)")
+    ),
+    responses(
+        (status = 200, description = "Alerts muted until the returned time", body = SilenceResponse),
+        (status = 400, description = "Unparseable duration or empty monitor list"),
+        (status = 401, description = "Missing or wrong token, or no auth_token configured"),
+        (status = 404, description = "Unknown monitor id")
+    )
+)]
+pub(crate) async fn silence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SilenceQuery>,
+) -> Result<Json<SilenceResponse>, AppError> {
+    let config = state.config.borrow().clone();
+    // Muting alerts is an operator action: it strictly requires the configured
+    // viewer token. Without one the endpoint is closed (unlike the read-only
+    // views, where "no token" just means "everything is public").
+    if config.server.auth_token.is_none()
+        || !is_authenticated(&headers, query.token.as_deref(), &config)
+    {
+        return Err(AppError::Unauthorized(
+            "silencing requires server.auth_token and a matching token",
+        ));
+    }
+
+    let duration_secs = hora_core::parse_duration(&query.duration)
+        .filter(|secs| *secs <= hora_core::MAX_SILENCE_SECS)
+        .ok_or(AppError::BadRequest(
+            "invalid duration (use e.g. 10m, 1h30m; max 7d)",
+        ))?;
+
+    let monitors: Vec<String> = if query.monitors.trim() == "all" || query.monitors.trim() == "*" {
+        vec!["*".to_owned()]
+    } else {
+        let ids: Vec<String> = query
+            .monitors
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if ids.is_empty() {
+            return Err(AppError::BadRequest("no monitor ids given"));
+        }
+        // Validate every id so a typo'd deploy hook fails loudly instead of
+        // silencing nothing.
+        if ids
+            .iter()
+            .any(|id| !config.monitors.iter().any(|monitor| monitor.id == *id))
+        {
+            return Err(AppError::NotFound("unknown monitor id"));
+        }
+        ids
+    };
+
+    let until = Utc::now().timestamp() + i64::try_from(duration_secs).unwrap_or(i64::MAX);
+    // Bound the stored reason like push messages, so a buggy hook can't bloat the DB.
+    let reason = query
+        .reason
+        .as_deref()
+        .map(|reason| reason.chars().take(MAX_PUSH_MSG_CHARS).collect::<String>());
+    for id in &monitors {
+        db::insert_silence(&state.pool, id, until, reason.as_deref()).await?;
+    }
+    tracing::info!(monitors = ?monitors, until, "alerts silenced via API");
+    Ok(Json(SilenceResponse { monitors, until }))
 }
 
 #[utoipa::path(

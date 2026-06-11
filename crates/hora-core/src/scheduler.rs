@@ -126,6 +126,9 @@ async fn run(
         }
 
         let (muted, threshold, alert_on_degraded) = alert_settings(&config, &monitor.id);
+        // Ad-hoc silences (`hora silence`, POST /api/silence) mute exactly like
+        // a maintenance window, read fresh each tick so they apply immediately.
+        let muted = muted || silenced(&pool, &monitor.id).await;
         // An incident is bound to confirmed-down alerts; any up tick (healthy
         // or merely degraded) ends it, whatever the alert state machine does -
         // including an incident inherited from a previous run, and even during
@@ -260,6 +263,18 @@ fn alert_settings(config: &watch::Receiver<Arc<Config>>, monitor_id: &str) -> (b
         snapshot.alerts.fail_threshold.max(1),
         snapshot.alerts.alert_on_degraded,
     )
+}
+
+/// Whether an ad-hoc silence covers this monitor right now. A read error fails
+/// open (logged, not silenced): a database hiccup must never mute an alert.
+async fn silenced(pool: &SqlitePool, monitor_id: &str) -> bool {
+    match db::is_silenced(pool, monitor_id, chrono::Utc::now().timestamp()).await {
+        Ok(silenced) => silenced,
+        Err(err) => {
+            error!(monitor = %monitor_id, "failed to read silences: {err:#}");
+            false
+        }
+    }
 }
 
 /// Close the open incident, if any. Failures are logged, never fatal.

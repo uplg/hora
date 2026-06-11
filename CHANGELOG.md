@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Ad-hoc silences** (`hora silence`, `POST /api/silence`): mute alerts for
+  some monitors (comma-separated ids, or `all`) for a duration like `10m` or
+  `1h30m` (max 7 days, with an optional reason) - the scriptable counterpart
+  of a `[[maintenance]]` window, made for deploy hooks. Checks keep being
+  recorded; only alert transitions are muted, and a database read error fails
+  open (alerts still fire). The HTTP endpoint strictly requires
+  `server.auth_token`; the CLI writes straight into the database and also
+  offers `hora silence list` / `hora silence clear`. Expired silences are
+  swept by the pruner.
+- **Incident annotations** (`hora annotate <id|last> "<note>"`): attach a
+  free-form operator note to an incident ("fiber cut, ETA 6pm"), displayed on
+  `/history` and in the Atom feed. Notes are written *for* visitors, so they
+  deliberately survive the anonymous-viewer sanitization that collapses
+  captured failure detail. An empty note clears the annotation, `last` targets
+  the most recent incident, and the new `hora incidents [limit]` lists recent
+  incidents with their ids.
+- **`hora backup <dest>`**: snapshot the database with SQLite's `VACUUM INTO` -
+  consistent and compacted, safe while the daemon is writing. The source is
+  opened read-only (a backup never creates or migrates a database), an
+  existing destination is refused, and the snapshot is chmod'ed 0600 like the
+  live database.
+
 ## [0.4.2] - 2026-06-10
 
 ### Added
