@@ -65,6 +65,9 @@ impl NtfyNotifier {
                 "globe_with_meridians",
                 3,
             ),
+            Event::Digest { period, summary } => {
+                (format!("DIGEST ({period}):\n{summary}"), "bar_chart", 2)
+            }
             Event::PeerLinkDegraded { peer, witness } => (
                 format!("PEER: {peer} unreachable, but {witness} sees it up (partition)"),
                 "warning",

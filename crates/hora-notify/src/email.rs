@@ -120,6 +120,10 @@ impl EmailNotifier {
                     format!("The registered {when} (monitor {monitor}, via RDAP)."),
                 )
             }
+            Event::Digest { period, summary } => (
+                format!("[DIGEST] Hora digest ({period})"),
+                summary.to_owned(),
+            ),
             Event::PeerLinkDegraded { peer, witness } => (
                 format!("[LINK] {peer} link degraded"),
                 format!(

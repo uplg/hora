@@ -62,6 +62,7 @@ impl PushoverNotifier {
                 ),
                 0,
             ),
+            Event::Digest { period, summary } => (format!("DIGEST ({period}):\n{summary}"), -1),
             Event::PeerLinkDegraded { peer, witness } => (
                 format!("PEER: {peer} unreachable, but {witness} sees it up (partition)"),
                 0,

@@ -128,6 +128,15 @@ default_retention_days = 90
 # recovery stays silent too. 0 = every monitor alerts independently.
 # group_window_secs = 30
 
+# --- Weekly digest ----------------------------------------------------------
+# A recap of the last 7 days through the notification channels: "99.97%
+# overall, 2 incidents" plus one line per monitor (uptime, incidents, error
+# budget when an SLO is set). Informational only - it never alerts. Preview
+# the exact text anytime with `hora digest`.
+# [digest]
+# schedule = "0 8 * * 1"   # five-field cron, UTC (default: Monday 08:00)
+# notify = ["ops-telegram"]  # optional; default: every configured channel
+
 # --- Scheduled maintenance ------------------------------------------------
 # Alerts are muted for the affected monitors during the window (checks still
 # recorded; the card shows a "maintenance" badge). `monitors` empty = all.

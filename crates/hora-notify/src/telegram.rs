@@ -65,6 +65,11 @@ impl TelegramNotifier {
                 escape(monitor),
                 escape(&domain_expiry_phrase(domain, days_left)),
             ),
+            Event::Digest { period, summary } => format!(
+                "\u{1F4CA} <b>Hora digest</b> ({})\n{}",
+                escape(period),
+                escape(summary)
+            ),
             Event::PeerLinkDegraded { peer, witness } => format!(
                 "\u{1F7E1} <b>{}</b> link degraded\nunreachable from here, but seen up by {}",
                 escape(peer),

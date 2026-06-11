@@ -76,6 +76,9 @@ impl MatrixNotifier {
                 "\u{1F310} {monitor} {}",
                 domain_expiry_phrase(domain, days_left)
             ),
+            Event::Digest { period, summary } => {
+                format!("\u{1F4CA} Hora digest ({period})\n{summary}")
+            }
             Event::PeerLinkDegraded { peer, witness } => {
                 format!(
                     "\u{1F7E1} {peer} link degraded: unreachable from here, but seen up by {witness}"

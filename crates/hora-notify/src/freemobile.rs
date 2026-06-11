@@ -61,6 +61,7 @@ impl FreeMobileNotifier {
                 "DOMAIN: {monitor} {}",
                 domain_expiry_phrase(domain, days_left)
             ),
+            Event::Digest { period, summary } => format!("DIGEST {period}: {summary}"),
             Event::PeerLinkDegraded { peer, witness } => {
                 format!("LINK: {peer} unreachable here, seen up by {witness}")
             }

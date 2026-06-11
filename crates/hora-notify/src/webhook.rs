@@ -57,6 +57,11 @@ impl WebhookNotifier {
                 days_left: Some(days_left),
                 ..Payload::new("domain_expiring", monitor)
             },
+            Event::Digest { period, summary } => Payload {
+                message: Some(summary),
+                period: Some(period),
+                ..Payload::new("digest", "*")
+            },
             Event::PeerLinkDegraded { peer, witness } => Payload {
                 witness: Some(witness),
                 ..Payload::new("peer_link_degraded", peer)
@@ -100,6 +105,9 @@ struct Payload<'a> {
     /// The registered domain, on domain-expiry events.
     #[serde(skip_serializing_if = "Option::is_none")]
     domain: Option<&'a str>,
+    /// The covered period, on digest events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    period: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     days_left: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,6 +136,7 @@ impl<'a> Payload<'a> {
             impacted: None,
             witness: None,
             domain: None,
+            period: None,
             days_left: None,
             latency_ms: None,
             old_fingerprint: None,

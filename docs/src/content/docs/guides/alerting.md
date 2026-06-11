@@ -120,6 +120,29 @@ transitions are muted, picked up on the next tick. The HTTP endpoint
 so a typo'd hook fails loudly instead of silencing nothing. Expired silences
 are swept automatically.
 
+## Weekly digest
+
+The one notification that never signals a problem - a recap of the last
+seven days, sent on a cron schedule through your channels:
+
+```toml
+[digest]
+schedule = "0 8 * * 1"     # five-field cron, UTC (default: Monday 08:00)
+notify = ["ops-telegram"]  # optional; default: every configured channel
+```
+
+```
+99.97% overall, 2 incidents
+- API: 99.99%, 1 incident, budget 41m of 43m left (30d)
+- Web: 100.00%
+```
+
+One line per monitor: uptime, incidents in the window, and the error budget
+left when an [SLO](../slo/) is configured. The last-sent timestamp persists
+in the database, so a restart neither double-sends nor forgets - and a send
+missed while the daemon was down catches up once. Preview the exact text
+anytime with `hora digest` (a dry run; it notifies no one).
+
 ## Announcements
 
 Manual banners on the status page, independent of any monitor:

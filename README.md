@@ -53,6 +53,9 @@ Full guides for everything below live in the
   routing, delivery retries.
 - **Maintenance windows** and **ad-hoc silences** (`hora silence api,web 10m` or
   `POST /api/silence` from a deploy hook).
+- **Weekly digest** (`[digest]`) - "99.97% overall, 2 incidents, budget 18m of
+  43m left", per monitor, on a cron schedule through your channels. The one
+  notification that never signals a problem.
 
 **Status page, API & history**
 
@@ -129,6 +132,7 @@ hora test-alert website                # ... through the channels routed for mon
 hora silence api,web 10m "deploying"   # mute alerts ad hoc (checks keep recording)
 hora silence list                      # show the active silences
 hora silence clear                     # remove every silence
+hora digest                            # print the weekly digest (dry run of [digest])
 hora incidents                         # list recent incidents with their ids
 hora annotate last "fiber cut"         # attach a note to an incident (shown on /history)
 hora backup /mnt/nas/hora-backup.db    # consistent snapshot of the database (VACUUM INTO)

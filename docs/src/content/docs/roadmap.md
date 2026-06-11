@@ -18,9 +18,6 @@ records what actually shipped.
   distributed Pingdom. The peer auth and quorum infrastructure already
   exist; peers will only probe targets present in their own config, never
   arbitrary requested ones.
-- **Weekly digest** - a per-channel recap: *"this week: 99.97%, 2 incidents,
-  budget left 18m of 43m"*. All the data already exists, and a digest has
-  zero false-positive risk.
 
 ## Exploring
 

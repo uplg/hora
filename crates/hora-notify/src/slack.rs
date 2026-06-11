@@ -63,6 +63,11 @@ impl SlackNotifier {
                 escape(monitor),
                 escape(&domain_expiry_phrase(domain, days_left))
             ),
+            Event::Digest { period, summary } => format!(
+                ":bar_chart: *Hora digest* ({})\n{}",
+                escape(period),
+                escape(summary)
+            ),
             Event::PeerLinkDegraded { peer, witness } => format!(
                 ":large_yellow_circle: *{}* link degraded\nunreachable from here, but seen up by {}",
                 escape(peer),

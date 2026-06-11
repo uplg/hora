@@ -804,6 +804,35 @@ pub async fn latest_incident_id(pool: &SqlitePool) -> sqlx::Result<Option<i64>> 
     .await
 }
 
+/// Read a value from the `meta` key-value store.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn meta_get(pool: &SqlitePool, key: &str) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM meta WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Write (or overwrite) a value in the `meta` key-value store.
+///
+/// # Errors
+///
+/// Returns an error if the upsert fails.
+pub async fn meta_set(pool: &SqlitePool, key: &str, value: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO meta (key, value) VALUES (?, ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// An ad-hoc alert silence, created via `hora silence` or `POST /api/silence`.
 #[derive(Debug, sqlx::FromRow)]
 pub struct Silence {

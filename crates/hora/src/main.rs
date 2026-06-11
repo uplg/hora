@@ -87,6 +87,9 @@ async fn run_subcommand() -> anyhow::Result<bool> {
             "silence" => {
                 silence(&args[2..]).await?;
             }
+            "digest" => {
+                digest_preview().await?;
+            }
             "--version" | "-V" => println!("hora {}", env!("CARGO_PKG_VERSION")),
             "--help" | "-h" => print_help(),
             _ => {
@@ -188,6 +191,7 @@ fn print_help() {
     println!("                      or 'all') for a duration like 10m or 1h30m (max 7d)");
     println!("  silence list        Show the active silences");
     println!("  silence clear       Remove every silence");
+    println!("  digest              Print the weekly digest (a dry run of [digest])");
     println!("  incidents [limit]   List recent incidents with their ids");
     println!("  annotate <id> <note>  Attach a note to an incident ('last' targets the");
     println!("                      most recent one; an empty note clears it)");
@@ -226,6 +230,17 @@ async fn backup(dest: &str) -> anyhow::Result<()> {
     hora_core::db::backup_into(source, dest).await?;
     let size = std::fs::metadata(dest).map_or(0, |meta| meta.len());
     println!("Backed up {source} to {dest} ({} KiB).", size / 1024);
+    Ok(())
+}
+
+/// Print the digest exactly as the `[digest]` task would send it - a dry run
+/// to check the wording (and the data) without notifying anyone.
+async fn digest_preview() -> anyhow::Result<()> {
+    let (config, pool) = open_database().await?;
+    let now = chrono::Utc::now().timestamp();
+    let (period, summary) = hora_core::digest::build_summary(&pool, &config, now).await?;
+    println!("Hora digest ({period})");
+    println!("{summary}");
     Ok(())
 }
 
@@ -454,6 +469,13 @@ async fn serve() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
 
+    let digest_task = hora_core::digest::spawn(
+        pool.clone(),
+        handle.config.clone(),
+        handle.notifier.clone(),
+        shutdown_rx.clone(),
+    );
+
     let prune_task = hora_core::db::spawn_pruner(&pool, handle.config.clone(), shutdown_rx);
 
     let bind = handle.config.borrow().server.bind.clone();
@@ -478,7 +500,13 @@ async fn serve() -> anyhow::Result<()> {
     // for them to finish their current iteration before the runtime drops.
     let _ = shutdown_tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
-        let _ = tokio::join!(handle.task, cert_task, prune_task, heartbeat_task);
+        let _ = tokio::join!(
+            handle.task,
+            cert_task,
+            prune_task,
+            heartbeat_task,
+            digest_task
+        );
     })
     .await;
     Ok(())

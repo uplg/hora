@@ -80,6 +80,11 @@ impl DiscordNotifier {
                 description: None,
                 color: COLOR_CERT,
             },
+            Event::Digest { period, summary } => Embed {
+                title: format!("\u{1F4CA} Hora digest ({period})"),
+                description: Some(summary.to_owned()),
+                color: COLOR_UP,
+            },
             Event::PeerLinkDegraded { peer, witness } => Embed {
                 title: format!("\u{1F7E1} {peer} link degraded"),
                 description: Some(format!(

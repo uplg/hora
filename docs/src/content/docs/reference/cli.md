@@ -17,6 +17,7 @@ hora test-alert [monitor-id]           # send a test alert through the real chai
 hora silence <ids|all> <duration> [reason]
 hora silence list
 hora silence clear
+hora digest                            # print the weekly digest (dry run)
 hora incidents [limit]                 # list recent incidents with their ids
 hora annotate <id|last> "<note>"       # attach a note to an incident
 hora backup <dest.db>                  # consistent snapshot (VACUUM INTO)
@@ -56,6 +57,12 @@ recorded; only alert transitions are muted, picked up by the daemon on its
 next tick. Unknown ids are rejected with the configured list. The same action
 exists over HTTP as
 [`POST /api/silence`](../api/#post-apisilence) for CI pipelines.
+
+## `hora digest`
+
+Prints the weekly digest exactly as the `[digest]` task would send it - a
+dry run to check the wording (and the data) without notifying anyone. See
+[Weekly digest](../../guides/alerting/#weekly-digest).
 
 ## `hora incidents`
 

@@ -72,6 +72,10 @@ pub enum Event<'a> {
         old_fingerprint: &'a str,
         new_fingerprint: &'a str,
     },
+    /// The periodic digest: a pre-rendered recap of the last period (uptime,
+    /// incidents, error budgets), built by the daemon. Informational - the
+    /// one event that never signals a problem.
+    Digest { period: &'a str, summary: &'a str },
     /// A monitor is burning its availability error budget abnormally fast
     /// (Google-SRE burn-rate alerting). Fires while the monitor may still be
     /// "up" between blips - which is exactly the point.

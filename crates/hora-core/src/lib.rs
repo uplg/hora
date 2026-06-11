@@ -4,6 +4,7 @@ pub mod cert;
 pub mod coalesce;
 pub mod config;
 pub mod db;
+pub mod digest;
 pub mod http;
 pub mod import;
 pub mod notifications;

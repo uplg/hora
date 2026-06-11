@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Weekly digest** (`[digest]`): a recap of the last seven days through the
+  notification channels - "99.97% overall, 2 incidents" plus one line per
+  monitor with uptime, incidents and the error budget left when an SLO is
+  set. Sent on a cron schedule (default Monday 08:00 UTC), optionally routed
+  to specific channels with `notify`; the last-sent timestamp persists in the
+  database, so a restart neither double-sends nor forgets, and a send missed
+  while the daemon was down catches up once. Informational by construction -
+  the one notification that never signals a problem. `hora digest` prints the
+  exact text as a dry run.
+
 ## [0.5.1] - 2026-06-11
 
 ### Added

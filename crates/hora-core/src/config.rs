@@ -34,6 +34,10 @@ pub struct Config {
     /// watches it for missed pings (IN); requires a [`Health`] section.
     #[serde(default)]
     pub peers: Vec<Peer>,
+    /// Periodic recap through the notification channels ("this week: 99.97%,
+    /// 2 incidents, budget 18m of 43m left"). Absent = no digest.
+    #[serde(default)]
+    pub digest: Option<Digest>,
 }
 
 impl Config {
@@ -53,6 +57,25 @@ impl Config {
     pub fn in_maintenance(&self, monitor_id: &str, now: DateTime<Utc>) -> bool {
         self.active_maintenance(monitor_id, now).is_some()
     }
+}
+
+/// The periodic digest: a recap of the last seven days per monitor (uptime,
+/// incidents, error budget), sent through the notification channels on a cron
+/// schedule. Zero false-positive risk by construction - it reports, it never
+/// alerts.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Digest {
+    /// When to send, five-field cron, UTC. Default: Monday 08:00.
+    #[serde(default = "default_digest_schedule")]
+    pub schedule: String,
+    /// Channels to send through; absent = every configured channel.
+    #[serde(default)]
+    pub notify: Option<Vec<String>>,
+}
+
+fn default_digest_schedule() -> String {
+    "0 8 * * 1".to_owned()
 }
 
 /// A scheduled maintenance window: alerts for the affected monitors are muted
@@ -1140,6 +1163,22 @@ fn validate(config: &Config) -> anyhow::Result<()> {
     crate::topology::validate_dag(&config.monitors)?;
 
     validate_peers(config, &seen, &channel_names)?;
+
+    // Digest: the cron must parse at load (not at the first missed send), and
+    // routes must name real channels, like a monitor's `notify`.
+    if let Some(digest) = &config.digest {
+        digest.schedule.parse::<croner::Cron>().map_err(|err| {
+            anyhow::anyhow!("digest: invalid schedule {:?}: {err}", digest.schedule)
+        })?;
+        if let Some(routes) = &digest.notify {
+            for route in routes {
+                anyhow::ensure!(
+                    channel_names.contains(route.as_str()),
+                    "digest: notify references unknown channel {route:?}"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2160,6 +2199,34 @@ mod tests {
         );
         let error = validate(&config).unwrap_err().to_string();
         assert!(error.contains("duplicate channel name"), "got: {error}");
+    }
+
+    #[test]
+    fn digest_validates_schedule_and_routes() {
+        let base = r#"
+            [page]
+            [server]
+            [[channels]]
+            name = "ops"
+            type = "slack"
+            webhook_url = "https://x/1"
+            [digest]
+            {digest}
+        "#;
+
+        // The default schedule is Monday 08:00 UTC; routes must exist.
+        let config = super::parse(&base.replace("{digest}", "")).expect("valid digest");
+        assert_eq!(config.digest.as_ref().unwrap().schedule, "0 8 * * 1");
+
+        let err = super::parse(&base.replace("{digest}", "schedule = \"not cron\""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid schedule"), "{err}");
+
+        let err = super::parse(&base.replace("{digest}", "notify = [\"typo\"]"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown channel"), "{err}");
     }
 
     #[test]
