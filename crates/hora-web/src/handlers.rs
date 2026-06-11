@@ -47,6 +47,8 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         latency_json,
         push,
         silence,
+        announce,
+        announce_clear,
         peer_probe,
         status_badge,
         uptime_badge,
@@ -63,6 +65,8 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         HealthReport,
         PeerSeen,
         SilenceResponse,
+        AnnounceResponse,
+        AnnounceClearResponse,
         hora_core::confirm::ProbeRequest,
         hora_core::confirm::ProbeResponse
     ))
@@ -210,6 +214,140 @@ pub(crate) async fn group_page(
         .ok_or(AppError::NotFound("unknown group"))?;
     let html = StatusTemplate { summary: &view }.render()?;
     Ok(Html(html).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AnnounceQuery {
+    /// Banner title (required, bounded).
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    /// `info` (default) | `warning` | `critical` | `resolved`.
+    #[serde(default)]
+    severity: Option<String>,
+    /// Auto-expiry as a duration (`4h`, `90m`); absent = until cleared.
+    #[serde(default)]
+    until: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AnnounceResponse {
+    pub(crate) id: i64,
+    /// When the banner auto-expires (unix epoch seconds), if bounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) until: Option<i64>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/announce",
+    params(
+        ("title" = String, Query, description = "Banner title"),
+        ("body" = Option<String>, Query, description = "Banner body"),
+        ("severity" = Option<String>, Query, description = "info (default), warning, critical or resolved"),
+        ("until" = Option<String>, Query, description = "Auto-expiry as a duration (e.g. 4h)"),
+        ("token" = Option<String>, Query, description = "Viewer token (or Authorization: Bearer)")
+    ),
+    responses(
+        (status = 200, description = "Announcement pinned to the status page", body = AnnounceResponse),
+        (status = 400, description = "Empty title, unknown severity or unparseable duration"),
+        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+    )
+)]
+pub(crate) async fn announce(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AnnounceQuery>,
+) -> Result<Json<AnnounceResponse>, AppError> {
+    let config = state.config.borrow().clone();
+    // Publishing to every visitor is an operator action: like /api/silence,
+    // the endpoint is closed without a configured viewer token.
+    if config.server.auth_token.is_none()
+        || !is_authenticated(&headers, query.token.as_deref(), &config)
+    {
+        return Err(AppError::Unauthorized(
+            "announcing requires server.auth_token and a matching token",
+        ));
+    }
+
+    let title: String = query.title.trim().chars().take(200).collect();
+    if title.is_empty() {
+        return Err(AppError::BadRequest("title must not be empty"));
+    }
+    let severity = match query.severity.as_deref() {
+        None => "info",
+        Some(value) => severity_or_400(value)?,
+    };
+    let until = match query.until.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            hora_core::parse_duration(raw)
+                .map(|secs| Utc::now().timestamp() + i64::try_from(secs).unwrap_or(i64::MAX))
+                .ok_or(AppError::BadRequest("invalid until (use e.g. 4h, 90m)"))?,
+        ),
+    };
+    let body: String = query
+        .body
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(MAX_PUSH_MSG_CHARS)
+        .collect();
+    let id = db::insert_announcement(&state.pool, &title, &body, severity, until).await?;
+    // Visitors should see the banner now, not when the summary cache rolls.
+    state.cache.invalidate();
+    tracing::info!(%title, severity, "announcement pinned via API");
+    Ok(Json(AnnounceResponse { id, until }))
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AnnounceClearResponse {
+    /// How many still-pinned announcements were removed.
+    pub(crate) cleared: u64,
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/announce",
+    params(("token" = Option<String>, Query, description = "Viewer token (or Authorization: Bearer)")),
+    responses(
+        (status = 200, description = "Every ad-hoc announcement removed", body = AnnounceClearResponse),
+        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+    )
+)]
+pub(crate) async fn announce_clear(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<Json<AnnounceClearResponse>, AppError> {
+    let config = state.config.borrow().clone();
+    if config.server.auth_token.is_none()
+        || !is_authenticated(&headers, auth_query.token.as_deref(), &config)
+    {
+        return Err(AppError::Unauthorized(
+            "announcing requires server.auth_token and a matching token",
+        ));
+    }
+    let cleared = db::clear_announcements(&state.pool, Utc::now().timestamp()).await?;
+    state.cache.invalidate();
+    tracing::info!(cleared, "announcements cleared via API");
+    Ok(Json(AnnounceClearResponse { cleared }))
+}
+
+/// Validate a severity label, or answer 400.
+fn severity_or_400(value: &str) -> Result<&'static str, AppError> {
+    match value {
+        "info" => Ok("info"),
+        "warning" => Ok("warning"),
+        "critical" => Ok("critical"),
+        "resolved" => Ok("resolved"),
+        _ => Err(AppError::BadRequest(
+            "severity must be info, warning, critical or resolved",
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]

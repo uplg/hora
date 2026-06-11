@@ -20,11 +20,6 @@ records what actually shipped.
   N minutes, notify the next channel; ack via a signed link in the
   notification. The biggest item on the list, and more natural once
   multi-vantage confirmation exists.
-- **`hora top`** - a terminal dashboard consuming the JSON API: live
-  statuses, latency sparklines, ongoing incidents. Self-hosters live in SSH.
-- **Public incident banner** - a pinned status-page message set via CLI/API
-  (*"fiber incident, ETA 6 p.m."*), the communication extension of
-  [incident annotations](../guides/incidents/#operator-annotations).
 - **`conf.d/` config splitting** - forty monitors in one file doesn't scale
   to a team; splitting plays well with config-as-code in git.
 - **Quiet hours** - `quiet = "22:00-07:00"` per channel: non-critical alerts

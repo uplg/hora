@@ -48,7 +48,7 @@ pub(crate) struct GroupView {
     pub(crate) monitors: Vec<MonitorView>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Clone, Serialize, ToSchema)]
 pub(crate) struct IncidentView {
     pub(crate) title: String,
     pub(crate) body: String,
@@ -255,7 +255,11 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config, full: bool
     // overall badge (it tracks the monitored services, not the surveillance mesh).
     let peers = build_peers(pool, config, ctx.threshold).await;
 
-    let incidents = build_incident_banners(config);
+    // Banner order: ad-hoc announcements (the fresh operational news) first,
+    // then the config-declared ones. A read failure costs the ad-hoc banners
+    // only, never the page.
+    let mut incidents = announcement_banners(pool, timestamp).await;
+    incidents.extend(build_incident_banners(config));
 
     // Active maintenance windows shown as a top banner (so a long reason never
     // changes a card's height and disturbs the grid).
@@ -349,8 +353,9 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
         overall_label: overall_label(overall),
         generated_at: summary.generated_at.clone(),
         updated_utc: summary.updated_utc.clone(),
-        // The operator's announcements are page-wide communication; keep them.
-        incidents: build_incident_banners(config),
+        // The operator's announcements are page-wide communication; keep them
+        // (the already-built list includes the ad-hoc `hora announce` ones).
+        incidents: summary.incidents.clone(),
         maintenances,
         groups: vec![GroupView {
             name: group.to_owned(),
@@ -360,6 +365,32 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
         monitors,
         peers: Vec::new(),
     })
+}
+
+/// The ad-hoc announcements (`hora announce` / `POST /api/announce`),
+/// rendered like the config-declared banners. Newest first.
+async fn announcement_banners(pool: &SqlitePool, now: i64) -> Vec<IncidentView> {
+    or_empty(db::active_announcements(pool, now).await, "announcements")
+        .into_iter()
+        .map(|announcement| IncidentView {
+            title: announcement.title,
+            body: announcement.body,
+            severity: severity_label(&announcement.severity),
+            at: chrono::DateTime::from_timestamp(announcement.created_at, 0)
+                .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()),
+        })
+        .collect()
+}
+
+/// The static severity label for a stored announcement (validated at insert;
+/// anything unexpected degrades to `info`).
+fn severity_label(severity: &str) -> &'static str {
+    match severity {
+        "warning" => "warning",
+        "critical" => "critical",
+        "resolved" => "resolved",
+        _ => "info",
+    }
 }
 
 /// The configured announcements, rendered for the status page banner.

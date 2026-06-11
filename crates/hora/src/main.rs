@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use hora_core::config;
+
+mod top;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
@@ -96,6 +98,12 @@ async fn run_subcommand() -> anyhow::Result<bool> {
             }
             "doctor" => {
                 doctor().await?;
+            }
+            "announce" => {
+                announce(&args[2..]).await?;
+            }
+            "top" => {
+                top::run(&args[2..]).await?;
             }
             "--version" | "-V" => println!("hora {}", env!("CARGO_PKG_VERSION")),
             "--help" | "-h" => print_help(),
@@ -200,7 +208,12 @@ fn print_help() {
     println!("  silence <ids> <for> [reason]  Mute alerts for monitors (comma-separated ids");
     println!("                      or 'all') for a duration like 10m or 1h30m (max 7d)");
     println!("  silence list        Show the active silences");
+    println!("  announce <title> [body] [--severity s] [--until 4h|18:00]");
+    println!("                      Pin a public banner on the status page");
+    println!("  announce list / clear  Show or remove the pinned announcements");
     println!("  silence clear       Remove every silence");
+    println!("  top [--url U] [--token T] [--interval S]");
+    println!("                      Live terminal dashboard over the JSON API");
     println!("  digest              Print the weekly digest (a dry run of [digest])");
     println!("  report [YYYY-MM]    Print the monthly SLA report (default: last month;");
     println!("                      the printable page is /report/YYYY-MM)");
@@ -245,7 +258,122 @@ async fn backup(dest: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Print the digest exactly as the `[digest]` task would send it - a dry run
+/// `hora announce`: pin (or list/clear) a public banner on the status page -
+/// the communication side of incidents, written straight into the daemon's
+/// database and live within the summary cache TTL (~5s). The HTTP twin is
+/// `POST /api/announce`.
+async fn announce(args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let (_, pool) = open_database().await?;
+            let now = chrono::Utc::now().timestamp();
+            let pinned = hora_core::db::active_announcements(&pool, now).await?;
+            if pinned.is_empty() {
+                println!("No announcements pinned.");
+            }
+            for item in pinned {
+                let until = item.until.map_or_else(
+                    || "until cleared".to_owned(),
+                    |ts| format!("until {}", format_epoch(ts)),
+                );
+                println!("#{} [{}] {} ({until})", item.id, item.severity, item.title);
+                if !item.body.is_empty() {
+                    println!("      {}", item.body);
+                }
+            }
+        }
+        Some("clear") => {
+            let (_, pool) = open_database().await?;
+            let cleared =
+                hora_core::db::clear_announcements(&pool, chrono::Utc::now().timestamp()).await?;
+            println!("Cleared {cleared} announcement(s).");
+        }
+        Some(_) => {
+            let (title, body, severity, until) = parse_announce_args(args)?;
+            let (_, pool) = open_database().await?;
+            hora_core::db::insert_announcement(&pool, &title, &body, severity, until).await?;
+            let expiry = until.map_or_else(
+                || "until `hora announce clear`".to_owned(),
+                |ts| format!("until {}", format_epoch(ts)),
+            );
+            println!("Pinned [{severity}] {title:?} ({expiry}).");
+        }
+        None => {
+            eprintln!(
+                "Usage: hora announce <title> [body...] [--severity info|warning|critical|resolved] [--until 4h|18:00]"
+            );
+            eprintln!("       hora announce list");
+            eprintln!("       hora announce clear");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+/// Split `hora announce` arguments: `--severity`/`--until` flags anywhere,
+/// the first free word is the title, the rest joins into the body.
+fn parse_announce_args(
+    args: &[String],
+) -> anyhow::Result<(String, String, &'static str, Option<i64>)> {
+    let mut severity = "info";
+    let mut until = None;
+    let mut words: Vec<&str> = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--severity" => {
+                severity = match iter.next().map(String::as_str) {
+                    Some("info") => "info",
+                    Some("warning") => "warning",
+                    Some("critical") => "critical",
+                    Some("resolved") => "resolved",
+                    other => anyhow::bail!(
+                        "--severity must be info, warning, critical or resolved (got {other:?})"
+                    ),
+                };
+            }
+            "--until" => {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--until needs a value (e.g. 4h or 18:00)"))?;
+                until = Some(parse_until(raw, chrono::Utc::now().timestamp()).ok_or_else(
+                    || {
+                        anyhow::anyhow!(
+                            "invalid --until {raw:?} (use a duration like 4h, or HH:MM UTC)"
+                        )
+                    },
+                )?);
+            }
+            word => words.push(word),
+        }
+    }
+    let Some((title, body)) = words.split_first() else {
+        anyhow::bail!("announce needs a title");
+    };
+    Ok((
+        title.trim().chars().take(200).collect(),
+        body.join(" ").chars().take(500).collect(),
+        severity,
+        until,
+    ))
+}
+
+/// `--until` accepts a duration (`4h`, `90m`) or a UTC clock time (`18:00`,
+/// meaning the next occurrence - today if still ahead, tomorrow otherwise).
+fn parse_until(raw: &str, now: i64) -> Option<i64> {
+    if let Some(secs) = hora_core::parse_duration(raw) {
+        return Some(now + i64::try_from(secs).unwrap_or(i64::MAX));
+    }
+    let (hours, minutes) = raw.split_once(':')?;
+    let (hours, minutes): (i64, i64) = (hours.parse().ok()?, minutes.parse().ok()?);
+    if !(0..24).contains(&hours) || !(0..60).contains(&minutes) {
+        return None;
+    }
+    let today = (now / 86_400) * 86_400 + hours * 3600 + minutes * 60;
+    Some(if today > now { today } else { today + 86_400 })
+}
+
+/// Print the digest exactly as the `[digest]` task would send it/// Print the digest exactly as the `[digest]` task would send it - a dry run
 /// to check the wording (and the data) without notifying anyone.
 async fn digest_preview() -> anyhow::Result<()> {
     let (config, pool) = open_database().await?;
@@ -659,4 +787,48 @@ async fn shutdown_signal() {
         () = terminate => {}
     }
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|&part| part.to_owned()).collect()
+    }
+
+    #[test]
+    fn announce_args_split_flags_title_and_body() {
+        let (title, body, severity, until) = parse_announce_args(&strings(&[
+            "Fiber",
+            "cut,",
+            "ETA",
+            "6pm",
+            "--severity",
+            "warning",
+            "--until",
+            "4h",
+        ]))
+        .expect("parse");
+        assert_eq!(title, "Fiber");
+        assert_eq!(body, "cut, ETA 6pm");
+        assert_eq!(severity, "warning");
+        assert!(until.is_some());
+
+        assert!(parse_announce_args(&strings(&["--severity", "warning"])).is_err());
+        assert!(parse_announce_args(&strings(&["t", "--severity", "panic"])).is_err());
+        assert!(parse_announce_args(&strings(&["t", "--until", "nope"])).is_err());
+    }
+
+    #[test]
+    fn until_takes_durations_and_next_clock_time() {
+        let noon = 86_400 * 10 + 12 * 3600; // some UTC noon
+        assert_eq!(parse_until("4h", noon), Some(noon + 4 * 3600));
+        // 18:00 is still ahead today.
+        assert_eq!(parse_until("18:00", noon), Some(noon + 6 * 3600));
+        // 09:00 already passed: tomorrow.
+        assert_eq!(parse_until("09:00", noon), Some(noon + 21 * 3600));
+        assert_eq!(parse_until("25:00", noon), None);
+        assert_eq!(parse_until("garbage", noon), None);
+    }
 }

@@ -74,6 +74,12 @@ Full guides for everything below live in the
   p95/p99, banners - and an aligned **plain-text rendering** when you `curl` it.
 - **JSON API** with a generated **OpenAPI 3.1** spec, **Prometheus `/metrics`**,
   embeddable **SVG badges**.
+- **Public announcements** - a banner pinned on the status page from the
+  config, `hora announce` or `POST /api/announce`, with optional auto-expiry
+  (`--until 4h`): the mini-Statuspage half of self-hosted monitoring.
+- **`hora top`** - a live terminal dashboard over the JSON API (statuses,
+  uptime, p50/p95/p99, a latency sparkline, current trouble). Self-hosters
+  live in SSH.
 - **Incident history** as HTML and an **Atom feed**, with **failure snapshots**
   (what the service actually answered) and **operator annotations**
   (`hora annotate 42 "fiber cut"`).
@@ -153,6 +159,10 @@ hora test-alert website                # ... through the channels routed for mon
 hora silence api,web 10m "deploying"   # mute alerts ad hoc (checks keep recording)
 hora silence list                      # show the active silences
 hora silence clear                     # remove every silence
+hora announce "Fibre incident" "ETA 6pm" --severity warning --until 4h
+                                       # pin a public banner on the status page
+hora top --url https://status.example.com --token $TOK
+                                       # live terminal dashboard over the JSON API
 hora digest                            # print the weekly digest (dry run of [digest])
 hora report 2026-05                    # print the monthly SLA report (default: last month)
 hora incidents                         # list recent incidents with their ids
@@ -233,6 +243,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. Send the token as an `X-Push-Token` header (preferred - it stays out of proxy access logs) or as `?token=…`. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
 | `POST /api/silence?monitors=api,web&duration=10m` | Mute alerts ad hoc (deploy hook): `monitors` is a comma-separated id list or `all`, `duration` like `10m`/`1h30m` (max 7d), optional `reason`. **Requires `server.auth_token`** (as `Authorization: Bearer` or `?token=`); without one configured the endpoint is closed. |
+| `POST /api/announce?title=...&severity=warning&until=4h` | Pin a public banner on the status page (`DELETE` clears them all). **Requires `server.auth_token`.** |
 | `POST /api/peer/probe` | Multi-vantage confirmation between Hora nodes: probe a target *present in this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token` (`X-Push-Token`). Never probes arbitrary targets. |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge for a monitor. |

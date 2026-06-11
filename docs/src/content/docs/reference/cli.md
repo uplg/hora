@@ -17,6 +17,9 @@ hora test-alert [monitor-id]           # send a test alert through the real chai
 hora silence <ids|all> <duration> [reason]
 hora silence list
 hora silence clear
+hora announce <title> [body] [--severity s] [--until 4h|18:00]
+hora announce list / clear             # pinned status-page banners
+hora top [--url U] [--token T]         # live terminal dashboard
 hora digest                            # print the weekly digest (dry run)
 hora report [YYYY-MM]                  # print the monthly SLA report (default: last month)
 hora doctor                            # diagnose the runtime environment
@@ -59,6 +62,23 @@ recorded; only alert transitions are muted, picked up by the daemon on its
 next tick. Unknown ids are rejected with the configured list. The same action
 exists over HTTP as
 [`POST /api/silence`](../api/#post-apisilence) for CI pipelines.
+
+## `hora announce`
+
+Pins a public banner on the status page - see
+[Announcements](../../guides/alerting/#announcements). `--until` takes a
+duration (`4h`) or a UTC clock time (`18:00`, the next occurrence); without
+it the banner stays until `hora announce clear`.
+
+## `hora top`
+
+A live terminal dashboard over the JSON API: per-monitor statuses, 24h
+uptime, p50/p95/p99, a latency sparkline for the selected monitor (arrow
+keys), and the current trouble. `--url` and `--token` point it at any Hora -
+local or remote (`HORA_TOKEN` works too, keeping the token out of `ps`);
+without `--url` the local config's bind address is used, so `hora top` just
+works on the daemon's host - including inside `docker exec -it hora hora
+top`. `q` quits, `r` forces a refresh.
 
 ## `hora digest`
 

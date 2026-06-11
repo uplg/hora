@@ -15,9 +15,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
-    favicon, font, group_page, healthz, heatmap_svg, history_atom, history_page, latency_json,
-    metrics_prometheus, openapi, page, peer_probe, push, report_page, silence, status_badge,
-    summary_json, uptime_badge,
+    announce, announce_clear, favicon, font, group_page, healthz, heatmap_svg, history_atom,
+    history_page, latency_json, metrics_prometheus, openapi, page, peer_probe, push, report_page,
+    silence, status_badge, summary_json, uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/monitors/{id}/latency", get(latency_json))
         .route("/api/push/{id}", post(push))
         .route("/api/silence", post(silence))
+        .route("/api/announce", post(announce).delete(announce_clear))
         .route("/api/peer/probe", post(peer_probe));
 
     // Parameters are clamped to >= 1, so `finish` always succeeds; if it ever
@@ -642,6 +643,58 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(!body_text(res).await.contains("intra"));
+    }
+
+    #[tokio::test]
+    async fn announce_requires_token_pins_and_clears() {
+        // Closed without the viewer token.
+        let res = test_app()
+            .await
+            .oneshot(push("/api/announce?title=Fiber+cut"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        // Pinned: the banner shows up in the public summary for everyone.
+        let (app, _pool) = test_app_with_pool().await;
+        let res = app
+            .clone()
+            .oneshot(push(
+                "/api/announce?title=Fiber+cut&body=ETA+6pm&severity=warning&until=4h&token=0123456789abcdef",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app.clone().oneshot(get("/api/summary")).await.unwrap();
+        let body = body_text(res).await;
+        assert!(
+            body.contains("Fiber cut") && body.contains("warning"),
+            "{body}"
+        );
+
+        // Cleared via DELETE: gone from the summary.
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/announce?token=0123456789abcdef")
+            .extension(fake_peer())
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app.oneshot(get("/api/summary")).await.unwrap();
+        assert!(!body_text(res).await.contains("Fiber cut"));
+    }
+
+    #[tokio::test]
+    async fn announce_rejects_bad_severity_and_empty_title() {
+        for bad in [
+            "/api/announce?title=x&severity=panic&token=0123456789abcdef",
+            "/api/announce?title=+&token=0123456789abcdef",
+            "/api/announce?title=x&until=nope&token=0123456789abcdef",
+        ] {
+            let res = test_app().await.oneshot(push(bad)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+        }
     }
 
     #[tokio::test]

@@ -64,6 +64,16 @@ pub(crate) struct Cache {
     build: Mutex<()>,
 }
 
+impl Cache {
+    /// Drop both cached views so the next request rebuilds them - used when a
+    /// write (pinning or clearing an announcement) must show up immediately
+    /// instead of after the TTL.
+    pub(crate) fn invalidate(&self) {
+        self.public.store(None);
+        self.full.store(None);
+    }
+}
+
 /// Shared application state handed to every handler.
 #[derive(Clone)]
 pub struct AppState {

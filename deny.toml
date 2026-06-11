@@ -54,6 +54,14 @@ skip = [
     { crate = "digest" },
     { crate = "block-buffer" },
     { crate = "crypto-common" },
+    # ratatui 0.30 (`hora top`) rides strum 0.28 and darling 0.23 (via
+    # instability), while croner (push schedules) is still on strum 0.27 and
+    # derive_builder on darling 0.20.
+    { crate = "strum" },
+    { crate = "strum_macros" },
+    { crate = "darling" },
+    { crate = "darling_core" },
+    { crate = "darling_macro" },
 ]
 
 [sources]

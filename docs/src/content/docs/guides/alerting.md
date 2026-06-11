@@ -145,7 +145,32 @@ anytime with `hora digest` (a dry run; it notifies no one).
 
 ## Announcements
 
-Manual banners on the status page, independent of any monitor:
+Banners pinned on the status page (and the per-group pages), independent of
+any monitor - the mini-Statuspage half of self-hosted monitoring. Two ways
+to pin one:
+
+**Ad hoc**, from the CLI or a remote API call - made for "during the
+incident":
+
+```sh
+hora announce "Fibre incident" "ETA 6pm" --severity warning --until 4h
+hora announce list
+hora announce clear
+```
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOK" \
+  "https://status.example.com/api/announce?title=Fibre+incident&severity=warning&until=4h"
+curl -X DELETE -H "Authorization: Bearer $TOK" "https://status.example.com/api/announce"
+```
+
+`--until` (a duration like `4h`, or `18:00` UTC) auto-expires the banner, so
+the classic stale "incident ongoing" banner three days later cannot happen
+by default. The API requires `server.auth_token` and the banner shows
+immediately (the summary cache is busted on write).
+
+**Declared in the config** - for planned, longer-lived notices, or a GitOps
+workflow where announcements go through git:
 
 ```toml
 [[incidents]]

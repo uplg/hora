@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`hora announce`** (and `POST /api/announce`): pin a public banner on the
+  status page - "Fibre incident, ETA 6pm" - without touching the config. The
+  communication side of incidents: severity-coloured, shown to every visitor
+  (per-group pages included), with optional auto-expiry (`--until 4h` or
+  `--until 18:00` UTC) so the classic stale "incident ongoing" banner cannot
+  happen by default. Stored in the database next to the config-declared
+  `[[incidents]]` banners; the API requires `server.auth_token` and busts the
+  summary cache so the banner shows immediately; `hora announce list/clear`
+  manage them and `DELETE /api/announce` clears remotely.
+- **`hora top`**: a live terminal dashboard over the JSON API - per-monitor
+  statuses, 24h uptime, p50/p95/p99, a latency sparkline for the selected
+  monitor, and the current trouble, refreshed in place (default 5s).
+  `--url`/`--token` point it at any Hora (the token also reads `HORA_TOKEN`,
+  kept out of `ps`); without `--url` the local config's bind is used
+  (wildcard binds map to loopback, so it works in `docker exec`). Read-only,
+  tolerant of older/newer servers, and the terminal is restored even on a
+  panic. Costs ~0.2 MB of binary.
 - **Exec probes** (`kind = "exec"`): run an external check following the
   monitoring-plugins convention - exit 0 = up, 1 = degraded, anything else
   = down, first stdout line = message (`|perfdata` stripped, output bounded,

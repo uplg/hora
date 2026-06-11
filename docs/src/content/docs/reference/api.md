@@ -23,6 +23,7 @@ Editor...) at it.
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. |
 | `POST /api/silence` | Mute alerts ad hoc (deploy hook). |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
+| `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`. Requires `server.auth_token`. |
 | `POST /api/peer/probe` | [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation) between nodes: probe a target *from this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token`. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge. |

@@ -833,6 +833,88 @@ pub async fn meta_set(pool: &SqlitePool, key: &str, value: &str) -> sqlx::Result
     Ok(())
 }
 
+/// An ad-hoc public announcement, pinned as a status-page banner.
+#[derive(Debug, sqlx::FromRow)]
+pub struct Announcement {
+    pub id: i64,
+    pub title: String,
+    pub body: String,
+    /// `info` | `warning` | `critical` | `resolved` (validated at insert).
+    pub severity: String,
+    /// Auto-expiry (unix epoch seconds); `None` = shown until cleared.
+    pub until: Option<i64>,
+    pub created_at: i64,
+}
+
+/// Pin an announcement.
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn insert_announcement(
+    pool: &SqlitePool,
+    title: &str,
+    body: &str,
+    severity: &str,
+    until: Option<i64>,
+) -> sqlx::Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO announcements (title, body, severity, until, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(title)
+    .bind(body)
+    .bind(severity)
+    .bind(until)
+    .bind(chrono::Utc::now().timestamp())
+    .execute(pool)
+    .await?;
+    Ok(result.last_insert_rowid())
+}
+
+/// The announcements still pinned at `now`, newest first.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn active_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<Vec<Announcement>> {
+    sqlx::query_as::<_, Announcement>(
+        "SELECT id, title, body, severity, until, created_at FROM announcements \
+         WHERE until IS NULL OR until > ? ORDER BY created_at DESC, id DESC",
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await
+}
+
+/// Delete every announcement (pinned or expired), returning how many were
+/// still pinned.
+///
+/// # Errors
+///
+/// Returns an error if the deletion fails.
+pub async fn clear_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<u64> {
+    let active = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM announcements WHERE until IS NULL OR until > ?",
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query("DELETE FROM announcements")
+        .execute(pool)
+        .await?;
+    Ok(u64::try_from(active).unwrap_or(0))
+}
+
+/// Drop announcements whose expiry passed before `cutoff`.
+async fn prune_announcements(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM announcements WHERE until IS NOT NULL AND until < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// An ad-hoc alert silence, created via `hora silence` or `POST /api/silence`.
 #[derive(Debug, sqlx::FromRow)]
 pub struct Silence {
@@ -1141,6 +1223,10 @@ async fn roll_up_history(pool: &SqlitePool, now: i64) {
     // Expired silences are dead weight the moment they lapse.
     if let Err(err) = prune_silences(pool, now).await {
         tracing::warn!("silence prune failed: {err}");
+    }
+    // Same for expired announcements (the active query already hides them).
+    if let Err(err) = prune_announcements(pool, now).await {
+        tracing::warn!("announcement prune failed: {err}");
     }
 }
 
@@ -1639,6 +1725,38 @@ mod tests {
         let incidents = recent_incidents(&pool, 10).await.unwrap();
         assert_eq!(incidents.iter().find(|i| i.id == first).unwrap().note, None);
         assert!(!set_incident_note(&pool, 999, "nope").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn announcements_pin_expire_and_clear() {
+        let pool = memory_pool().await;
+        let now = 1000;
+
+        let id = insert_announcement(&pool, "Fiber cut", "ETA 6pm", "warning", Some(now + 600))
+            .await
+            .unwrap();
+        insert_announcement(&pool, "Maintenance done", "", "resolved", None)
+            .await
+            .unwrap();
+
+        // Newest first; both active.
+        let pinned = active_announcements(&pool, now).await.unwrap();
+        assert_eq!(pinned.len(), 2);
+        assert_eq!(pinned[0].title, "Maintenance done");
+        assert_eq!(pinned[1].id, id);
+        assert_eq!(pinned[1].severity, "warning");
+
+        // The bounded one expires on its own; the unbounded one stays.
+        let later = active_announcements(&pool, now + 601).await.unwrap();
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].title, "Maintenance done");
+
+        // The pruner drops only the expired row.
+        prune_announcements(&pool, now + 700).await.unwrap();
+        assert_eq!(active_announcements(&pool, 0).await.unwrap().len(), 1);
+
+        assert_eq!(clear_announcements(&pool, now).await.unwrap(), 1);
+        assert!(active_announcements(&pool, now).await.unwrap().is_empty());
     }
 
     #[tokio::test]
