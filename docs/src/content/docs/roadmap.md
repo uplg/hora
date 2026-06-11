@@ -35,19 +35,10 @@ records what actually shipped.
   [incident annotations](../guides/incidents/#operator-annotations).
 - **`conf.d/` config splitting** - forty monitors in one file doesn't scale
   to a team; splitting plays well with config-as-code in git.
-- **Monthly SLA reports** - a printable per-month page (uptime per
-  monitor/group, incidents, MTTR, budget consumed) for freelances and
-  agencies hosting client sites.
-- **Per-group status pages** - `/status/clients-acme` showing only one
-  group, optionally with its own token: each client gets their page without
-  seeing the rest.
 - **Quiet hours** - `quiet = "22:00-07:00"` per channel: non-critical alerts
   held and delivered as a morning digest; critical downs still pass.
 - **Cert expiry over STARTTLS** - extend the certificate machinery to SMTP
   587 / IMAP 143, the certificate every self-hosted mail operator forgets.
-- **`hora doctor`** - runtime environment diagnostics: IPv6 available? ICMP
-  socket allowed? DNS resolver reachable? The runtime companion of
-  `hora check`, precious in rootless Docker.
 - **`hora import compose` / `caddy`** - generate monitors from a
   `docker-compose.yml` or a Caddyfile, like the Kuma importer.
 

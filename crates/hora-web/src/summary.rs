@@ -255,22 +255,11 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config, full: bool
     // overall badge (it tracks the monitored services, not the surveillance mesh).
     let peers = build_peers(pool, config, ctx.threshold).await;
 
-    let incidents = config
-        .incidents
-        .iter()
-        .map(|incident| IncidentView {
-            title: incident.title.clone(),
-            body: incident.body.clone(),
-            severity: incident.severity.as_str(),
-            at: incident
-                .at
-                .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()),
-        })
-        .collect();
+    let incidents = build_incident_banners(config);
 
     // Active maintenance windows shown as a top banner (so a long reason never
     // changes a card's height and disturbs the grid).
-    let maintenances = build_maintenances(config, now);
+    let maintenances = build_maintenances(config, now, None);
 
     Summary {
         title: config.page.title.clone(),
@@ -288,11 +277,23 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config, full: bool
 
 /// Build the banner view for the maintenance windows active at `now`, resolving
 /// each covered monitor id to its display name (or "all monitors" when empty).
-fn build_maintenances(config: &Config, now: DateTime<Utc>) -> Vec<MaintenanceView> {
+/// With `only_ids`, windows that touch none of those monitors are dropped (the
+/// per-group page must not announce another client's maintenance).
+fn build_maintenances(
+    config: &Config,
+    now: DateTime<Utc>,
+    only_ids: Option<&std::collections::HashSet<&str>>,
+) -> Vec<MaintenanceView> {
     config
         .maintenance
         .iter()
         .filter(|window| now >= window.start && now <= window.end)
+        .filter(|window| {
+            only_ids.is_none_or(|ids| {
+                window.monitors.is_empty()
+                    || window.monitors.iter().any(|id| ids.contains(id.as_str()))
+            })
+        })
         .map(|window| {
             let monitors = if window.monitors.is_empty() {
                 "all monitors".to_owned()
@@ -314,6 +315,65 @@ fn build_maintenances(config: &Config, now: DateTime<Utc>) -> Vec<MaintenanceVie
                 reason: window.title.clone(),
                 monitors,
             }
+        })
+        .collect()
+}
+
+/// Derive a single-group view from a built summary: the monitors of `group`
+/// only, the overall badge recomputed from them, the peers section hidden
+/// (the surveillance mesh is the operator's business, not a client's), and
+/// the maintenance banners restricted to windows touching the group. `None`
+/// when the summary holds no monitor of that group - an unknown group, or a
+/// fully private one viewed anonymously, answers exactly like a missing page.
+pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Option<Summary> {
+    let monitors: Vec<MonitorView> = summary
+        .monitors
+        .iter()
+        .filter(|monitor| monitor.group.as_deref() == Some(group))
+        .cloned()
+        .collect();
+    if monitors.is_empty() {
+        return None;
+    }
+
+    let overall = monitors
+        .iter()
+        .fold("up", |worst, monitor| worse(worst, monitor.status));
+    let ids: std::collections::HashSet<&str> =
+        monitors.iter().map(|monitor| monitor.id.as_str()).collect();
+    let maintenances = build_maintenances(config, Utc::now(), Some(&ids));
+
+    Some(Summary {
+        title: format!("{} · {group}", config.page.title),
+        overall,
+        overall_label: overall_label(overall),
+        generated_at: summary.generated_at.clone(),
+        updated_utc: summary.updated_utc.clone(),
+        // The operator's announcements are page-wide communication; keep them.
+        incidents: build_incident_banners(config),
+        maintenances,
+        groups: vec![GroupView {
+            name: group.to_owned(),
+            ids: monitors.iter().map(|view| view.id.clone()).collect(),
+            monitors: monitors.clone(),
+        }],
+        monitors,
+        peers: Vec::new(),
+    })
+}
+
+/// The configured announcements, rendered for the status page banner.
+fn build_incident_banners(config: &Config) -> Vec<IncidentView> {
+    config
+        .incidents
+        .iter()
+        .map(|incident| IncidentView {
+            title: incident.title.clone(),
+            body: incident.body.clone(),
+            severity: incident.severity.as_str(),
+            at: incident
+                .at
+                .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()),
         })
         .collect()
 }

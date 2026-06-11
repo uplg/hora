@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-group status pages** (`/status/{group}`): one display group's
+  monitors, nothing else - lightweight multi-tenancy for an operator hosting
+  several clients on one Hora. A per-group token (`server.group_tokens`)
+  reveals that group's full view - private monitors included - and nothing
+  else (it is never accepted anywhere as a global token); the maintenance
+  banners are filtered to windows touching the group, and the peers section
+  stays off client pages. An unknown group, or a fully private one viewed
+  anonymously, answers 404.
+- **Monthly SLA reports** (`/report/2026-05` and `hora report [YYYY-MM]`,
+  default last month): a printable, print-first page - uptime per monitor
+  and group, incidents, downtime (clipped to the month), MTTR (incidents
+  resolved within the month), SLO verdict and error-budget consumption.
+  `?group=` scopes the report to one group, with the group token accepted -
+  the report an agency hands its client. Works as far back as the one-year
+  aggregate retention; the running month is judged against elapsed time only.
+- **`hora doctor`**: runtime environment diagnostics - the companion of
+  `hora check`. Database writable, listen port free (busy is a warning: the
+  daemon is probably just running), IPv4/IPv6 routes (no packets sent), the
+  unprivileged ICMP datagram socket, and a real system-resolver lookup. Each
+  finding is judged against what the *current config needs* - no IPv6 route
+  only fails when a `dual_stack` monitor needs one - and the process exits
+  non-zero on any missing needed capability.
 - **Weekly digest** (`[digest]`): a recap of the last seven days through the
   notification channels - "99.97% overall, 2 incidents" plus one line per
   monitor with uptime, incidents and the error budget left when an SLO is

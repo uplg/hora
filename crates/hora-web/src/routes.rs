@@ -15,8 +15,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
-    favicon, font, healthz, heatmap_svg, history_atom, history_page, latency_json,
-    metrics_prometheus, openapi, page, push, silence, status_badge, summary_json, uptime_badge,
+    favicon, font, group_page, healthz, heatmap_svg, history_atom, history_page, latency_json,
+    metrics_prometheus, openapi, page, push, report_page, silence, status_badge, summary_json,
+    uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -69,6 +70,8 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics_prometheus))
         .route("/history", get(history_page))
         .route("/history.atom", get(history_atom))
+        .route("/status/{group}", get(group_page))
+        .route("/report/{month}", get(report_page))
         .merge(api)
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
@@ -203,6 +206,8 @@ mod tests {
             [page]
             [server]
             auth_token = "0123456789abcdef"
+            [server.group_tokens]
+            App = "appappappappapp1"
             [health]
             id = "test-node"
             [[peers]]
@@ -215,6 +220,14 @@ mod tests {
             name = "Web"
             target = "https://example.com"
             interval_secs = 60
+            group = "App"
+            [[monitors]]
+            id = "intra"
+            name = "Intra"
+            target = "https://intra.example.com"
+            interval_secs = 60
+            group = "App"
+            public = false
             [[monitors]]
             id = "beat"
             name = "Beat"
@@ -307,6 +320,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn report_renders_and_rejects_bad_months() {
+        let res = test_app()
+            .await
+            .oneshot(get("/report/2021-01"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_text(res).await;
+        assert!(
+            body.contains("SLA report") && body.contains("January 2021"),
+            "{body}"
+        );
+        // Anonymous: the private monitor stays out of the report.
+        assert!(!body.contains("Intra"), "{body}");
+
+        for bad in ["/report/never", "/report/2999-01"] {
+            let res = test_app().await.oneshot(get(bad)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn group_report_scopes_and_honours_the_group_token() {
+        // The group token reveals the group's private monitor on ITS report.
+        let res = test_app()
+            .await
+            .oneshot(get("/report/2021-01?group=App&token=appappappappapp1"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_text(res).await;
+        assert!(body.contains("Intra") && body.contains("Web"), "{body}");
+        // Scoped: the push monitor (ungrouped) is not in a group report.
+        assert!(!body.contains("Beat"), "{body}");
+
+        // An unknown group answers like a missing page.
+        let res = test_app()
+            .await
+            .oneshot(get("/report/2021-01?group=Nope"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Read a response body as text (the pages are small).
+    async fn body_text(res: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn group_page_filters_and_404s_unknown() {
+        let res = test_app().await.oneshot(get("/status/App")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_text(res).await;
+        // Anonymous: the group's public monitor only - and no peers section.
+        assert!(body.contains("Web"), "{body}");
+        assert!(!body.contains("Intra"), "{body}");
+        assert!(!body.contains("Peer X"), "{body}");
+
+        let res = test_app().await.oneshot(get("/status/Nope")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn group_token_reveals_its_group_and_nothing_else() {
+        // The group token unlocks the group's private monitors...
+        let res = test_app()
+            .await
+            .oneshot(get("/status/App?token=appappappappapp1"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(body_text(res).await.contains("Intra"));
+
+        // ...but is NOT a global viewer token: the main summary stays public.
+        let res = test_app()
+            .await
+            .oneshot(get("/api/summary?token=appappappappapp1"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!body_text(res).await.contains("intra"));
     }
 
     #[tokio::test]

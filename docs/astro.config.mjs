@@ -36,6 +36,7 @@ export default defineConfig({
 						{ label: 'Alerting & notifications', slug: 'guides/alerting' },
 						{ label: 'SLOs & error budgets', slug: 'guides/slo' },
 						{ label: 'Incidents & history', slug: 'guides/incidents' },
+						{ label: 'Per-group pages & SLA reports', slug: 'guides/multi-tenant' },
 						{ label: 'Mutual surveillance (peers)', slug: 'guides/peers' },
 						{ label: 'Importing from Uptime Kuma', slug: 'guides/import' },
 					],

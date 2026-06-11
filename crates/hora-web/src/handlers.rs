@@ -185,6 +185,113 @@ pub(crate) struct AuthQuery {
     pub(crate) token: Option<String>,
 }
 
+/// The per-group status page (`/status/{group}`): the monitors of one display
+/// group, nothing else - lightweight multi-tenancy for an operator hosting
+/// several clients' services on one Hora. Anonymous viewers get the group's
+/// public monitors; the global viewer token, or this group's own
+/// `server.group_tokens` entry, reveals the group's full view (and only this
+/// group's). An unknown group - or a fully private one viewed without a
+/// token - answers 404, exactly like a missing page.
+pub(crate) async fn group_page(
+    State(state): State<AppState>,
+    Path(group): Path<String>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<Response, AppError> {
+    let config = state.config.borrow().clone();
+    let token = auth_query.token.as_deref();
+    let full = is_authenticated(&headers, token, &config)
+        || group_token_matches(&headers, token, &config, &group);
+    let summary = state_summary(state, full).await;
+    let view = crate::summary::for_group(&summary, &config, &group)
+        .ok_or(AppError::NotFound("unknown group"))?;
+    let html = StatusTemplate { summary: &view }.render()?;
+    Ok(Html(html).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReportQuery {
+    /// Restrict the report to one display group - the report twin of the
+    /// `/status/{group}` page, and what an operator hands a client.
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+/// The printable monthly SLA report (`/report/2026-05`, optionally
+/// `?group=X`). Anonymous viewers get the public monitors; the viewer token
+/// includes the private ones, and on a `?group=` report the group's own
+/// `server.group_tokens` entry does too - so a client can be handed *their*
+/// report and nothing else. Server-rendered and print-first: "Save as PDF"
+/// is the export.
+pub(crate) async fn report_page(
+    State(state): State<AppState>,
+    Path(month): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<ReportQuery>,
+) -> Result<Html<String>, AppError> {
+    let config = state.config.borrow().clone();
+    let token = query.token.as_deref();
+    let full = is_authenticated(&headers, token, &config)
+        || query
+            .group
+            .as_deref()
+            .is_some_and(|group| group_token_matches(&headers, token, &config, group));
+    // Validate the month *before* building, so a malformed path is a clean
+    // 400 and never reaches the database.
+    if hora_core::report::month_bounds(&month).is_none() {
+        return Err(AppError::BadRequest(
+            "month must be YYYY-MM and not in the future",
+        ));
+    }
+    let report = hora_core::report::build(&state.pool, &config, &month).await?;
+    let groups = crate::report::group_rows(&report, |row| {
+        (full || row.public)
+            && query
+                .group
+                .as_deref()
+                .is_none_or(|group| row.group.as_deref() == Some(group))
+    });
+    // A scoped report with nothing visible answers like the group page: 404,
+    // revealing neither the group's existence nor its members.
+    if groups.is_empty() && query.group.is_some() {
+        return Err(AppError::NotFound("unknown group"));
+    }
+    let title = match &query.group {
+        Some(group) => format!("{} · {group}", config.page.title),
+        None => config.page.title.clone(),
+    };
+    let html = crate::report::ReportTemplate {
+        title,
+        label: report.label.clone(),
+        generated: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+        groups,
+    }
+    .render()?;
+    Ok(Html(html))
+}
+
+/// Whether the request carries the group's own viewer token (Bearer or
+/// `?token=`). A group token authenticates *that group's page only* - it is
+/// never accepted by [`is_authenticated`], so it reveals nothing else.
+fn group_token_matches(
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    config: &Config,
+    group: &str,
+) -> bool {
+    let Some(expected) = config.server.group_tokens.get(group) else {
+        return false;
+    };
+    let provided = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or(query_token);
+    provided.is_some_and(|token| ct_eq(token, expected.as_ref()))
+}
+
 #[utoipa::path(
     get,
     path = "/api/summary",

@@ -32,6 +32,12 @@ rate_limit_burst = 30
 # /history and /history.atom; without it those endpoints only show public
 # monitors. Read live: a change applies on the next reload.
 # auth_token = "${HORA_AUTH_TOKEN}"
+# Per-group viewer tokens for the /status/{group} pages (lightweight
+# multi-tenancy): the token reveals the FULL view of its group - private
+# monitors included - and nothing else. Also accepted by the group-scoped
+# SLA report (/report/2026-05?group=...). The global auth_token always works.
+# [server.group_tokens]
+# "Clients ACME" = "${ACME_TOKEN}"
 
 # --- Notification channels ------------------------------------------------
 # Each channel has a unique `name` and a `type`. Several channels may share a

@@ -164,6 +164,12 @@ pub struct Server {
     /// Sent as `Authorization: Bearer <token>` or `?token=` query parameter.
     #[serde(default)]
     pub auth_token: Option<Secret>,
+    /// Per-group viewer tokens for the `/status/{group}` pages (lightweight
+    /// multi-tenancy): a token here reveals the *full* view of its group -
+    /// private monitors included - and nothing else. The global `auth_token`
+    /// always works too.
+    #[serde(default)]
+    pub group_tokens: std::collections::HashMap<String, Secret>,
 }
 
 /// A named notification channel. Several channels may share a `type` (e.g. two
@@ -1074,6 +1080,18 @@ fn validate_token(label: &str, token: Option<&Secret>) -> anyhow::Result<()> {
 
 fn validate(config: &Config) -> anyhow::Result<()> {
     validate_token("server.auth_token", config.server.auth_token.as_ref())?;
+    for (group, token) in &config.server.group_tokens {
+        validate_token(&format!("server.group_tokens[{group:?}]"), Some(token))?;
+        // A token for a group no monitor belongs to guards nothing - that is
+        // a typo'd group name, not a future plan.
+        anyhow::ensure!(
+            config
+                .monitors
+                .iter()
+                .any(|monitor| monitor.group.as_deref() == Some(group)),
+            "server.group_tokens: no monitor belongs to group {group:?}"
+        );
+    }
     let channel_names = validate_channels(config)?;
 
     for window in &config.maintenance {

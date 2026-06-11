@@ -6,6 +6,7 @@ mod heatmap;
 mod history;
 mod metrics;
 mod render;
+mod report;
 mod routes;
 mod summary;
 mod text;

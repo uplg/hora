@@ -18,6 +18,8 @@ hora silence <ids|all> <duration> [reason]
 hora silence list
 hora silence clear
 hora digest                            # print the weekly digest (dry run)
+hora report [YYYY-MM]                  # print the monthly SLA report (default: last month)
+hora doctor                            # diagnose the runtime environment
 hora incidents [limit]                 # list recent incidents with their ids
 hora annotate <id|last> "<note>"       # attach a note to an incident
 hora backup <dest.db>                  # consistent snapshot (VACUUM INTO)
@@ -63,6 +65,24 @@ exists over HTTP as
 Prints the weekly digest exactly as the `[digest]` task would send it - a
 dry run to check the wording (and the data) without notifying anyone. See
 [Weekly digest](../../guides/alerting/#weekly-digest).
+
+## `hora report`
+
+Prints the monthly SLA report as text - the terminal twin of the printable
+[`/report/{month}` page](../../guides/multi-tenant/#monthly-sla-reports).
+Defaults to last month.
+
+## `hora doctor`
+
+Diagnoses the runtime environment against what the configuration needs -
+`hora check` says the config is sound, `hora doctor` says the *host* can
+honour it. Checks: database writable, listen port free (busy is a warning -
+the daemon is probably just running), IPv4/IPv6 routes (no packets sent),
+the unprivileged ICMP datagram socket (the rootless-Docker
+`net.ipv4.ping_group_range` catch), and a real system-resolver lookup.
+Failures are judged against the config - no IPv6 route only fails when a
+`dual_stack` monitor needs one - and the process exits non-zero on any
+missing needed capability.
 
 ## `hora incidents`
 

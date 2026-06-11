@@ -4,6 +4,7 @@
 //! supervisor (which owns the live config and notification channels), spawn the
 //! certificate watcher and pruner, and serve the status page and JSON API.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -89,6 +90,12 @@ async fn run_subcommand() -> anyhow::Result<bool> {
             }
             "digest" => {
                 digest_preview().await?;
+            }
+            "report" => {
+                report(args.get(2).map(String::as_str)).await?;
+            }
+            "doctor" => {
+                doctor().await?;
             }
             "--version" | "-V" => println!("hora {}", env!("CARGO_PKG_VERSION")),
             "--help" | "-h" => print_help(),
@@ -185,6 +192,8 @@ fn print_help() {
     println!("Commands:");
     println!("  import kuma <file>  Convert an Uptime Kuma backup JSON to Hora TOML (stdout)");
     println!("  check               Validate the configuration and exit");
+    println!("  doctor              Diagnose the runtime environment (IPv6, ICMP socket,");
+    println!("                      DNS resolver, listen port, database)");
     println!("  test-alert [id]     Send a test down + recovered through the configured");
     println!("                      channels (all of them, or the routed ones of monitor [id])");
     println!("  silence <ids> <for> [reason]  Mute alerts for monitors (comma-separated ids");
@@ -192,6 +201,8 @@ fn print_help() {
     println!("  silence list        Show the active silences");
     println!("  silence clear       Remove every silence");
     println!("  digest              Print the weekly digest (a dry run of [digest])");
+    println!("  report [YYYY-MM]    Print the monthly SLA report (default: last month;");
+    println!("                      the printable page is /report/YYYY-MM)");
     println!("  incidents [limit]   List recent incidents with their ids");
     println!("  annotate <id> <note>  Attach a note to an incident ('last' targets the");
     println!("                      most recent one; an empty note clears it)");
@@ -241,6 +252,95 @@ async fn digest_preview() -> anyhow::Result<()> {
     let (period, summary) = hora_core::digest::build_summary(&pool, &config, now).await?;
     println!("Hora digest ({period})");
     println!("{summary}");
+    Ok(())
+}
+
+/// Diagnose the runtime environment against what the config needs: `hora
+/// check` says the config is sound, `hora doctor` says the *host* can honour
+/// it. Exits non-zero when a needed capability is missing.
+async fn doctor() -> anyhow::Result<()> {
+    let config_path = config::path();
+    let config = config::load_from(&config_path).context("loading configuration")?;
+    println!(
+        "hora doctor - {} ({} monitors)",
+        config_path.display(),
+        config.monitors.len()
+    );
+    println!();
+
+    let findings = hora_core::doctor::run(&config).await;
+    let mut failed = false;
+    for finding in &findings {
+        failed = failed || finding.status == hora_core::doctor::Status::Fail;
+        println!(
+            "  {:<10} {:<5} {}",
+            finding.name,
+            finding.status.label(),
+            finding.detail
+        );
+    }
+    if failed {
+        println!();
+        eprintln!("Some capabilities the configuration needs are missing.");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Print the monthly SLA report as text - the terminal twin of the printable
+/// `/report/{month}` page. Defaults to last month: "here is your May report".
+async fn report(month: Option<&str>) -> anyhow::Result<()> {
+    let (config, pool) = open_database().await?;
+    let month = month.map_or_else(
+        || hora_core::report::previous_month(chrono::Utc::now().timestamp()),
+        str::to_owned,
+    );
+    let report = match hora_core::report::build(&pool, &config, &month).await {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("{err:#}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("SLA report - {} ({})", report.label, config.page.title);
+    let mut current_group: Option<&str> = None;
+    for row in &report.rows {
+        let group = row.group.as_deref().unwrap_or("");
+        if current_group != Some(group) {
+            current_group = Some(group);
+            println!();
+            println!("{}", if group.is_empty() { "Monitors" } else { group });
+        }
+        let uptime = row
+            .uptime_bp
+            .map_or_else(|| "no data".to_owned(), hora_core::report::format_bp);
+        let mut line = format!("  {}: {uptime}", row.name);
+        if row.incidents > 0 {
+            let plural = if row.incidents > 1 { "s" } else { "" };
+            let _ = write!(
+                line,
+                ", {} incident{plural}, {} down",
+                row.incidents,
+                hora_core::report::format_secs(row.downtime_secs)
+            );
+        }
+        if let Some(mttr) = row.mttr_secs {
+            let _ = write!(line, ", MTTR {}", hora_core::report::format_secs(mttr));
+        }
+        if let (Some(slo_bp), Some(met)) = (row.slo_bp, row.slo_met) {
+            let _ = write!(
+                line,
+                ", SLO {} {}",
+                hora_core::report::format_bp(i64::from(slo_bp)),
+                if met { "met" } else { "MISSED" }
+            );
+        }
+        if let (Some(consumed), Some(budget)) = (row.budget_consumed_minutes, row.budget_minutes) {
+            let _ = write!(line, ", budget {consumed}m of {budget}m");
+        }
+        println!("{line}");
+    }
     Ok(())
 }
 

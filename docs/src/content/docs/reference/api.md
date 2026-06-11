@@ -16,6 +16,8 @@ Editor...) at it.
 | `GET /metrics` | Prometheus metrics (text exposition format). |
 | `GET /history` | Incident history page (HTML). |
 | `GET /history.atom` | Incident history as an Atom feed. |
+| `GET /status/{group}` | Status page restricted to one display group ([group tokens](../../guides/multi-tenant/) accepted). |
+| `GET /report/{YYYY-MM}` | Printable monthly SLA report; `?group=` scopes it to one group. |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. |

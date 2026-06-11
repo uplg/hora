@@ -71,6 +71,12 @@ Full guides for everything below live in the
   at 9am" at a glance.
 - **Private monitors** behind a viewer token - one Hora for a public status page
   *and* your internal services. Per-IP API rate limiting.
+- **Per-group status pages & SLA reports** (lightweight multi-tenancy) -
+  `/status/{group}` shows one group only, and a **per-group token**
+  (`server.group_tokens`) reveals that group's full view and nothing else.
+  Monthly, printable **SLA reports** (`/report/2026-05`, optionally
+  `?group=...`): uptime per monitor/group, incidents, MTTR, error budget -
+  "here is your May report, 99.95%" for operators hosting client services.
 
 **Operations**
 
@@ -80,7 +86,9 @@ Full guides for everything below live in the
   kept a year; the database never grows forever. `hora backup` snapshots it in
   one statement.
 - **Uptime Kuma import** (`hora import kuma backup.json`), `hora check` for CI,
-  `hora test-alert` to verify the notification chain before the first incident.
+  `hora test-alert` to verify the notification chain before the first incident,
+  and **`hora doctor`** to diagnose the runtime environment (IPv6 route, ICMP
+  socket, DNS resolver, listen port, database) against what the config needs.
 - Single self-contained binary - migrations and templates compiled in.
 
 ## Quick start (Docker)
@@ -127,12 +135,14 @@ and on the container: `-e HORA_TELEGRAM_TOKEN=123:abc`. Only `HORA_BIND`,
 ```sh
 hora                                   # run the monitor
 hora check                             # validate the config; non-zero exit on error (CI-friendly)
+hora doctor                            # diagnose the runtime environment (IPv6, ICMP, DNS, port)
 hora test-alert                        # send a test down + recovered through every channel
 hora test-alert website                # ... through the channels routed for monitor "website"
 hora silence api,web 10m "deploying"   # mute alerts ad hoc (checks keep recording)
 hora silence list                      # show the active silences
 hora silence clear                     # remove every silence
 hora digest                            # print the weekly digest (dry run of [digest])
+hora report 2026-05                    # print the monthly SLA report (default: last month)
 hora incidents                         # list recent incidents with their ids
 hora annotate last "fiber cut"         # attach a note to an incident (shown on /history)
 hora backup /mnt/nas/hora-backup.db    # consistent snapshot of the database (VACUUM INTO)
@@ -205,6 +215,8 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /metrics` | Prometheus metrics (text exposition format). |
 | `GET /history` | Incident history page (HTML). |
 | `GET /history.atom` | Incident history as an Atom feed. |
+| `GET /status/{group}` | Status page restricted to one display group. A `server.group_tokens` entry reveals that group's full view (and nothing else). |
+| `GET /report/{YYYY-MM}` | Printable monthly SLA report: uptime per monitor/group, incidents, MTTR, error budget. `?group=` scopes it (group token accepted). |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. Send the token as an `X-Push-Token` header (preferred - it stays out of proxy access logs) or as `?token=…`. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
