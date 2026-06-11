@@ -4,6 +4,22 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.4.2 → 0.5.0
+
+No behavioural changes: every addition is opt-in or a new subcommand. Notes:
+
+- **Three schema migrations** (incident notes, ad-hoc silences, failure
+  snapshots) apply automatically on first start. They only add columns and a
+  table - an existing database is untouched otherwise. Take a
+  `hora backup pre-0.5.db` first if you want a trivial rollback.
+- **`POST /api/silence` strictly requires `server.auth_token`.** Muting
+  alerts is an operator action: without a configured token the endpoint
+  answers 401 for everyone. The CLI (`hora silence`) writes to the database
+  directly and is not affected.
+- **Failure snapshots follow the existing privacy rule**: anonymous viewers
+  never see the captured response unless the monitor already opted into
+  `public_error_detail`. Nothing new is exposed by default.
+
 ## 0.4.1 → 0.4.2
 
 No behavioural changes: both additions are opt-in.
