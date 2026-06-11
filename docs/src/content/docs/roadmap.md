@@ -8,17 +8,6 @@ feature whose false positives outweigh its value. Plans below are directional,
 not promises - the [changelog](https://github.com/uplg/hora/blob/main/CHANGELOG.md)
 records what actually shipped.
 
-## Next
-
-- **Multi-vantage confirmation via peers** - when a monitor goes down
-  locally, ask your [peers](../guides/peers/) to probe the same target from
-  their side before alerting: *"down from 3/3 sites"* (real outage) vs
-  *"down only from here, 2 peers see it up"* (local network blip - a
-  different, quieter alert). Two Raspberry Pi at two homes become a
-  distributed Pingdom. The peer auth and quorum infrastructure already
-  exist; peers will only probe targets present in their own config, never
-  arbitrary requested ones.
-
 ## Exploring
 
 - **Escalation & acknowledgement** - if an alert is not acknowledged within

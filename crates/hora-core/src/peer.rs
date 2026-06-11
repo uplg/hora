@@ -353,6 +353,7 @@ pub(crate) fn spawn_watch(
                             error: outcome.error.as_deref(),
                             cause: None,
                             impacted: &[],
+                            vantage: None,
                         },
                     )
                     .await;

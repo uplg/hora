@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::util::{
     budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
-    topology_suffix,
+    topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -54,10 +54,12 @@ impl MatrixNotifier {
                 error,
                 cause,
                 impacted,
+                vantage,
             } => format!(
-                "\u{1F534} {monitor} is DOWN\n{}{}",
+                "\u{1F534} {monitor} is DOWN\n{}{}{}",
                 error.unwrap_or("no response"),
-                topology_suffix(cause, impacted)
+                topology_suffix(cause, impacted),
+                vantage_suffix(vantage)
             ),
             Event::Degraded {
                 monitor,
@@ -154,6 +156,7 @@ mod tests {
             error: Some("boom"),
             cause: None,
             impacted: &[],
+            vantage: None,
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
 

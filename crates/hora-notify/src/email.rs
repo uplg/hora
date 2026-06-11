@@ -78,12 +78,14 @@ impl EmailNotifier {
                 error,
                 cause,
                 impacted,
+                vantage,
             } => {
                 let suffix = crate::util::topology_suffix(cause, impacted);
+                let vantage = crate::util::vantage_suffix(vantage);
                 (
                     format!("[DOWN] {monitor}"),
                     format!(
-                        "{monitor} is DOWN\n\n{}{suffix}",
+                        "{monitor} is DOWN\n\n{}{suffix}{vantage}",
                         error.unwrap_or("no response")
                     ),
                 )
@@ -200,6 +202,7 @@ mod tests {
             error: Some("boom"),
             cause: None,
             impacted: &[],
+            vantage: None,
         });
         assert!(subject.contains("[DOWN]") && subject.contains("API"));
         assert!(body.contains("boom"));

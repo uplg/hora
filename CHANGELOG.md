@@ -5,9 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-06-12
 
 ### Added
+
+- **Multi-vantage confirmation** (`confirm_with_peers`, the headline of
+  0.6.0): when a monitor confirms down locally, the peers probe the same
+  target from their side before the alert goes out, and the alert carries
+  the verdict - *"confirmed down from 3/3 vantage points"* (a real outage)
+  vs *"seen UP by hora-b - network issue near this node?"*. Two Raspberry Pi
+  at two homes become a distributed Pingdom. Built to be boring under
+  failure:
+  - **Strictly fail-open**: peers being slow, broken, unreachable or
+    misconfigured never block, delay past a hard 10s deadline (probes run
+    concurrently), or suppress the alert - the worst outcome is an alert
+    without the annotation, exactly what Hora sent before. The incident
+    record is written *before* the peers are consulted.
+  - **Never a proxy**: the new `POST /api/peer/probe` only probes targets
+    present in the responder's *own* configuration (matched on kind +
+    target, probed with its own settings), so a leaked token cannot turn a
+    peer into an SSRF relay. It strictly requires the requesting peer's
+    `listen_token` - the id alone never authorizes - and unknown peers are
+    indistinguishable from wrong tokens.
+  - **A disputed down still alerts**: a peer seeing the target up softens
+    the message, never silences it - geo-partial outages are real outages.
+  - Enabled globally with `[health] confirm_with_peers = true`, overridden
+    per monitor; peer probe requests never ride a monitor's proxy; verified
+    end-to-end by a two-real-nodes test over live HTTP sockets.
 
 - **Per-group status pages** (`/status/{group}`): one display group's
   monitors, nothing else - lightweight multi-tenancy for an operator hosting

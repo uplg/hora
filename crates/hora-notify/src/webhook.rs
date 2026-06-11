@@ -26,6 +26,7 @@ impl WebhookNotifier {
                 error,
                 cause,
                 impacted,
+                vantage,
             } => Payload {
                 message: error,
                 cause,
@@ -34,6 +35,7 @@ impl WebhookNotifier {
                 } else {
                     Some(impacted)
                 },
+                vantage,
                 ..Payload::new("down", monitor)
             },
             Event::Degraded {
@@ -100,6 +102,9 @@ struct Payload<'a> {
     cause: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     impacted: Option<&'a [&'a str]>,
+    /// Multi-vantage verdict, on down events when peers were asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vantage: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     witness: Option<&'a str>,
     /// The registered domain, on domain-expiry events.
@@ -134,6 +139,7 @@ impl<'a> Payload<'a> {
             message: None,
             cause: None,
             impacted: None,
+            vantage: None,
             witness: None,
             domain: None,
             period: None,
@@ -178,6 +184,7 @@ mod tests {
             error: Some("boom"),
             cause: None,
             impacted: &[],
+            vantage: None,
         });
         assert_eq!(down.event, "down");
         assert_eq!(down.monitor, "API");
@@ -190,6 +197,7 @@ mod tests {
             error: Some("timeout"),
             cause: Some("DB"),
             impacted: &[],
+            vantage: None,
         });
         assert_eq!(symptom.cause, Some("DB"));
 
@@ -198,6 +206,7 @@ mod tests {
             error: Some("refused"),
             cause: None,
             impacted: &["API", "Web"],
+            vantage: None,
         });
         assert_eq!(root.impacted, Some(["API", "Web"].as_slice()));
 

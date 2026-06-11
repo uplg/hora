@@ -226,6 +226,7 @@ fn reconcile(
                 scheduler::MonitorDeps {
                     pool: deps.pool.clone(),
                     client,
+                    confirm_client: deps.client.clone(),
                     notifier: Arc::clone(&deps.notifier),
                     alerts: deps.alerts.clone(),
                     last_tick: Arc::clone(&deps.last_tick),

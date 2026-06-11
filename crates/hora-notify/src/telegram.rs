@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::util::{
     budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape, latency_suffix,
-    post_json, topology_suffix,
+    post_json, topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -34,11 +34,13 @@ impl TelegramNotifier {
                 error,
                 cause,
                 impacted,
+                vantage,
             } => format!(
-                "\u{1F534} <b>{}</b> is DOWN\n<code>{}</code>{}",
+                "\u{1F534} <b>{}</b> is DOWN\n<code>{}</code>{}{}",
                 escape(monitor),
                 escape(error.unwrap_or("no response")),
                 escape(&topology_suffix(cause, impacted)),
+                escape(&vantage_suffix(vantage)),
             ),
             Event::Degraded {
                 monitor,
@@ -143,6 +145,7 @@ mod tests {
             error: Some("boom"),
             cause: None,
             impacted: &[],
+            vantage: None,
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
 
@@ -151,6 +154,7 @@ mod tests {
             error: Some("timeout"),
             cause: Some("DB"),
             impacted: &[],
+            vantage: None,
         });
         assert!(symptom.contains("caused by DB"));
 
@@ -159,6 +163,7 @@ mod tests {
             error: Some("refused"),
             cause: None,
             impacted: &["API", "Web"],
+            vantage: None,
         });
         assert!(root.contains("impacts 2") && root.contains("API"));
 

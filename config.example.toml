@@ -309,6 +309,16 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # quorum = true             # before alerting a peer down, ask the OTHER peers'
 #                           # /healthz: if any still sees it up, it's a partition
 #                           # (PeerLinkDegraded), not an outage. No-op with < 3 nodes.
+# confirm_with_peers = true # multi-vantage confirmation: when a MONITOR confirms
+#                           # down, ask the peers to probe the same target before
+#                           # alerting. The alert says "confirmed down from 3/3
+#                           # vantage points" (real outage) or "seen UP by hora-b"
+#                           # (network issue near this node). A peer only probes
+#                           # targets in its OWN config (never an arbitrary one),
+#                           # and its [[peers]] entry for this node must set a
+#                           # listen_token. Strictly fail-open: unreachable peers
+#                           # never block or suppress the alert. Override per
+#                           # monitor with confirm_with_peers = true/false.
 # heartbeat_url = "${HC_PING_URL}"   # optional extra dead-man target (e.g. healthchecks.io)
 
 # Each [[peers]] entry has two independent halves; set either or both:

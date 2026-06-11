@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::util::{
     budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape, latency_suffix,
-    post_json, topology_suffix,
+    post_json, topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -32,11 +32,13 @@ impl SlackNotifier {
                 error,
                 cause,
                 impacted,
+                vantage,
             } => format!(
-                ":red_circle: *{}* is DOWN\n```{}```{}",
+                ":red_circle: *{}* is DOWN\n```{}```{}{}",
                 escape(monitor),
                 escape(error.unwrap_or("no response")).replace('`', "'"),
                 topology_suffix(cause, impacted),
+                escape(&vantage_suffix(vantage)),
             ),
             Event::Degraded {
                 monitor,
@@ -133,6 +135,7 @@ mod tests {
             error: Some("boom"),
             cause: None,
             impacted: &[],
+            vantage: None,
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
 

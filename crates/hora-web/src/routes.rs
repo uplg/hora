@@ -16,8 +16,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
     favicon, font, group_page, healthz, heatmap_svg, history_atom, history_page, latency_json,
-    metrics_prometheus, openapi, page, push, report_page, silence, status_badge, summary_json,
-    uptime_badge,
+    metrics_prometheus, openapi, page, peer_probe, push, report_page, silence, status_badge,
+    summary_json, uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -31,7 +31,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/summary", get(summary_json))
         .route("/api/monitors/{id}/latency", get(latency_json))
         .route("/api/push/{id}", post(push))
-        .route("/api/silence", post(silence));
+        .route("/api/silence", post(silence))
+        .route("/api/peer/probe", post(peer_probe));
 
     // Parameters are clamped to >= 1, so `finish` always succeeds; if it ever
     // did not, the API simply runs without a rate limit rather than panicking.
@@ -365,6 +366,239 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Build an app from an arbitrary config TOML (the shared `test_app` has a
+    /// fixed one; the peer-probe tests need targets bound to live local ports).
+    async fn app_from(toml: &str) -> Router {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("pool");
+        hora_core::db::migrator().run(&pool).await.expect("migrate");
+        let config = hora_core::config::parse(toml).expect("config");
+        let (tx, rx) = watch::channel(Arc::new(config));
+        // Keep the sender alive for the app's lifetime.
+        std::mem::forget(tx);
+        router(AppState::new(pool, rx, Arc::new(AtomicU64::new(0))))
+    }
+
+    /// Node B's config for the peer-probe tests: it knows the tcp target and
+    /// expects requests from peer `hora-a` with this token.
+    fn vantage_config(target_port: u16) -> String {
+        format!(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-b"
+            [[peers]]
+            id = "hora-a"
+            name = "A"
+            expect_every_secs = 60
+            listen_token = "tok-a-to-b-16char"
+            [[monitors]]
+            id = "svc"
+            name = "Svc"
+            kind = "tcp"
+            target = "127.0.0.1:{target_port}"
+            interval_secs = 60
+            timeout_secs = 2
+            "#
+        )
+    }
+
+    fn probe_request(body: &str, token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/peer/probe")
+            .header("content-type", "application/json")
+            .extension(fake_peer());
+        if let Some(token) = token {
+            builder = builder.header("x-push-token", token);
+        }
+        builder.body(Body::from(body.to_owned())).expect("request")
+    }
+
+    #[tokio::test]
+    async fn peer_probe_authenticates_strictly() {
+        let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = service.local_addr().unwrap().port();
+        let body = format!(r#"{{"from":"hora-a","kind":"tcp","target":"127.0.0.1:{port}"}}"#);
+
+        // Wrong token, missing token, unknown peer: all 401, indistinguishable.
+        for (from, token) in [
+            ("hora-a", Some("wrong")),
+            ("hora-a", None),
+            ("nobody", Some("tok-a-to-b-16char")),
+        ] {
+            let body = body.replace("hora-a", from);
+            let res = app_from(&vantage_config(port))
+                .await
+                .oneshot(probe_request(&body, token))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{from} {token:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_probe_refuses_targets_outside_its_config() {
+        let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = service.local_addr().unwrap().port();
+
+        // The SSRF guard: an authenticated peer asking for an arbitrary target
+        // (or the right target under another kind) gets a 404, never a probe.
+        for body in [
+            r#"{"from":"hora-a","kind":"tcp","target":"169.254.169.254:80"}"#.to_owned(),
+            format!(r#"{{"from":"hora-a","kind":"http","target":"127.0.0.1:{port}"}}"#),
+        ] {
+            let res = app_from(&vantage_config(port))
+                .await
+                .oneshot(probe_request(&body, Some("tok-a-to-b-16char")))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_probe_reports_its_own_vantage() {
+        let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = service.local_addr().unwrap().port();
+        let body = format!(r#"{{"from":"hora-a","kind":"tcp","target":"127.0.0.1:{port}"}}"#);
+        let config = vantage_config(port);
+
+        // Service listening: up from this vantage.
+        let res = app_from(&config)
+            .await
+            .oneshot(probe_request(&body, Some("tok-a-to-b-16char")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let verdict: hora_core::confirm::ProbeResponse =
+            serde_json::from_str(&body_text(res).await).unwrap();
+        assert!(verdict.up);
+
+        // Service gone: down from this vantage, with a reason.
+        drop(service);
+        let res = app_from(&config)
+            .await
+            .oneshot(probe_request(&body, Some("tok-a-to-b-16char")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let verdict: hora_core::confirm::ProbeResponse =
+            serde_json::from_str(&body_text(res).await).unwrap();
+        assert!(!verdict.up);
+        assert!(verdict.error.is_some());
+    }
+
+    /// The full two-node round trip: node A confirms a down with node B over
+    /// real HTTP (B served on a localhost socket), in every disagreement mode.
+    #[tokio::test]
+    async fn multi_vantage_confirms_across_two_real_nodes() {
+        // The monitored "service": a local TCP listener both nodes target.
+        let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = service.local_addr().unwrap().port();
+
+        // Node B, served for real so node A's HTTP client talks to it.
+        let app_b = app_from(&vantage_config(port)).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app_b.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        // Node A: same target, peer B at its real address, confirmation on.
+        let config_a = hora_core::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            confirm_with_peers = true
+            [[peers]]
+            id = "hora-b"
+            name = "Hora B"
+            ping_url = "http://{addr_b}/api/push/hora-a"
+            ping_token = "tok-a-to-b-16char"
+            [[monitors]]
+            id = "svc"
+            name = "Svc"
+            kind = "tcp"
+            target = "127.0.0.1:{port}"
+            interval_secs = 60
+            timeout_secs = 2
+            "#
+        ))
+        .expect("config a");
+        let client = hora_core::http::client(None).expect("client");
+
+        // Disagreement: A thinks it is down, B still reaches it.
+        let verdict =
+            hora_core::confirm::confirm_with_peers(&client, &config_a, &config_a.monitors[0])
+                .await
+                .expect("peers were asked");
+        assert!(verdict.contains("seen UP by Hora B"), "{verdict}");
+        assert!(verdict.contains("network issue"), "{verdict}");
+
+        // Real outage: the service is gone for B too.
+        drop(service);
+        let verdict =
+            hora_core::confirm::confirm_with_peers(&client, &config_a, &config_a.monitors[0])
+                .await
+                .expect("peers were asked");
+        assert_eq!(verdict, "confirmed down from 2/2 vantage points");
+
+        // Fail open: a wrong token makes B answer 401 - the alert is
+        // annotated as unconfirmed, never blocked.
+        let mut config_bad = hora_core::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            confirm_with_peers = true
+            [[peers]]
+            id = "hora-b"
+            name = "Hora B"
+            ping_url = "http://{addr_b}/api/push/hora-a"
+            ping_token = "wrong-token-16chars"
+            [[monitors]]
+            id = "svc"
+            name = "Svc"
+            kind = "tcp"
+            target = "127.0.0.1:{port}"
+            interval_secs = 60
+            timeout_secs = 2
+            "#
+        ))
+        .expect("config bad");
+        let verdict =
+            hora_core::confirm::confirm_with_peers(&client, &config_bad, &config_bad.monitors[0])
+                .await
+                .expect("peers were asked");
+        assert!(verdict.contains("no peer vantage reachable"), "{verdict}");
+
+        // Fail open: a peer that is not even listening behaves the same.
+        config_bad.peers[0].ping_url = Some(hora_core::config::Secret(
+            "http://127.0.0.1:9/api/push/hora-a".to_owned(),
+        ));
+        let verdict =
+            hora_core::confirm::confirm_with_peers(&client, &config_bad, &config_bad.monitors[0])
+                .await
+                .expect("peers were asked");
+        assert!(verdict.contains("no peer vantage reachable"), "{verdict}");
     }
 
     /// Read a response body as text (the pages are small).

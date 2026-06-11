@@ -3,6 +3,7 @@
 pub mod cert;
 pub mod coalesce;
 pub mod config;
+pub mod confirm;
 pub mod db;
 pub mod digest;
 pub mod doctor;

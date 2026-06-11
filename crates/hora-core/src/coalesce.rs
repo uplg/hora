@@ -50,6 +50,8 @@ pub struct DownAlert {
     pub cause_name: Option<String>,
     pub impacted: Vec<String>,
     pub notify: Option<Vec<String>>,
+    /// Multi-vantage verdict, when peers were asked before this alert.
+    pub vantage: Option<String>,
 }
 
 /// How long a sent (or folded) down alert keeps absorbing late symptom
@@ -260,6 +262,7 @@ async fn send_down(notifier: &Notifiers, alert: &DownAlert) {
                 error: alert.error.as_deref(),
                 cause: alert.cause_name.as_deref(),
                 impacted: &impacted,
+                vantage: alert.vantage.as_deref(),
             },
             alert.notify.as_deref(),
         )
@@ -279,6 +282,7 @@ mod tests {
             cause_name: upstreams.first().map(|u| u.to_uppercase()),
             impacted: Vec::new(),
             notify: None,
+            vantage: None,
         }
     }
 

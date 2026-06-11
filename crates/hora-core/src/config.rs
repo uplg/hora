@@ -492,6 +492,14 @@ pub struct Health {
     /// `interval_secs` when locally healthy, alongside the peers' `ping_url`.
     #[serde(default)]
     pub heartbeat_url: Option<Secret>,
+    /// Multi-vantage confirmation: when a monitor confirms down locally, ask
+    /// the peers to probe the same target from their side before alerting,
+    /// and annotate the alert with the verdict ("confirmed from 3/3 vantage
+    /// points" vs "seen UP by hora-b"). Per-monitor `confirm_with_peers`
+    /// overrides this default either way. Strictly fail-open: peers being
+    /// slow, broken or unreachable never blocks or suppresses the alert.
+    #[serde(default)]
+    pub confirm_with_peers: bool,
 }
 
 impl Health {
@@ -568,16 +576,30 @@ impl Peer {
         if let Some(url) = &self.witness_url {
             return Some(url.clone());
         }
+        self.api_origin().map(|origin| format!("{origin}/healthz"))
+    }
+
+    /// The peer's `/api/peer/probe` URL for multi-vantage confirmation, derived
+    /// from the origin of `ping_url`. `None` when there is no `ping_url` (an
+    /// IN-only or external peer cannot be asked to probe).
+    #[must_use]
+    pub fn probe_url(&self) -> Option<String> {
+        self.api_origin()
+            .map(|origin| format!("{origin}/api/peer/probe"))
+    }
+
+    /// The `scheme://host[:port]` origin of the peer's API, from its `ping_url`.
+    fn api_origin(&self) -> Option<String> {
         let ping = self.ping_url.as_ref()?;
         let url = reqwest::Url::parse(ping.as_ref()).ok()?;
         let origin = url.origin();
-        origin
-            .is_tuple()
-            .then(|| format!("{}/healthz", origin.ascii_serialization()))
+        origin.is_tuple().then(|| origin.ascii_serialization())
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize, utoipa::ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     #[default]
@@ -736,6 +758,10 @@ pub struct Monitor {
     /// public-suffix list, and the operator already knows the answer.
     #[serde(default)]
     pub domain_expiry: Option<String>,
+    /// Multi-vantage confirmation override for this monitor; unset = the
+    /// `[health].confirm_with_peers` default. See that field for semantics.
+    #[serde(default)]
+    pub confirm_with_peers: Option<bool>,
 }
 
 // Manual `Debug` (rather than derived) so credentials never leak: `target` and
@@ -780,6 +806,7 @@ impl std::fmt::Debug for Monitor {
             .field("dns_resolver", &self.dns_resolver)
             .field("cert_pin", &self.cert_pin)
             .field("domain_expiry", &self.domain_expiry)
+            .field("confirm_with_peers", &self.confirm_with_peers)
             .finish()
     }
 }
@@ -1182,8 +1209,52 @@ fn validate(config: &Config) -> anyhow::Result<()> {
 
     validate_peers(config, &seen, &channel_names)?;
 
-    // Digest: the cron must parse at load (not at the first missed send), and
-    // routes must name real channels, like a monitor's `notify`.
+    validate_confirm(config)?;
+    validate_digest(config, &channel_names)?;
+    Ok(())
+}
+
+/// Multi-vantage confirmation needs peers that can actually be asked: a
+/// `[health]` section and at least one peer with a `ping_url` (its API origin).
+/// A flag that can never confirm anything is a config mistake, not a plan.
+fn validate_confirm(config: &Config) -> anyhow::Result<()> {
+    let confirmable_peers = config.peers.iter().any(|peer| peer.probe_url().is_some());
+    let confirm_requested = config
+        .health
+        .as_ref()
+        .is_some_and(|health| health.confirm_with_peers)
+        || config
+            .monitors
+            .iter()
+            .any(|monitor| monitor.confirm_with_peers == Some(true));
+    if confirm_requested {
+        anyhow::ensure!(
+            config.health.is_some(),
+            "confirm_with_peers requires a [health] section"
+        );
+        anyhow::ensure!(
+            confirmable_peers,
+            "confirm_with_peers requires at least one peer with a ping_url \
+             (its API origin is where probe requests go)"
+        );
+    }
+    for monitor in &config.monitors {
+        anyhow::ensure!(
+            !(monitor.confirm_with_peers == Some(true) && monitor.kind == Kind::Push),
+            "monitor {}: confirm_with_peers needs an active probe (push monitors \
+             have no target a peer could probe)",
+            monitor.id
+        );
+    }
+    Ok(())
+}
+
+/// Digest: the cron must parse at load (not at the first missed send), and
+/// routes must name real channels, like a monitor's `notify`.
+fn validate_digest(
+    config: &Config,
+    channel_names: &std::collections::HashSet<&str>,
+) -> anyhow::Result<()> {
     if let Some(digest) = &config.digest {
         digest.schedule.parse::<croner::Cron>().map_err(|err| {
             anyhow::anyhow!("digest: invalid schedule {:?}: {err}", digest.schedule)
@@ -2217,6 +2288,92 @@ mod tests {
         );
         let error = validate(&config).unwrap_err().to_string();
         assert!(error.contains("duplicate channel name"), "got: {error}");
+    }
+
+    #[test]
+    fn confirm_with_peers_requires_health_and_a_probeable_peer() {
+        // Global flag without [health]: rejected.
+        let err = super::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://example.com"
+            interval_secs = 60
+            confirm_with_peers = true
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("[health]"), "{err}");
+
+        // [health] flag but no peer with a ping_url: rejected.
+        let err = super::parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            confirm_with_peers = true
+            [[peers]]
+            id = "hora-b"
+            name = "B"
+            expect_every_secs = 60
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ping_url"), "{err}");
+
+        // A push monitor cannot opt in (nothing to probe).
+        let err = super::parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            [[peers]]
+            id = "hora-b"
+            name = "B"
+            ping_url = "https://b.example/api/push/hora-a"
+            [[monitors]]
+            id = "beat"
+            name = "Beat"
+            kind = "push"
+            interval_secs = 60
+            confirm_with_peers = true
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("push"), "{err}");
+
+        // The healthy shape parses, and probe_url derives from ping_url's origin.
+        let config = super::parse(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-a"
+            confirm_with_peers = true
+            [[peers]]
+            id = "hora-b"
+            name = "B"
+            ping_url = "https://b.example:8443/api/push/hora-a"
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://example.com"
+            interval_secs = 60
+        "#,
+        )
+        .expect("valid");
+        assert_eq!(
+            config.peers[0].probe_url().as_deref(),
+            Some("https://b.example:8443/api/peer/probe")
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::util::{
     budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
-    topology_suffix,
+    topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -29,10 +29,12 @@ impl GotifyNotifier {
                 error,
                 cause,
                 impacted,
+                vantage,
             } => {
                 let suffix = topology_suffix(cause, impacted);
+                let vantage = vantage_suffix(vantage);
                 let detail = error.map_or_else(String::new, |e| format!("\n{e}"));
-                (format!("DOWN: {monitor}{detail}{suffix}"), 8)
+                (format!("DOWN: {monitor}{detail}{suffix}{vantage}"), 8)
             }
             Event::Degraded {
                 monitor,

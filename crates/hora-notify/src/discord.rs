@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::util::{
     budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, post_json,
-    topology_suffix,
+    topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -38,11 +38,13 @@ impl DiscordNotifier {
                 error,
                 cause,
                 impacted,
+                vantage,
             } => Embed {
                 description: Some(format!(
-                    "```{}```{}",
+                    "```{}```{}{}",
                     error.unwrap_or("no response").replace('`', "'"),
-                    topology_suffix(cause, impacted)
+                    topology_suffix(cause, impacted),
+                    vantage_suffix(vantage)
                 )),
                 title: format!("\u{1F534} {monitor} is DOWN"),
                 color: COLOR_DOWN,
@@ -174,6 +176,7 @@ mod tests {
             error: Some("boom"),
             cause: None,
             impacted: &[],
+            vantage: None,
         });
         assert!(down.title.contains("is DOWN"));
         assert!(down.description.expect("down has a body").contains("boom"));
@@ -206,6 +209,7 @@ mod tests {
             error: Some("``` injection"),
             cause: None,
             impacted: &[],
+            vantage: None,
         });
         let body = down.description.expect("down has a body");
         assert!(

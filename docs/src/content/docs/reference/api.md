@@ -23,6 +23,7 @@ Editor...) at it.
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. |
 | `POST /api/silence` | Mute alerts ad hoc (deploy hook). |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
+| `POST /api/peer/probe` | [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation) between nodes: probe a target *from this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token`. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code. |

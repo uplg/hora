@@ -4,6 +4,25 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.5.1 → 0.6.0
+
+No behavioural changes: everything is opt-in. Notes:
+
+- **Multi-vantage confirmation is off by default.** To enable it, set
+  `[health] confirm_with_peers = true` on the node(s) that should ask, make
+  sure each `[[peers]]` entry has a `ping_url` (its origin is where probe
+  requests go) and that the *responding* node sets a `listen_token` for the
+  requester - `POST /api/peer/probe` strictly requires it. Both nodes must
+  know the monitor (same kind + target); a peer never probes a target outside
+  its own config.
+- **One new endpoint** (`POST /api/peer/probe`) exists even with the feature
+  off; without a matching authenticated peer it answers 401 to everyone.
+- New config keys (`confirm_with_peers`, plus 0.6.0's `[digest]`,
+  `server.group_tokens`) are rejected by older binaries
+  (`deny_unknown_fields`): **deploy the binary before the config**, on every
+  node of the mesh. One schema migration (the digest's `meta` table) applies
+  automatically.
+
 ## 0.5.0 → 0.5.1
 
 Two things to know:

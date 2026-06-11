@@ -5,7 +5,7 @@ use reqwest::Client;
 
 use crate::util::{
     budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
-    topology_suffix,
+    topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -28,11 +28,13 @@ impl NtfyNotifier {
                 error,
                 cause,
                 impacted,
+                vantage,
             } => {
                 let suffix = topology_suffix(cause, impacted);
+                let vantage = vantage_suffix(vantage);
                 let detail = error.map_or_else(String::new, |e| format!("\n{e}"));
                 (
-                    format!("DOWN: {monitor}{detail}{suffix}"),
+                    format!("DOWN: {monitor}{detail}{suffix}{vantage}"),
                     "rotating_light",
                     4,
                 )

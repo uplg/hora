@@ -948,6 +948,7 @@ mod tests {
             dns_resolver: None,
             cert_pin: None,
             domain_expiry: None,
+            confirm_with_peers: None,
             slo_uptime: None,
             slo_window_days: None,
             schedule: None,

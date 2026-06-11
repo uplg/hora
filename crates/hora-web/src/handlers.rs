@@ -47,6 +47,7 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         latency_json,
         push,
         silence,
+        peer_probe,
         status_badge,
         uptime_badge,
         heatmap_svg,
@@ -61,7 +62,9 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         Point,
         HealthReport,
         PeerSeen,
-        SilenceResponse
+        SilenceResponse,
+        hora_core::confirm::ProbeRequest,
+        hora_core::confirm::ProbeResponse
     ))
 )]
 struct ApiDoc;
@@ -517,6 +520,86 @@ pub(crate) async fn latency_json(
     let points = db::latency_series(&pool, &id, since, bucket_secs).await?;
     // The SQL already respects the cap; downsample stays as a pure backstop.
     Ok(Json(downsample(points, MAX_LATENCY_POINTS)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/peer/probe",
+    request_body = hora_core::confirm::ProbeRequest,
+    responses(
+        (status = 200, description = "This vantage's verdict on the target", body = hora_core::confirm::ProbeResponse),
+        (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token"),
+        (status = 404, description = "The target is not in this node's configuration")
+    )
+)]
+pub(crate) async fn peer_probe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<hora_core::confirm::ProbeRequest>,
+) -> Result<Json<hora_core::confirm::ProbeResponse>, AppError> {
+    let config = state.config.borrow().clone();
+
+    // Authenticate the requesting peer: it must be configured here, it must
+    // have a listen_token (probing is strictly more sensitive than a push
+    // heartbeat, so the id alone never authorizes), and the X-Push-Token
+    // header must match. Unknown peers answer exactly like a wrong token.
+    let authorized = config
+        .peers
+        .iter()
+        .find(|peer| peer.id == request.from)
+        .and_then(|peer| peer.listen_token.as_ref())
+        .is_some_and(|expected| {
+            headers
+                .get("x-push-token")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|token| ct_eq(token, expected.as_ref()))
+        });
+    if !authorized {
+        return Err(AppError::Unauthorized("unknown peer or invalid token"));
+    }
+
+    // The SSRF guard: only targets present in THIS node's configuration are
+    // probed - a peer is a vantage point, never a proxy. The matched
+    // monitor's own settings (timeout, assertions, proxy) drive the probe.
+    let monitor = config
+        .monitors
+        .iter()
+        .find(|monitor| {
+            monitor.kind == request.kind
+                && monitor.target == request.target
+                && monitor.kind != Kind::Push
+        })
+        .ok_or(AppError::NotFound(
+            "target not in this node's configuration",
+        ))?;
+
+    // Single attempt (no retries): the requester wants a fast vantage check,
+    // not this node's anti-flap pipeline. The outer timeout is a backstop on
+    // top of the probe's own; if even that elapses, the target is
+    // unresponsive *from here*, which is a down verdict in its own right.
+    let mut probe_monitor = monitor.clone();
+    probe_monitor.probe_retries = Some(0);
+    let client = hora_core::http::probe_client(monitor.proxy.as_deref())
+        .map_err(|err| AppError::Internal(err.into()))?;
+    let outcome = match tokio::time::timeout(
+        hora_core::confirm::PROBE_DEADLINE,
+        hora_core::probe::run(&client, &probe_monitor),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_elapsed) => {
+            return Ok(Json(hora_core::confirm::ProbeResponse {
+                up: false,
+                error: Some("probe timed out at this vantage".to_owned()),
+            }));
+        }
+    };
+    Ok(Json(hora_core::confirm::ProbeResponse {
+        up: outcome.up,
+        // Bounded: the reason crosses the wire into another node's logs.
+        error: outcome.error.map(|error| error.chars().take(200).collect()),
+    }))
 }
 
 #[utoipa::path(

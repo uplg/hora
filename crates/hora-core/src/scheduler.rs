@@ -47,6 +47,10 @@ impl BurnAlerts {
 pub struct MonitorDeps {
     pub pool: SqlitePool,
     pub client: Client,
+    /// The shared plain client for multi-vantage confirmation requests to the
+    /// peers. Distinct from `client` on purpose: that one may be bound to the
+    /// monitor's proxy, and a peer request must never ride a monitor's proxy.
+    pub confirm_client: Client,
     pub notifier: Notifiers,
     pub alerts: mpsc::UnboundedSender<AlertMsg>,
     pub last_tick: Arc<AtomicU64>,
@@ -74,6 +78,7 @@ async fn run(
     let MonitorDeps {
         pool,
         client,
+        confirm_client,
         notifier,
         alerts,
         last_tick,
@@ -164,6 +169,7 @@ async fn run(
                 confirm_down(
                     &snapshot,
                     &pool,
+                    &confirm_client,
                     &alerts,
                     &monitor,
                     &outcome,
@@ -178,17 +184,7 @@ async fn run(
             consecutive_degraded = consecutive_degraded.saturating_add(1);
             consecutive_down = 0;
             if consecutive_degraded >= threshold && alerted != AlertLevel::Degraded {
-                warn!(monitor = %monitor.id, latency_ms = ?outcome.latency_ms, "degraded");
-                notifier
-                    .load_full()
-                    .dispatch(
-                        Event::Degraded {
-                            monitor: &monitor.name,
-                            latency_ms: outcome.latency_ms,
-                        },
-                        monitor.notify.as_deref(),
-                    )
-                    .await;
+                alert_degraded(&notifier, &monitor, outcome.latency_ms).await;
                 alerted = AlertLevel::Degraded;
             }
         } else {
@@ -211,11 +207,14 @@ async fn run(
 }
 
 /// A monitor just confirmed down: resolve the topology context, open (or
-/// resume) the incident record, and hand the alert to the coalescer, which
-/// may fold it into its root cause's single notification.
+/// resume) the incident record, ask the peers for a multi-vantage verdict,
+/// and hand the alert to the coalescer, which may fold it into its root
+/// cause's single notification.
+#[allow(clippy::too_many_arguments)]
 async fn confirm_down(
     config: &Config,
     pool: &SqlitePool,
+    confirm_client: &Client,
     alerts: &mpsc::UnboundedSender<AlertMsg>,
     monitor: &Monitor,
     outcome: &Outcome,
@@ -225,6 +224,8 @@ async fn confirm_down(
     let (cause, impacted_names) = down_context(config, pool, monitor, threshold).await;
 
     // Unless one is already open (resumed from a previous run mid-outage).
+    // Recorded *before* the peers are consulted, so the incident history
+    // never waits on the network.
     if open_incident.is_none() {
         *open_incident = open_incident_record(
             pool,
@@ -234,6 +235,14 @@ async fn confirm_down(
             &impacted_names,
         )
         .await;
+    }
+
+    // Multi-vantage confirmation: bounded (one concurrent round, hard
+    // deadline) and strictly fail-open - `None` means the alert reads exactly
+    // as it would without the feature.
+    let vantage = crate::confirm::confirm_with_peers(confirm_client, config, monitor).await;
+    if let Some(verdict) = &vantage {
+        info!(monitor = %monitor.id, %verdict, "multi-vantage verdict");
     }
 
     // The coalescer groups on the *configured* upstreams: in a cascade this
@@ -250,6 +259,7 @@ async fn confirm_down(
         cause_name: cause.map(|(_, name)| name),
         impacted: impacted_names,
         notify: monitor.notify.clone(),
+        vantage,
     }));
 }
 
@@ -263,6 +273,21 @@ fn alert_settings(config: &watch::Receiver<Arc<Config>>, monitor_id: &str) -> (b
         snapshot.alerts.fail_threshold.max(1),
         snapshot.alerts.alert_on_degraded,
     )
+}
+
+/// Announce a confirmed-degraded monitor (up, but over its latency budget).
+async fn alert_degraded(notifier: &Notifiers, monitor: &Monitor, latency_ms: Option<i64>) {
+    warn!(monitor = %monitor.id, ?latency_ms, "degraded");
+    notifier
+        .load_full()
+        .dispatch(
+            Event::Degraded {
+                monitor: &monitor.name,
+                latency_ms,
+            },
+            monitor.notify.as_deref(),
+        )
+        .await;
 }
 
 /// Whether an ad-hoc silence covers this monitor right now. A read error fails

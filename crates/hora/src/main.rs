@@ -158,6 +158,7 @@ async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
         error: Some("test alert sent by `hora test-alert` - not a real incident"),
         cause: None,
         impacted: &[],
+        vantage: None,
     };
     let mut failed = dispatcher.dispatch(event, notify.as_deref()).await;
     let failed_recovery = dispatcher

@@ -30,6 +30,12 @@ pub(crate) fn topology_suffix(cause: Option<&str>, impacted: &[&str]) -> String 
     format!("\nimpacts {}: {}", impacted.len(), impacted.join(", "))
 }
 
+/// Multi-vantage annotation for a down alert (`"\n<verdict>"`), empty when no
+/// peers were asked - so every channel words the vantage line the same way.
+pub(crate) fn vantage_suffix(vantage: Option<&str>) -> String {
+    vantage.map_or_else(String::new, |verdict| format!("\n{verdict}"))
+}
+
 /// Human phrasing for a budget-burn event, shared so every channel words the
 /// rate and the exhaustion estimate the same way:
 /// `"burning error budget at 14.4x (1h) - exhausted in ~23h at this rate"`.
