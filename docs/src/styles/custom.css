@@ -1,0 +1,29 @@
+/* Starlight sizes the hero image slot for a logo or illustration
+   (min(70%, 20rem) on mobile, a 7fr/4fr column capped at 25rem on desktop,
+   and the image.file variant even renders a literal 400x400 asset). Ours is
+   a full status-page screenshot delivered via image.html: give it half the
+   hero and let it keep its natural proportions. These rules are unlayered,
+   so they win over the component's @layer starlight.core styles without
+   specificity games. */
+
+.hero > .hero-html {
+	width: min(100%, 34rem);
+}
+
+.hero > .hero-html img {
+	width: 100%;
+	height: auto;
+	border-radius: 12px;
+	border: 1px solid var(--sl-color-gray-5);
+	box-shadow: var(--sl-shadow-md);
+}
+
+@media (min-width: 50rem) {
+	.hero {
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.hero > .hero-html {
+		width: 100%;
+	}
+}

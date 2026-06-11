@@ -13,6 +13,7 @@ export default defineConfig({
 				'A tiny, self-hosted uptime monitor: one small binary, a status page, alerts that never wake you up for flapping.',
 			logo: { src: './src/assets/logo.svg' },
 			favicon: '/favicon.svg',
+			customCss: ['./src/styles/custom.css'],
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/uplg/hora' },
 			],
