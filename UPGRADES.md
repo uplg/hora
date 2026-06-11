@@ -4,6 +4,20 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.6.0 → 0.7.0
+
+No behavioural changes: everything is opt-in or a new subcommand. Notes:
+
+- **Exec probes are double-gated.** `kind = "exec"` requires the
+  `HORA_EXEC_DIR` environment variable (deployment-level consent, never just
+  the config) and only runs executables inside that directory. Without the
+  variable, a config declaring an exec monitor fails at load - intended.
+- **One schema migration** (the `announcements` table) applies automatically.
+- **`POST /api/announce` and `DELETE /api/announce`** exist but answer 401
+  for everyone until `server.auth_token` is configured, like `/api/silence`.
+- As always with new config/monitor keys (`command` on monitors): **deploy
+  the binary before a config that uses them** (`deny_unknown_fields`).
+
 ## 0.5.1 → 0.6.0
 
 No behavioural changes: everything is opt-in. Notes:
