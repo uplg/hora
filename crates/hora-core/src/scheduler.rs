@@ -90,6 +90,9 @@ async fn run(
     let mut consecutive_degraded: u32 = 0;
     let mut alerted = AlertLevel::Healthy;
     let mut burn = BurnAlerts::default();
+    // The exec directory comes from the environment (immutable for the process
+    // lifetime), so one read outlives every config reload.
+    let exec_dir = config.borrow().exec_dir.clone();
     // Re-attach to an incident left open by a previous run (restart mid-outage,
     // monitor edited live): it gets closed on the first healthy tick instead of
     // staying open forever, and a still-down monitor keeps its original start.
@@ -114,7 +117,8 @@ async fn run(
 
         // No outcome means a push monitor without a heartbeat yet: status
         // stays unknown, nothing to react to this tick.
-        let Some(outcome) = tick_outcome(&client, &pool, &monitor).await else {
+        let Some(outcome) = tick_outcome(&client, &pool, &monitor, exec_dir.as_deref()).await
+        else {
             continue;
         };
 
@@ -311,13 +315,27 @@ async fn close_open_incident(pool: &SqlitePool, monitor_id: &str, open_incident:
     }
 }
 
-/// One tick's outcome: probe active monitors (recording the check), evaluate
-/// stored heartbeats for push monitors. `None` means nothing to react to yet.
-async fn tick_outcome(client: &Client, pool: &SqlitePool, monitor: &Monitor) -> Option<Outcome> {
+/// One tick's outcome: probe active monitors (recording the check), run exec
+/// checks, evaluate stored heartbeats for push monitors. `None` means nothing
+/// to react to yet.
+async fn tick_outcome(
+    client: &Client,
+    pool: &SqlitePool,
+    monitor: &Monitor,
+    exec_dir: Option<&std::path::Path>,
+) -> Option<Outcome> {
     if monitor.kind == Kind::Push {
         return heartbeat_outcome(pool, monitor).await;
     }
-    let outcome = probe::run(client, monitor).await;
+    let outcome = if monitor.kind == Kind::Exec {
+        match exec_dir {
+            Some(dir) => crate::exec::run(dir, monitor).await,
+            // Config validation guarantees the directory; defensive only.
+            None => crate::probe::Outcome::down("HORA_EXEC_DIR is not set".to_owned()),
+        }
+    } else {
+        probe::run(client, monitor).await
+    };
     if let Err(err) = db::insert_check(pool, &monitor.id, outcome.status_value(), &outcome).await {
         error!(monitor = %monitor.id, "failed to record check: {err:#}");
     }

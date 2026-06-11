@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Exec probes** (`kind = "exec"`): run an external check following the
+  monitoring-plugins convention - exit 0 = up, 1 = degraded, anything else
+  = down, first stdout line = message (`|perfdata` stripped, output bounded,
+  the pipe drained so a chatty plugin never deadlocks). The whole
+  Nagios/Icinga plugin ecosystem becomes usable from Hora - or a five-line
+  script watching another container through a (rootless) Docker socket.
+  The security model is the **`HORA_EXEC_DIR` environment variable**,
+  deliberately *not* a config key: the hot-reloadable config alone must
+  never be able to run code, so enabling exec probes takes deployment-level
+  access too. `command` is a raw argv (no shell, no injection), `command[0]`
+  is resolved strictly inside the directory (canonicalized - a planted
+  symlink pointing outside is refused), plugins get a scrubbed environment
+  (the daemon's own env carries channel tokens), stuck plugins are SIGKILLed
+  at the monitor's timeout, and `hora doctor` verifies the directory and
+  that every configured plugin is present. Exec monitors are excluded from
+  multi-vantage confirmation (a local check has no remote vantage) and
+  their failure detail collapses for anonymous viewers like any other
+  operator detail.
+
 ## [0.6.0] - 2026-06-12
 
 ### Added

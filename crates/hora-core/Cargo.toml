@@ -23,7 +23,7 @@ sha2.workspace = true
 socket2 = "0.6.1"
 sqlx.workspace = true
 surge-ping = "0.8.4"
-tokio = { workspace = true, features = ["rt", "time", "net", "sync", "signal"] }
+tokio = { workspace = true, features = ["rt", "time", "net", "sync", "signal", "process"] }
 tokio-rustls.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -31,7 +31,7 @@ utoipa = "5.5.0"
 x509-parser.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "process"] }
 
 [lints]
 workspace = true

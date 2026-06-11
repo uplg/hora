@@ -92,6 +92,7 @@ Only three are read directly (everything else lives in the config file):
 | `HORA_CONFIG` | Path to the config file (default `./config.toml`) |
 | `HORA_DATABASE_PATH` | Overrides `server.database_path` |
 | `HORA_BIND` | Overrides `server.bind` |
+| `HORA_EXEC_DIR` | Enables [exec probes](../guides/monitors/#exec) and confines them to this directory |
 
 Plus `HORA_LOG` for log filtering (a `tracing` filter string, default `info`).
 

@@ -278,6 +278,24 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # schedule = "0 3 * * *"     # five-field cron, UTC; replaces the fixed-gap rule
 # grace_secs = 1800          # how late a scheduled ping may be (default 30m)
 
+# Exec monitor: run an external check, monitoring-plugins convention (exit
+# 0 = up, 1 = degraded, anything else = down; first stdout line = message).
+# Opens the whole Nagios/Icinga plugin ecosystem - or a 5-line script watching
+# another container through a (rootless) Docker socket.
+#
+# Security model: requires the HORA_EXEC_DIR environment variable (NOT a
+# config key - the hot-reloadable config alone must never run code), and
+# command[0] is resolved strictly inside that directory. No shell is involved
+# (command is a raw argv) and plugins get a scrubbed environment, never the
+# daemon's (which carries your channel tokens).
+# [[monitors]]
+# id = "raid"
+# name = "RAID"
+# kind = "exec"
+# command = ["check_raid", "--no-sudo"]  # runs $HORA_EXEC_DIR/check_raid
+# interval_secs = 300
+# timeout_secs = 30                      # the plugin is SIGKILLed past this
+
 # DNS monitor: resolve a hostname; `dns_expected` pins the answer (hijack
 # detection - alerts when the answer doesn't match). Without it any non-empty
 # answer counts as up: CDN and round-robin answers rotate constantly, so

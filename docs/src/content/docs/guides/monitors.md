@@ -85,6 +85,86 @@ dns_expected = "1.2.3.4"     # comma-separated, order-insensitive
 dns_resolver = "8.8.8.8:53"  # optional; default: system resolver
 ```
 
+### `exec`
+
+Run any external check following the **monitoring-plugins convention**: exit
+0 = up, 1 = degraded, anything else = down; the first stdout line is the
+message (the `|perfdata` tail is stripped). The whole Nagios/Icinga plugin
+ecosystem - thousands of checks: RAID, disks, exotic certificates, SNMP -
+becomes usable from Hora.
+
+```toml
+[[monitors]]
+id = "raid"
+name = "RAID"
+kind = "exec"
+command = ["check_raid", "--no-sudo"]   # a raw argv - no shell, ever
+interval_secs = 300
+timeout_secs = 30                       # the plugin is SIGKILLed past this
+```
+
+**The security model is the `HORA_EXEC_DIR` environment variable** -
+deliberately *not* a config key. The config is hot-reloaded, so it alone
+must never be able to run code: enabling exec probes takes deployment-level
+access on top of config access. With the variable set:
+
+- `command[0]` is resolved **strictly inside that directory** - a bare file
+  name, validated at load, canonicalized at run time (a symlink planted in
+  the directory that points outside is refused);
+- no shell is involved: `command` is an argv array, so nothing is ever
+  interpolated or injected;
+- the plugin gets a **scrubbed environment** (`PATH`, `HOME`, `LANG`, `TZ`):
+  the daemon's own environment carries your notification tokens, and no
+  plugin has any business reading them;
+- output is bounded and drained (a chatty plugin never deadlocks on a full
+  pipe), and a stuck plugin is killed at the monitor's timeout.
+
+Without `HORA_EXEC_DIR`, a config declaring an exec monitor fails at load -
+and `hora doctor` verifies the directory and that every configured plugin is
+actually present.
+
+:::tip[Recipe: watching other containers from a rootless Hora]
+In **rootless Docker**, mounting the Docker socket only grants your user's
+rights - not root on the host - which makes this pattern reasonable:
+
+```sh
+# checks/check_container - exit 0 if the container reports healthy
+#!/bin/sh
+state=$(curl -sf --unix-socket /var/run/docker.sock \
+  "http://localhost/containers/$1/json" | jq -r '.State.Health.Status // .State.Status')
+case "$state" in
+  healthy|running) echo "container $1 $state"; exit 0 ;;
+  *) echo "container $1 $state"; exit 2 ;;
+esac
+```
+
+```sh
+docker run -d --name hora \
+  -v ./hora-config:/etc/hora \
+  -v ./checks:/etc/hora/checks:ro \
+  -e HORA_EXEC_DIR=/etc/hora/checks \
+  -v $XDG_RUNTIME_DIR/docker.sock:/var/run/docker.sock:ro \
+  my-hora-with-tools
+```
+
+with a one-line derived image for the tools your scripts need:
+
+```dockerfile
+FROM ghcr.io/uplg/hora:latest
+RUN apk add --no-cache curl jq monitoring-plugins
+```
+
+`monitoring-plugins` alone brings `check_disk`, `check_load`, `check_smtp`,
+`check_snmp` and friends - each one a `command = ["check_..."]` away from
+uptime bars, SLOs and the weekly digest.
+:::
+
+Exec monitors take no `target`, are excluded from
+[multi-vantage confirmation](../peers/#multi-vantage-confirmation) (a local
+check has no remote vantage), and their failure detail collapses to
+*"plugin check failed"* for anonymous viewers unless `public_error_detail`
+opts in - plugin output names devices and container ids.
+
 ### `push` (heartbeat)
 
 No target - the job calls Hora. Down when no ping arrives within

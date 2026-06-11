@@ -38,6 +38,12 @@ pub struct Config {
     /// 2 incidents, budget 18m of 43m left"). Absent = no digest.
     #[serde(default)]
     pub digest: Option<Digest>,
+    /// Where exec-probe executables live, from the `HORA_EXEC_DIR`
+    /// environment variable - never from the file. The separation is the
+    /// security model: the hot-reloadable config alone must not be able to
+    /// run code; enabling exec probes takes deployment-level access too.
+    #[serde(skip)]
+    pub exec_dir: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -610,6 +616,12 @@ pub enum Kind {
     /// (the kernel's `net.ipv4.ping_group_range` must cover the process, which is
     /// the Docker default). IPv4 and IPv6 are both supported.
     Icmp,
+    /// External command probe (`command = [...]`), following the
+    /// monitoring-plugins convention: exit 0 = up, 1 = degraded, anything
+    /// else = down; the first stdout line is the message. Requires the
+    /// `HORA_EXEC_DIR` environment variable - the deployment-level consent -
+    /// and only runs executables inside that directory.
+    Exec,
     /// Passive heartbeat: the monitored job pings `/api/push/{id}`; missing a
     /// heartbeat within the interval marks it down. No active probing.
     Push,
@@ -762,6 +774,11 @@ pub struct Monitor {
     /// `[health].confirm_with_peers` default. See that field for semantics.
     #[serde(default)]
     pub confirm_with_peers: Option<bool>,
+    /// Exec monitors: the argv to run - `["check_raid", "--no-sudo"]`. No
+    /// shell is involved, and `command[0]` is resolved strictly inside
+    /// `HORA_EXEC_DIR` (a bare file name, no path separators).
+    #[serde(default)]
+    pub command: Vec<String>,
 }
 
 // Manual `Debug` (rather than derived) so credentials never leak: `target` and
@@ -807,6 +824,8 @@ impl std::fmt::Debug for Monitor {
             .field("cert_pin", &self.cert_pin)
             .field("domain_expiry", &self.domain_expiry)
             .field("confirm_with_peers", &self.confirm_with_peers)
+            // Arguments may carry credentials (a plugin's API key): name only.
+            .field("command", &self.command.first())
             .finish()
     }
 }
@@ -992,6 +1011,20 @@ pub fn load_from(path: &Path) -> anyhow::Result<Config> {
 /// Returns an error if the TOML is invalid or a monitor is misconfigured
 /// (empty/duplicate id, zero interval).
 pub fn parse(toml_str: &str) -> anyhow::Result<Config> {
+    parse_with_exec_dir(toml_str, std::env::var_os("HORA_EXEC_DIR").map(Into::into))
+}
+
+/// [`parse`] with an explicit exec directory instead of the `HORA_EXEC_DIR`
+/// environment variable - the testable seam (tests must not mutate the
+/// process environment).
+///
+/// # Errors
+///
+/// Returns an error if the TOML is invalid or a monitor is misconfigured.
+pub fn parse_with_exec_dir(
+    toml_str: &str,
+    exec_dir: Option<std::path::PathBuf>,
+) -> anyhow::Result<Config> {
     // Parse first, expand `${VAR}` afterwards - in string values only - so
     // secrets (channel tokens/URLs) can stay out of the file:
     // `webhook_url = "${OPS_DISCORD}"`. Expanding the raw text instead would
@@ -1014,6 +1047,7 @@ pub fn parse(toml_str: &str) -> anyhow::Result<Config> {
             domain.make_ascii_lowercase();
         }
     }
+    config.exec_dir = exec_dir;
     validate(&config)?;
     Ok(config)
 }
@@ -1153,7 +1187,7 @@ fn validate(config: &Config) -> anyhow::Result<()> {
             monitor.id
         );
         anyhow::ensure!(
-            monitor.kind == Kind::Push || !monitor.target.is_empty(),
+            matches!(monitor.kind, Kind::Push | Kind::Exec) || !monitor.target.is_empty(),
             "monitor {}: target must not be empty",
             monitor.id
         );
@@ -1210,6 +1244,7 @@ fn validate(config: &Config) -> anyhow::Result<()> {
     validate_peers(config, &seen, &channel_names)?;
 
     validate_confirm(config)?;
+    validate_exec(config)?;
     validate_digest(config, &channel_names)?;
     Ok(())
 }
@@ -1240,12 +1275,34 @@ fn validate_confirm(config: &Config) -> anyhow::Result<()> {
     }
     for monitor in &config.monitors {
         anyhow::ensure!(
-            !(monitor.confirm_with_peers == Some(true) && monitor.kind == Kind::Push),
-            "monitor {}: confirm_with_peers needs an active probe (push monitors \
-             have no target a peer could probe)",
+            !(monitor.confirm_with_peers == Some(true)
+                && matches!(monitor.kind, Kind::Push | Kind::Exec)),
+            "monitor {}: confirm_with_peers needs a network probe (push monitors \
+             have no target, and exec checks are local to this host)",
             monitor.id
         );
     }
+    Ok(())
+}
+
+/// Exec probes are gated on `HORA_EXEC_DIR` (deployment-level consent): a
+/// config declaring one without the variable - or with a directory that does
+/// not exist - fails at load, not at the first probe.
+fn validate_exec(config: &Config) -> anyhow::Result<()> {
+    if !config.monitors.iter().any(|m| m.kind == Kind::Exec) {
+        return Ok(());
+    }
+    let Some(dir) = &config.exec_dir else {
+        anyhow::bail!(
+            "exec monitors require the HORA_EXEC_DIR environment variable \
+             (the directory whose executables they may run)"
+        );
+    };
+    anyhow::ensure!(
+        dir.is_dir(),
+        "HORA_EXEC_DIR {} is not a directory",
+        dir.display()
+    );
     Ok(())
 }
 
@@ -1401,6 +1458,33 @@ fn validate_peers(
     Ok(())
 }
 
+/// Exec monitors: a `command` argv instead of a `target`, with `command[0]`
+/// a bare file name - resolution happens strictly inside `HORA_EXEC_DIR`, so
+/// a path here is either a mistake or an escape attempt.
+fn validate_exec_io(monitor: &Monitor) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        monitor.target.is_empty(),
+        "monitor {}: exec monitors take a `command`, not a `target`",
+        monitor.id
+    );
+    let Some(name) = monitor.command.first() else {
+        anyhow::bail!(
+            "monitor {}: exec monitors need a non-empty `command` array",
+            monitor.id
+        );
+    };
+    anyhow::ensure!(
+        !name.is_empty()
+            && !name.contains('/')
+            && !name.contains('\\')
+            && name != "."
+            && name != "..",
+        "monitor {}: command[0] must be a bare file name inside HORA_EXEC_DIR",
+        monitor.id
+    );
+    Ok(())
+}
+
 /// Validate a monitor's target, latency thresholds and headers (split out of
 /// [`validate`] to keep it small).
 fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
@@ -1438,8 +1522,14 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
             );
         }
         Kind::Push => {}
+        Kind::Exec => validate_exec_io(monitor)?,
         Kind::Dns => validate_dns_io(monitor)?,
     }
+    anyhow::ensure!(
+        monitor.kind == Kind::Exec || monitor.command.is_empty(),
+        "monitor {}: `command` requires kind = \"exec\"",
+        monitor.id
+    );
     // A negative latency threshold would mark every check degraded/breached.
     for (label, value) in [
         ("degraded_over_ms", monitor.degraded_over_ms),
@@ -2288,6 +2378,75 @@ mod tests {
         );
         let error = validate(&config).unwrap_err().to_string();
         assert!(error.contains("duplicate channel name"), "got: {error}");
+    }
+
+    #[test]
+    fn exec_monitors_are_gated_and_confined() {
+        let base = r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "raid"
+            name = "RAID"
+            kind = "exec"
+            {body}
+            interval_secs = 300
+        "#;
+        let dir = Some(std::env::temp_dir());
+
+        // No HORA_EXEC_DIR: rejected however valid the rest is.
+        let toml = base.replace("{body}", r#"command = ["check_raid"]"#);
+        let err = super::parse_with_exec_dir(&toml, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("HORA_EXEC_DIR"), "{err}");
+
+        // A directory that does not exist: rejected at load.
+        let err = super::parse_with_exec_dir(
+            &toml,
+            Some(std::path::PathBuf::from("/nonexistent-hora-exec")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a directory"), "{err}");
+
+        // With the gate set, the same config is valid.
+        super::parse_with_exec_dir(&toml, dir.clone()).expect("valid exec monitor");
+
+        // An empty command, a path in command[0], or a target: all rejected.
+        for (body, expect) in [
+            ("command = []", "non-empty"),
+            (r#"command = ["../sh"]"#, "bare file name"),
+            (r#"command = ["sub/dir"]"#, "bare file name"),
+            (
+                "command = [\"x\"]\n            target = \"https://e.com\"",
+                "not a `target`",
+            ),
+        ] {
+            let toml = base.replace("{body}", body);
+            let err = super::parse_with_exec_dir(&toml, dir.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expect), "{body}: {err}");
+        }
+
+        // `command` on a non-exec monitor is a mistake, not decoration.
+        let err = super::parse_with_exec_dir(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://example.com"
+            command = ["check_http"]
+            interval_secs = 60
+        "#,
+            dir,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requires kind"), "{err}");
     }
 
     #[test]

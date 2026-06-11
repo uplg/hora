@@ -20,9 +20,6 @@ records what actually shipped.
   N minutes, notify the next channel; ack via a signed link in the
   notification. The biggest item on the list, and more natural once
   multi-vantage confirmation exists.
-- **`kind = "exec"` probes** - external command probes using the
-  monitoring-plugins exit-code convention (0 = up, 1 = degraded, else down),
-  unlocking the whole Nagios/Icinga plugin ecosystem.
 - **`hora top`** - a terminal dashboard consuming the JSON API: live
   statuses, latency sparklines, ongoing incidents. Self-hosters live in SSH.
 - **Public incident banner** - a pinned status-page message set via CLI/API

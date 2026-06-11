@@ -64,7 +64,52 @@ pub async fn run(config: &Config) -> Vec<Finding> {
         ),
         icmp_socket(config),
         dns_resolver().await,
+        exec_dir(config),
     ]
+}
+
+/// The exec-probe gate: with exec monitors configured, `HORA_EXEC_DIR` must
+/// point at a real directory (config validation enforces it at load; doctor
+/// re-checks the *current* environment) - and the plugins must actually be
+/// there and executable.
+fn exec_dir(config: &Config) -> Finding {
+    let monitors: Vec<&str> = config
+        .monitors
+        .iter()
+        .filter(|monitor| monitor.kind == Kind::Exec)
+        .filter_map(|monitor| monitor.command.first().map(String::as_str))
+        .collect();
+    let Some(dir) = &config.exec_dir else {
+        return if monitors.is_empty() {
+            Finding::new("exec", Status::Ok, "disabled (HORA_EXEC_DIR not set)")
+        } else {
+            Finding::new(
+                "exec",
+                Status::Fail,
+                format!(
+                    "{} exec monitor(s) but HORA_EXEC_DIR is not set",
+                    monitors.len()
+                ),
+            )
+        };
+    };
+    let missing: Vec<&str> = monitors
+        .iter()
+        .filter(|name| !dir.join(name).is_file())
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        return Finding::new(
+            "exec",
+            Status::Fail,
+            format!("missing in {}: {}", dir.display(), missing.join(", ")),
+        );
+    }
+    Finding::new(
+        "exec",
+        Status::Ok,
+        format!("{} ({} plugin(s) found)", dir.display(), monitors.len()),
+    )
 }
 
 /// Whether any monitor needs working IPv6 on the probing host.

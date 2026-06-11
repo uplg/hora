@@ -34,6 +34,11 @@ Full guides for everything below live in the
   the service whose IPv6 has been silently dead for weeks behind a healthy IPv4.
 - **Cron-aware heartbeats** - a push monitor with `schedule = "0 3 * * *"` alerts
   only when a scheduled run misses its grace window, à la Healthchecks.io.
+- **Exec probes** (`kind = "exec"`) - run any monitoring-plugins-style check
+  (exit 0/1/2+ = up/degraded/down): the whole Nagios ecosystem, or a 5-line
+  script watching another container via a rootless Docker socket. Gated on
+  `HORA_EXEC_DIR` (deployment-level consent, never just the config), no shell,
+  confined to that directory, scrubbed environment.
 - **TLS expiry warnings & public-key pinning** - know two weeks ahead, and catch
   the unexpected key change (MITM, botched renewal).
 - **Domain expiry via RDAP** (`domain_expiry = "example.com"`) - "your domain
@@ -134,7 +139,8 @@ chat_id = "123456"
 ```
 
 and on the container: `-e HORA_TELEGRAM_TOKEN=123:abc`. Only `HORA_BIND`,
-`HORA_DATABASE_PATH` and `HORA_CONFIG` are read directly from the environment.
+`HORA_DATABASE_PATH`, `HORA_CONFIG` and `HORA_EXEC_DIR` (the exec-probe gate)
+are read directly from the environment.
 
 ## CLI
 

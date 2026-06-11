@@ -104,9 +104,11 @@ async fn probe_once(client: &Client, monitor: &Monitor) -> Outcome {
         Kind::Tcp => tcp(monitor).await,
         Kind::Icmp => icmp(monitor).await,
         Kind::Dns => dns(monitor).await,
-        // Push monitors are evaluated from stored heartbeats by the scheduler,
-        // never actively probed; this arm is unreachable in practice.
+        // Push monitors are evaluated from stored heartbeats, exec monitors by
+        // the exec module - both routed by the scheduler before reaching here;
+        // these arms are defensive only.
         Kind::Push => Outcome::down("push monitor has no active probe".to_owned()),
+        Kind::Exec => Outcome::down("exec monitor is not a network probe".to_owned()),
     }
 }
 
@@ -171,7 +173,7 @@ async fn probe_family(monitor: &Monitor, family: Family) -> Outcome {
         Kind::Tcp => tcp_family(monitor, family).await,
         Kind::Icmp => icmp_family(monitor, Some(family)).await,
         // Config validation restricts dual_stack to the three kinds above.
-        Kind::Dns | Kind::Push => {
+        Kind::Dns | Kind::Push | Kind::Exec => {
             Outcome::down("dual_stack unsupported for this monitor kind".to_owned())
         }
     }
@@ -797,6 +799,11 @@ pub fn public_reason(reason: &str) -> &str {
     if reason.starts_with("icmp") {
         return "ping failed";
     }
+    // Exec plugins: their output is operator infrastructure detail (paths,
+    // device names, container ids); anonymous viewers get the category only.
+    if reason.starts_with("plugin ") || reason.starts_with("exec ") {
+        return "plugin check failed";
+    }
     // Dual-stack failures embed the failing family's detail (which may be a raw
     // socket error); keep only which family broke. Checked longest-prefix first.
     if reason.starts_with("IPv4 and IPv6 failing") {
@@ -859,6 +866,15 @@ mod tests {
         assert_eq!(
             public_reason("Connection refused (os error 61)"),
             "check failed"
+        );
+        // Plugin output (device names, container ids) collapses to a category.
+        assert_eq!(
+            public_reason("plugin timed out after 30s"),
+            "plugin check failed"
+        );
+        assert_eq!(
+            public_reason("plugin reported critical (exit 2)"),
+            "plugin check failed"
         );
         // Safe statics pass through verbatim.
         assert_eq!(public_reason("HTTP 503"), "HTTP 503");
@@ -949,6 +965,7 @@ mod tests {
             cert_pin: None,
             domain_expiry: None,
             confirm_with_peers: None,
+            command: Vec::new(),
             slo_uptime: None,
             slo_window_days: None,
             schedule: None,
