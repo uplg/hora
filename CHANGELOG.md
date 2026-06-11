@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Documentation site** at <https://uplg.github.io/hora/>: guides (monitors,
+  alerting, SLOs, incidents, peers, Kuma import), CLI & HTTP API reference,
+  and the roadmap. Built with Astro Starlight from `docs/`, deployed to
+  GitHub Pages by the Docs workflow on every docs change.
+
 - **Failure snapshots**: when an HTTP probe confirms a down *with a response*
   (bad status or failed assertion), the incident records what the service
   actually answered - status line, headers and the start of the body, bounded

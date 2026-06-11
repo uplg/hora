@@ -1,0 +1,65 @@
+---
+title: Hora
+description: A tiny, self-hosted uptime monitor written in Rust. One small binary, a status page, and alerts that never wake you up for flapping.
+template: splash
+hero:
+  tagline: A tiny, self-hosted uptime monitor. One ~15 MB binary probes your services, stores history in SQLite, alerts you when something really breaks, and serves a status page plus a JSON API.
+  image:
+    file: ../../assets/screenshot.jpg
+  actions:
+    - text: Get started
+      link: ./getting-started/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/uplg/hora
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why Hora?
+
+<CardGrid stagger>
+	<Card title="Flapping never wakes you up" icon="moon">
+		Alerts fire only after N consecutive failures, failed probes are retried
+		before anything is recorded, and a database taking ten services down with
+		it sends **one** notification - the root cause, with its blast radius.
+	</Card>
+	<Card title="One small binary" icon="rocket">
+		HTTP, TCP, ICMP, DNS and push probes, TLS expiry and key-pin checks,
+		SQLite storage, a server-rendered status page, Prometheus metrics and ten
+		notification backends - migrations and templates compiled in. The Docker
+		image is a static musl binary on Alpine, about 15 MB.
+	</Card>
+	<Card title="SRE-grade alerting" icon="seti:graphql">
+		Availability SLOs with visible error budgets and Google-SRE multi-window
+		burn-rate alerts: catch the slow-burning flapping a binary down alert
+		never confirms - and stay quiet once the burn stops.
+	</Card>
+	<Card title="Built for operators" icon="setting">
+		Live config reload without a blind window, ad-hoc silences for deploy
+		hooks, incident annotations, failure snapshots ("what did the service
+		actually answer?"), one-statement backups, and an Uptime Kuma importer.
+	</Card>
+</CardGrid>
+
+## At a glance
+
+- **Probes**: HTTP (status, keyword and JSONPath assertions, custom headers,
+  proxies), TCP connect, unprivileged ICMP ping, DNS with answer pinning, and
+  cron-aware push heartbeats.
+- **Dual-stack verification**: probe IPv4 *and* IPv6 separately and require
+  both - catch the service whose IPv6 has been silently dead for weeks.
+- **Topology**: declare `depends_on` and alerts are annotated *"caused by X"*
+  or *"impacts: A, B, C"*; dependent alerts fold into their root cause's
+  single notification.
+- **Status page**: server-rendered, no JavaScript framework, with daily uptime
+  bars, latency charts, p95/p99, maintenance banners - and an aligned
+  plain-text rendering when you `curl` it.
+- **History**: every confirmed incident is recorded and served as HTML and an
+  Atom feed, with operator notes and the captured failing response.
+- **Private monitors**: one Hora for a public status page *and* your internal
+  services, gated by a viewer token.
+
+Named after the **Horai**, the Greek goddesses of the hours.

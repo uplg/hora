@@ -12,101 +12,68 @@ JSON API. The Docker image is a static musl binary on Alpine - about 15 MB.
 
 Named after the **Horai**, the Greek goddesses of the hours.
 
+**Documentation: [uplg.github.io/hora](https://uplg.github.io/hora/)** - guides,
+CLI & API reference, and the roadmap. (Source in [`docs/`](docs/), built with
+Starlight and deployed by the [Docs workflow](.github/workflows/docs.yml).)
+
 ![Hora](./docs/screenshot-0.4.0.jpg)
 
 ## Features
 
-- **HTTP, TCP, ICMP, DNS, push & assertion probes** - per-monitor interval, timeout,
-  expected status and a "degraded if slower than" threshold. Failed probes are
-  **retried once** before anything is recorded (`probe_retries`), so a one-off
-  network blip never pollutes the history or the error budget - and every failure
-  that survives its retry is logged with its reason and shown as a **tooltip on
-  the status dot** (plus `last_error` in the API). HTTP monitors can assert
-  a **keyword** in the body or a **JSONPath** (`json_query` / `json_expected`), route
-  through an HTTP/SOCKS **proxy**, and send custom headers. **ICMP** (ping) monitors
-  use an unprivileged datagram socket - no `CAP_NET_RAW`, rootless-Docker friendly,
-  IPv4 and IPv6. **DNS** monitors resolve a hostname (any record type, custom
-  resolver) and can **pin the expected answer** (`dns_expected`) - hijack detection.
-  **Push** (heartbeat) monitors flip to down when a job stops pinging
-  `/api/push/{id}` - or, with a **cron schedule** (`schedule = "0 3 * * *"` +
-  `grace_secs`), only when a scheduled run misses its grace window: the natural
-  fit for nightly backups, à la Healthchecks.io.
-- **Dependency-aware topology** - cluster monitors into named **groups** on the status
-  page, and declare upstreams with `depends_on`. When a monitor goes down its alert is
-  annotated with root cause vs. symptom: _"caused by X"_ when an upstream it depends on
-  is also down, or _"impacts: A, B, C"_ (the blast radius) when its upstreams are all
-  healthy and it is the root cause. The dependency graph is validated acyclic at load.
-- **Dual-stack verification** - `dual_stack = true` probes IPv4 *and* IPv6
-  separately and requires both: the classic silent failure is a service whose
-  IPv6 has been dead for weeks behind a healthy IPv4 (or the reverse), invisible
-  to every single-connection check. One broken family alerts with the culprit
-  named - _"IPv6 failing: connection timed out (IPv4 ok)"_. Works for HTTP, TCP
-  and ICMP monitors with a hostname target. The **probing host itself needs
-  working IPv4 and IPv6**: in Docker, default bridge networks have *no IPv6*,
-  so a dual-stack monitor would blame your container's network, not your
-  service - enable IPv6 on the daemon/compose network (or use host networking)
-  first.
-- **Root-cause alert grouping** - when a database takes ten services down with it,
-  you get **one notification** (the root cause, with its blast radius), not eleven:
-  dependent monitors confirmed down within the grouping window fold into their
-  upstream's alert, and their recoveries stay silent too. A monitor that flaps
-  inside the window sends nothing at all. Tunable via `alerts.group_window_secs`
-  (0 restores one-alert-per-monitor).
-- **Availability SLOs with error budgets & burn-rate alerts** - give a monitor
-  `slo_uptime = 99.9` and the status page shows the **error budget left** for the
-  window ("budget 21m of 43m left, 30d"). Alerting is Google-SRE style
-  **multi-window burn rate** - _"burning error budget at 14.4x (1h) - exhausted in
-  ~6h at this rate"_ - which catches slow-burning flapping that a binary down alert
-  never confirms, and stays quiet once the burn stops.
-- **Server-rendered status page** (no JavaScript framework): a compact, responsive
-  grid - daily uptime bars, an inline SVG latency chart, **p95/p99 latency** with an
-  optional **latency SLO** indicator, plus an **incidents/announcements** banner.
-- **JSON API** to read status and latency history from anywhere, with a generated
-  **OpenAPI 3.1** document at `/api/openapi.json`.
-- **Automatic incident history** - every confirmed down/up transition is recorded
-  (with the root-cause annotation) and served as an **HTML history page**
-  (`/history`) and an **Atom feed** (`/history.atom`) you can subscribe to - no
-  account, no JavaScript. Incidents carry a **failure snapshot** - the status
-  line, headers and body start the service actually answered when the down was
-  confirmed, the first question at 9am about the 3am alert - and free-form
-  **operator annotations** (`hora annotate 42 "fiber cut"`).
-- **Prometheus `/metrics`** - monitor status, 24h uptime ratio, latency quantiles
-  and certificate expiry in text exposition format, ready for Grafana/Alertmanager.
-- **Private monitors** - mark a monitor `public = false` and it disappears from the
-  unauthenticated status page, API, badges and history; a viewer token
-  (`server.auth_token`, sent as `Authorization: Bearer` or `?token=`) reveals the
-  full view. Run one Hora for a public status page *and* your internal services.
-- **Plain-text status for terminals** - `curl status.example.com` returns an
-  aligned text rendering of the page (content negotiation on `User-Agent`/`Accept`).
-- **TLS certificate expiry monitoring** with advance warnings, plus optional
-  **public-key pinning** (`cert_pin`): an unexpected key change - MITM, botched
-  renewal - alerts once per change, with the old and new fingerprints.
-- **Pluggable notifications** via a `Notifier` trait - **Telegram, Discord, Slack,
-  Matrix, ntfy, Gotify, Pushover, a generic JSON webhook, SMTP e-mail and Free
-  Mobile SMS** built in. Channels
-  are **named**, so you can have several of the same type and **route each monitor** to
-  specific ones (`notify = [...]`). Delivery retries transient failures, and alerts fire
-  only after _N_ consecutive failures (so flapping never wakes you up) and include a
-  snippet of the failing response body. Optionally alert on _degraded_ too
-  (`alert_on_degraded` - up, but slower than the monitor's `degraded_over_ms`).
-- **Scheduled maintenance windows** that mute alerts (per monitor or global).
-- **Per-IP API rate limiting** on the JSON endpoints, with a configurable trusted
-  client-IP header (e.g. `cf-connecting-ip` behind Cloudflare).
-- **Live config reload**: edit `config.toml` (or send `SIGHUP`) and monitors,
-  thresholds, retention _and notification channels_ are reconciled in place -
-  existing checks never pause, so there is no blind window.
-- **Per-monitor retention** with automatic pruning **and long-term downsampling**:
-  raw checks roll up into hourly buckets after 7 days and daily buckets after 90,
-  kept for a year - the daily uptime bars keep working beyond the raw retention
-  window, and the database still does not grow forever.
-- **Uptime Kuma import** - `hora import kuma backup.json` converts a Kuma backup
-  into Hora monitors (TOML on stdout): http/keyword/json-query, port, ping, dns and
-  push monitors, keyword/JSONPath assertions, headers, intervals/timeouts, expected
-  status codes, push tokens and Kuma groups (as display groups). Unsupported types
-  come out as commented stubs. `hora check` validates a config with a CI-friendly
-  exit code.
-- **`${VAR}` interpolation** in the config so secrets stay in the environment.
-- Single self-contained binary: migrations and templates are compiled in.
+Full guides for everything below live in the
+[documentation](https://uplg.github.io/hora/).
+
+**Probing**
+
+- **HTTP, TCP, ICMP, DNS & push probes** - per-monitor interval, timeout,
+  expected status, "degraded if slower than" threshold. Failures are retried
+  before anything is recorded, so a one-off blip never pollutes the history.
+- **Assertions** - keyword or JSONPath (`json_query`) against the body; custom
+  headers and HTTP/SOCKS proxies.
+- **Dual-stack verification** - probe IPv4 *and* IPv6 and require both: catches
+  the service whose IPv6 has been silently dead for weeks behind a healthy IPv4.
+- **Cron-aware heartbeats** - a push monitor with `schedule = "0 3 * * *"` alerts
+  only when a scheduled run misses its grace window, à la Healthchecks.io.
+- **TLS expiry warnings & public-key pinning** - know two weeks ahead, and catch
+  the unexpected key change (MITM, botched renewal).
+- Unprivileged **ICMP** (no `CAP_NET_RAW`), rootless-Docker friendly; **DNS**
+  answer pinning for hijack detection.
+
+**Alerting that never cries wolf**
+
+- **Down only after N consecutive failures**; degraded alerts opt-in.
+- **Root-cause grouping** - a database taking ten services down sends **one**
+  notification, annotated _"caused by X"_ / _"impacts: A, B, C"_ via `depends_on`.
+- **SLOs & error budgets** - `slo_uptime = 99.9` shows the budget left and arms
+  Google-SRE **multi-window burn-rate alerts** ("burning at 14.4x - exhausted in ~6h").
+- **Ten notification backends** - Telegram, Discord, Slack, Matrix, ntfy, Gotify,
+  Pushover, e-mail, Free Mobile SMS, generic webhook - named channels, per-monitor
+  routing, delivery retries.
+- **Maintenance windows** and **ad-hoc silences** (`hora silence api,web 10m` or
+  `POST /api/silence` from a deploy hook).
+
+**Status page, API & history**
+
+- **Server-rendered status page** (no JS framework) - uptime bars, latency charts,
+  p95/p99, banners - and an aligned **plain-text rendering** when you `curl` it.
+- **JSON API** with a generated **OpenAPI 3.1** spec, **Prometheus `/metrics`**,
+  embeddable **SVG badges**.
+- **Incident history** as HTML and an **Atom feed**, with **failure snapshots**
+  (what the service actually answered) and **operator annotations**
+  (`hora annotate 42 "fiber cut"`).
+- **Private monitors** behind a viewer token - one Hora for a public status page
+  *and* your internal services. Per-IP API rate limiting.
+
+**Operations**
+
+- **Live config reload** (file watch or `SIGHUP`) with no blind window; `${VAR}`
+  interpolation keeps secrets in the environment.
+- **Retention with downsampling** - hourly buckets after 7 days, daily after 90,
+  kept a year; the database never grows forever. `hora backup` snapshots it in
+  one statement.
+- **Uptime Kuma import** (`hora import kuma backup.json`), `hora check` for CI,
+  `hora test-alert` to verify the notification chain before the first incident.
+- Single self-contained binary - migrations and templates compiled in.
 
 ## Quick start (Docker)
 
