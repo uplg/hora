@@ -4,8 +4,6 @@ description: A tiny, self-hosted uptime monitor written in Rust. One small binar
 template: splash
 hero:
   tagline: A tiny, self-hosted uptime monitor. One ~15 MB binary probes your services, stores history in SQLite, alerts you when something really breaks, and serves a status page plus a JSON API.
-  image:
-    file: ../../assets/screenshot.jpg
   actions:
     - text: Get started
       link: ./getting-started/
@@ -17,6 +15,14 @@ hero:
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import screenshot from '../../assets/screenshot.jpg';
+
+<Image
+	src={screenshot}
+	alt="The Hora status page: monitor cards with daily uptime bars, latency charts and p95/p99"
+	style="width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--sl-color-gray-5);"
+/>
 
 ## Why Hora?
 
