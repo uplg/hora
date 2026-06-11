@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
+    topology_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -52,6 +53,14 @@ impl FreeMobileNotifier {
             Event::CertExpiring { monitor, days_left } => {
                 format!("CERT: {monitor} {}", cert_expiry_phrase(days_left))
             }
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => format!(
+                "DOMAIN: {monitor} {}",
+                domain_expiry_phrase(domain, days_left)
+            ),
             Event::PeerLinkDegraded { peer, witness } => {
                 format!("LINK: {peer} unreachable here, seen up by {witness}")
             }
@@ -81,7 +90,7 @@ impl Notifier for FreeMobileNotifier {
         "freemobile"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let msg = Self::render(event);
         // `pass` travels in the query string, so it is what we redact from logs;
         // reqwest builds and percent-encodes the query for us.
@@ -95,7 +104,7 @@ impl Notifier for FreeMobileNotifier {
             "freemobile",
             &[self.pass.as_str(), self.user.as_str()],
         )
-        .await;
+        .await
     }
 }
 

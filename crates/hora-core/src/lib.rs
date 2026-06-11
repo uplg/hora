@@ -9,6 +9,7 @@ pub mod import;
 pub mod notifications;
 pub mod peer;
 pub mod probe;
+mod rdap;
 pub mod scheduler;
 pub mod slo;
 pub mod supervisor;

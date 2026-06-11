@@ -104,7 +104,8 @@ async fn run_subcommand() -> anyhow::Result<bool> {
 /// an operator verifies delivery *before* the first real incident instead of
 /// during it. Without an id every configured channel is exercised; with one,
 /// the monitor's `notify` routing applies - testing exactly what would fire.
-/// Failures surface as the notifiers' own per-channel warnings.
+/// Failures surface as the notifiers' own per-channel warnings *and* as a
+/// non-zero exit, so a CI pipeline can gate on the notification chain.
 async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
     let config_path = config::path();
     let config = config::load_from(&config_path).context("loading configuration")?;
@@ -148,15 +149,29 @@ async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
         cause: None,
         impacted: &[],
     };
-    dispatcher.dispatch(event, notify.as_deref()).await;
-    dispatcher
+    let mut failed = dispatcher.dispatch(event, notify.as_deref()).await;
+    let failed_recovery = dispatcher
         .dispatch(
             hora_core::notifications::Event::Recovered { monitor: &name },
             notify.as_deref(),
         )
         .await;
-    println!("Done. A channel that stayed silent has a warning above.");
-    Ok(())
+    // One verdict per channel: failing either delivery counts as failed.
+    for channel in failed_recovery {
+        if !failed.contains(&channel) {
+            failed.push(channel);
+        }
+    }
+    if failed.is_empty() {
+        println!("Done. Every channel accepted both notifications.");
+        Ok(())
+    } else {
+        eprintln!(
+            "Delivery failed on: {} (the warnings above say why).",
+            failed.join(", ")
+        );
+        std::process::exit(1);
+    }
 }
 
 fn print_help() {
@@ -423,6 +438,7 @@ async fn serve() -> anyhow::Result<()> {
         pool.clone(),
         handle.config.clone(),
         handle.notifier.clone(),
+        client.clone(),
         shutdown_rx.clone(),
     );
 

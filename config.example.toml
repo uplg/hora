@@ -111,6 +111,9 @@ fail_threshold = 3
 # alert_on_degraded = false
 # Warn this many days before a TLS certificate expires.
 cert_expiry_days = 14
+# Warn this many days before a registered domain expires (for monitors that
+# opt in with `domain_expiry`; checked once a day against the registry, RDAP).
+# domain_expiry_days = 14
 # Default history retention in days, overridable per monitor via `retention_days`.
 default_retention_days = 90
 # Failed probes are re-tried once (after 1s) before being recorded, so a
@@ -194,6 +197,9 @@ depends_on = ["api"]
 # public_error_detail = true  # optional; publish the raw failure reason (default:
 #                             # anonymous viewers see a safe category only)
 # cert_pin = "abc123..."  # optional; SHA-256 of leaf public key (detects cert changes)
+# domain_expiry = "example.com"  # optional; the *registered* domain (not the
+#                         # subdomain), checked daily via RDAP - alerts
+#                         # `alerts.domain_expiry_days` before it expires
 # dual_stack = true       # optional; probe IPv4 AND IPv6 and require both - catches
 #                         # the service whose IPv6 has been dead for weeks behind a
 #                         # healthy IPv4 ("IPv6 failing: connection timed out (IPv4

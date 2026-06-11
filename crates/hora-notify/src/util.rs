@@ -77,6 +77,12 @@ pub(crate) fn cert_expiry_phrase(days_left: i64) -> String {
     }
 }
 
+/// Human phrasing for a domain-expiry event, shared so every channel words it
+/// the same way: `"domain example.com expires in 14 days"`.
+pub(crate) fn domain_expiry_phrase(domain: &str, days_left: i64) -> String {
+    format!("domain {domain} {}", cert_expiry_phrase(days_left))
+}
+
 /// Delivery attempts: the initial send plus two retries. The caller marks the
 /// alert as sent regardless of the outcome, so a transient blip here would
 /// otherwise silently drop the notification.
@@ -92,13 +98,20 @@ const MAX_ATTEMPTS: u32 = 3;
 /// short backoff. Client errors (4xx other than 429) are permanent, so they are
 /// reported immediately without retrying. Every notifier goes through here, so
 /// they all share one retry and redaction policy.
-pub(crate) async fn send_retrying<F>(build: F, channel: &str, secrets: &[&str])
+/// The failure is both logged here (one policy for the daemon, which fires and
+/// forgets) and returned, so a caller that *does* care - `hora test-alert`'s
+/// exit code - can tell that delivery failed without re-deriving the detail.
+pub(crate) async fn send_retrying<F>(
+    build: F,
+    channel: &str,
+    secrets: &[&str],
+) -> anyhow::Result<()>
 where
     F: Fn() -> RequestBuilder,
 {
     for attempt in 1..=MAX_ATTEMPTS {
         match build().send().await {
-            Ok(response) if response.status().is_success() => return,
+            Ok(response) if response.status().is_success() => return Ok(()),
             Ok(response) => {
                 let status = response.status();
                 let transient =
@@ -110,21 +123,20 @@ where
                 let body = response.text().await.unwrap_or_default();
                 let detail = redact(&snippet(&body), secrets);
                 warn!("{channel} rejected the notification (HTTP {status}): {detail}");
-                return;
+                anyhow::bail!("rejected (HTTP {status}): {detail}");
             }
             Err(err) => {
                 if attempt < MAX_ATTEMPTS {
                     backoff(attempt).await;
                     continue;
                 }
-                warn!(
-                    "{channel} request failed after {attempt} attempts: {}",
-                    redact(&err.to_string(), secrets)
-                );
-                return;
+                let detail = redact(&err.to_string(), secrets);
+                warn!("{channel} request failed after {attempt} attempts: {detail}");
+                anyhow::bail!("request failed after {attempt} attempts: {detail}");
             }
         }
     }
+    unreachable!("every iteration either returns, bails or continues within MAX_ATTEMPTS")
 }
 
 /// POST `payload` as JSON, retrying transient failures (see [`send_retrying`]).
@@ -134,8 +146,8 @@ pub(crate) async fn post_json<T: Serialize>(
     payload: &T,
     channel: &str,
     secrets: &[&str],
-) {
-    send_retrying(|| client.post(url).json(payload), channel, secrets).await;
+) -> anyhow::Result<()> {
+    send_retrying(|| client.post(url).json(payload), channel, secrets).await
 }
 
 /// Exponential backoff between delivery attempts: 200ms, then 400ms. Kept short

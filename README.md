@@ -36,6 +36,8 @@ Full guides for everything below live in the
   only when a scheduled run misses its grace window, à la Healthchecks.io.
 - **TLS expiry warnings & public-key pinning** - know two weeks ahead, and catch
   the unexpected key change (MITM, botched renewal).
+- **Domain expiry via RDAP** (`domain_expiry = "example.com"`) - "your domain
+  expires in 14 days", checked once a day against the registry. No whois parsing.
 - Unprivileged **ICMP** (no `CAP_NET_RAW`), rootless-Docker friendly; **DNS**
   answer pinning for hijack detection.
 
@@ -61,6 +63,9 @@ Full guides for everything below live in the
 - **Incident history** as HTML and an **Atom feed**, with **failure snapshots**
   (what the service actually answered) and **operator annotations**
   (`hora annotate 42 "fiber cut"`).
+- **Latency heatmaps** - a smokeping-style hours-by-days SVG per monitor on
+  `/history`, colour relative to the monitor's own median: "slow every Monday
+  at 9am" at a glance.
 - **Private monitors** behind a viewer token - one Hora for a public status page
   *and* your internal services. Per-IP API rate limiting.
 
@@ -134,8 +139,9 @@ hora --version
 `hora test-alert` verifies your notification chain *before* the first real
 incident: it sends a clearly-labelled test alert (and its recovery) through the
 real dispatch path - with a monitor id, exactly the channels its `notify`
-routing would fire - and any channel that fails logs a warning saying why
-("chat not found", HTTP 403, ...).
+routing would fire. Any channel that fails logs a warning saying why ("chat
+not found", HTTP 403, ...) and the command **exits non-zero**, so a CI
+pipeline can gate on the notification chain.
 
 `hora silence` mutes alerts for some monitors (or `all`) for a duration like
 `10m` or `1h30m` (max 7 days) - the scriptable, ad-hoc counterpart of a
@@ -199,6 +205,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. Send the token as an `X-Push-Token` header (preferred - it stays out of proxy access logs) or as `?token=…`. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
 | `POST /api/silence?monitors=api,web&duration=10m` | Mute alerts ad hoc (deploy hook): `monitors` is a comma-separated id list or `all`, `duration` like `10m`/`1h30m` (max 7d), optional `reason`. **Requires `server.auth_token`** (as `Authorization: Bearer` or `?token=`); without one configured the endpoint is closed. |
+| `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge for a monitor. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge for a monitor. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code (`utoipa`). |

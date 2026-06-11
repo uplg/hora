@@ -5,7 +5,8 @@ use reqwest::{Client, Url};
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
+    topology_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -67,6 +68,14 @@ impl MatrixNotifier {
                 "\u{1F510} {monitor} TLS certificate {}",
                 cert_expiry_phrase(days_left)
             ),
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => format!(
+                "\u{1F310} {monitor} {}",
+                domain_expiry_phrase(domain, days_left)
+            ),
             Event::PeerLinkDegraded { peer, witness } => {
                 format!(
                     "\u{1F7E1} {peer} link degraded: unreachable from here, but seen up by {witness}"
@@ -104,10 +113,10 @@ impl Notifier for MatrixNotifier {
         "matrix"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let Some(url) = self.message_url() else {
             tracing::warn!("matrix: homeserver is not a valid URL, skipping");
-            return;
+            anyhow::bail!("homeserver is not a valid URL");
         };
         let url = url.to_string();
         let text = Self::render(event);
@@ -127,7 +136,7 @@ impl Notifier for MatrixNotifier {
             "matrix",
             &[self.access_token.as_str()],
         )
-        .await;
+        .await
     }
 }
 

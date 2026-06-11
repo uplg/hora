@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Domain expiry via RDAP** (`domain_expiry = "example.com"` per monitor):
+  the registered domain is checked once a day against the registry (RDAP,
+  JSON over HTTP via the rdap.org bootstrap - no whois parsing) and an alert
+  fires `alerts.domain_expiry_days` (default 14) before it expires - the
+  natural sibling of the TLS expiry warnings, with the same edge-triggered,
+  maintenance-muted policy. The domain is explicit rather than derived from
+  the target: registrable-domain extraction would need a public-suffix list,
+  and the operator already knows the answer.
+- **Latency heatmaps** on `/history`: a smokeping-style hours-by-days SVG per
+  monitor (last 28 days, raw checks + hourly buckets), colour = how slow that
+  hour was *relative to the monitor's own median* - "slow every Monday at
+  9am" at a glance, with zero false-positive risk. Collapsed by default,
+  loaded lazily from `GET /api/monitors/{id}/heatmap.svg` (same visibility
+  rules as the latency endpoint).
+
+### Changed
+
+- **`hora test-alert` exits non-zero when a channel fails**, naming the
+  failing channels - the notification chain is now CI-gateable. Under the
+  hood `Notifier::notify()` returns a `Result` and the dispatcher reports
+  which channels failed; the daemon's fire-and-forget behaviour (log a
+  warning, never block alerting) is unchanged.
+
 ## [0.5.0] - 2026-06-11
 
 ### Added

@@ -18,9 +18,6 @@ records what actually shipped.
   distributed Pingdom. The peer auth and quorum infrastructure already
   exist; peers will only probe targets present in their own config, never
   arbitrary requested ones.
-- **Domain expiry via RDAP** - the natural sibling of TLS expiry warnings:
-  *"your domain expires in 14 days"*. RDAP is JSON over HTTP (no whois
-  parsing) and one check a day suffices.
 - **Weekly digest** - a per-channel recap: *"this week: 99.97%, 2 incidents,
   budget left 18m of 43m"*. All the data already exists, and a digest has
   zero false-positive risk.
@@ -41,8 +38,6 @@ records what actually shipped.
   [incident annotations](../guides/incidents/#operator-annotations).
 - **`conf.d/` config splitting** - forty monitors in one file doesn't scale
   to a team; splitting plays well with config-as-code in git.
-- **Latency heatmap** - smokeping-style hours-by-days SVG on `/history`:
-  *"it's slow every Monday at 9 a.m."* at a glance, info-only.
 - **Monthly SLA reports** - a printable per-month page (uptime per
   monitor/group, incidents, MTTR, budget consumed) for freelances and
   agencies hosting client sites.

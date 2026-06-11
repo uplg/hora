@@ -109,6 +109,17 @@ impl EmailNotifier {
                     format!("The TLS certificate for {monitor} {when}."),
                 )
             }
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => {
+                let when = crate::util::domain_expiry_phrase(domain, days_left);
+                (
+                    format!("[DOMAIN] {monitor} {when}"),
+                    format!("The registered {when} (monitor {monitor}, via RDAP)."),
+                )
+            }
             Event::PeerLinkDegraded { peer, witness } => (
                 format!("[LINK] {peer} link degraded"),
                 format!(
@@ -151,7 +162,7 @@ impl Notifier for EmailNotifier {
         "email"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let (subject, body) = Self::render(event);
         let message = match Message::builder()
             .from(self.from.clone())
@@ -162,13 +173,15 @@ impl Notifier for EmailNotifier {
             Ok(message) => message,
             Err(err) => {
                 warn!("email message build failed: {err}");
-                return;
+                anyhow::bail!("message build failed: {err}");
             }
         };
         // The error carries the SMTP host/response, never the password.
         if let Err(err) = self.transport.send(message).await {
             warn!("email send failed: {err}");
+            anyhow::bail!("send failed: {err}");
         }
+        Ok(())
     }
 }
 

@@ -37,7 +37,8 @@ Sends a clearly-labelled test alert (a down, then its recovery) through the
 incident instead of during it. Without an id every configured channel is
 exercised; with one, exactly the channels that monitor's `notify` routing
 would fire. A failing channel logs a warning with the rejection detail
-("chat not found", HTTP 403, ...); an unknown id lists the configured ones.
+("chat not found", HTTP 403, ...) and the command **exits non-zero**, naming
+the failing channels - made for CI. An unknown id lists the configured ones.
 
 ## `hora silence`
 

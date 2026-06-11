@@ -5,7 +5,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, escape, latency_suffix, post_json, topology_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape, latency_suffix,
+    post_json, topology_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -55,6 +56,15 @@ impl TelegramNotifier {
                 escape(monitor),
                 cert_expiry_phrase(days_left)
             ),
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => format!(
+                "\u{1F310} <b>{}</b> {}",
+                escape(monitor),
+                escape(&domain_expiry_phrase(domain, days_left)),
+            ),
             Event::PeerLinkDegraded { peer, witness } => format!(
                 "\u{1F7E1} <b>{}</b> link degraded\nunreachable from here, but seen up by {}",
                 escape(peer),
@@ -97,7 +107,7 @@ impl Notifier for TelegramNotifier {
         "telegram"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let text = Self::render(event);
         // The URL embeds the bot token, so it is what we redact from errors.
         let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
@@ -113,7 +123,7 @@ impl Notifier for TelegramNotifier {
             "telegram",
             &[self.token.as_str()],
         )
-        .await;
+        .await
     }
 }
 

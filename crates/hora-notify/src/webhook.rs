@@ -48,6 +48,15 @@ impl WebhookNotifier {
                 days_left: Some(days_left),
                 ..Payload::new("cert_expiring", monitor)
             },
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => Payload {
+                domain: Some(domain),
+                days_left: Some(days_left),
+                ..Payload::new("domain_expiring", monitor)
+            },
             Event::PeerLinkDegraded { peer, witness } => Payload {
                 witness: Some(witness),
                 ..Payload::new("peer_link_degraded", peer)
@@ -88,6 +97,9 @@ struct Payload<'a> {
     impacted: Option<&'a [&'a str]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     witness: Option<&'a str>,
+    /// The registered domain, on domain-expiry events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     days_left: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +127,7 @@ impl<'a> Payload<'a> {
             cause: None,
             impacted: None,
             witness: None,
+            domain: None,
             days_left: None,
             latency_ms: None,
             old_fingerprint: None,
@@ -132,7 +145,7 @@ impl Notifier for WebhookNotifier {
         "webhook"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let payload = Self::payload(event);
         post_json(
             &self.client,
@@ -141,7 +154,7 @@ impl Notifier for WebhookNotifier {
             "webhook",
             &[self.url.as_str()],
         )
-        .await;
+        .await
     }
 }
 

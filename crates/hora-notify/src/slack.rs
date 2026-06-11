@@ -5,7 +5,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, escape, latency_suffix, post_json, topology_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape, latency_suffix,
+    post_json, topology_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -53,6 +54,15 @@ impl SlackNotifier {
                 escape(monitor),
                 cert_expiry_phrase(days_left)
             ),
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => format!(
+                ":globe_with_meridians: *{}* {}",
+                escape(monitor),
+                escape(&domain_expiry_phrase(domain, days_left))
+            ),
             Event::PeerLinkDegraded { peer, witness } => format!(
                 ":large_yellow_circle: *{}* link degraded\nunreachable from here, but seen up by {}",
                 escape(peer),
@@ -93,7 +103,7 @@ impl Notifier for SlackNotifier {
         "slack"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let text = Self::render(event);
         let payload = Payload { text: &text };
         post_json(
@@ -103,7 +113,7 @@ impl Notifier for SlackNotifier {
             "slack",
             &[self.webhook_url.as_str()],
         )
-        .await;
+        .await
     }
 }
 

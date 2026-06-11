@@ -185,6 +185,7 @@ mod tests {
             dns_expected: None,
             dns_resolver: None,
             cert_pin: None,
+            domain_expiry: None,
             slo_uptime: None,
             slo_window_days: None,
             schedule: None,

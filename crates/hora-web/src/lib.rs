@@ -2,6 +2,7 @@
 
 mod error;
 mod handlers;
+mod heatmap;
 mod history;
 mod metrics;
 mod render;

@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
+    topology_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -52,6 +53,18 @@ impl NtfyNotifier {
                 "lock",
                 3,
             ),
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => (
+                format!(
+                    "DOMAIN: {monitor} {}",
+                    domain_expiry_phrase(domain, days_left)
+                ),
+                "globe_with_meridians",
+                3,
+            ),
             Event::PeerLinkDegraded { peer, witness } => (
                 format!("PEER: {peer} unreachable, but {witness} sees it up (partition)"),
                 "warning",
@@ -89,7 +102,7 @@ impl Notifier for NtfyNotifier {
         "ntfy"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let (message, tags, priority) = Self::message(event);
         let build = || {
             let mut req = self.client.post(&self.url).body(message.clone());
@@ -107,6 +120,6 @@ impl Notifier for NtfyNotifier {
         if let Some(token) = &self.token {
             secrets.push(token.as_str());
         }
-        send_retrying(build, "ntfy", &secrets).await;
+        send_retrying(build, "ntfy", &secrets).await
     }
 }

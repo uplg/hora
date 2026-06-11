@@ -5,7 +5,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, latency_suffix, post_json, topology_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, post_json,
+    topology_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -63,6 +64,18 @@ impl DiscordNotifier {
                 title: format!(
                     "\u{1F510} {monitor} TLS certificate {}",
                     cert_expiry_phrase(days_left)
+                ),
+                description: None,
+                color: COLOR_CERT,
+            },
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => Embed {
+                title: format!(
+                    "\u{1F310} {monitor} {}",
+                    domain_expiry_phrase(domain, days_left)
                 ),
                 description: None,
                 color: COLOR_CERT,
@@ -125,7 +138,7 @@ impl Notifier for DiscordNotifier {
         "discord"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let embed = Self::embed(event);
         let payload = Payload {
             embeds: [EmbedJson {
@@ -141,7 +154,7 @@ impl Notifier for DiscordNotifier {
             "discord",
             &[self.webhook_url.as_str()],
         )
-        .await;
+        .await
     }
 }
 

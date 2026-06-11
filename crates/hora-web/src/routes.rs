@@ -15,8 +15,8 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
-    favicon, font, healthz, history_atom, history_page, latency_json, metrics_prometheus, openapi,
-    page, push, silence, status_badge, summary_json, uptime_badge,
+    favicon, font, healthz, heatmap_svg, history_atom, history_page, latency_json,
+    metrics_prometheus, openapi, page, push, silence, status_badge, summary_json, uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -63,6 +63,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/openapi.json", get(openapi))
         .route("/api/badge/{id}/status", get(status_badge))
         .route("/api/badge/{id}/uptime", get(uptime_badge))
+        // With the badges (outside the rate limiter): the history page embeds
+        // one <img> per monitor, which would eat a per-IP burst on its own.
+        .route("/api/monitors/{id}/heatmap.svg", get(heatmap_svg))
         .route("/metrics", get(metrics_prometheus))
         .route("/history", get(history_page))
         .route("/history.atom", get(history_atom))
@@ -379,6 +382,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn heatmap_is_svg_and_unknown_is_404() {
+        let res = test_app()
+            .await
+            .oneshot(get("/api/monitors/web/heatmap.svg"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers().get("content-type").unwrap(), "image/svg+xml");
+
+        let res = test_app()
+            .await
+            .oneshot(get("/api/monitors/nope/heatmap.svg"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

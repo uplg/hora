@@ -59,6 +59,19 @@ Notes appear on `/history` and in the Atom feed. Unlike captured failure
 detail, notes are written *for* visitors - they are deliberately shown to
 anonymous viewers too.
 
+## Latency heatmaps
+
+Below the incidents, `/history` offers a smokeping-style **heatmap per
+monitor**: hours by days over the last 28 days, each cell coloured by how
+slow that hour was *relative to the monitor's own median*. A weekly pattern -
+"slow every Monday at 9 a.m." - shows up as a horizontal stripe rhythm, with
+no threshold to tune and zero false-positive risk (it never alerts).
+
+Heatmaps are collapsed by default and load lazily from
+`GET /api/monitors/{id}/heatmap.svg`, with the same visibility rules as the
+latency endpoint. Each cell's tooltip carries the exact hour and average
+latency.
+
 ## Retention
 
 Closed incidents age out after a year, alongside the daily aggregates. Open

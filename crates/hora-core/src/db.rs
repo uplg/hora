@@ -540,6 +540,42 @@ pub async fn latency_sparkline_all(
     Ok(map)
 }
 
+/// Hourly average latency for one monitor since `since`: `(hour, avg_ms)`
+/// pairs, hour-aligned, oldest first. Reads the raw checks *and* the
+/// downsampled `checks_hourly` buckets so the series extends beyond the raw
+/// retention window; where both cover an hour the raw average wins (it is
+/// authoritative while complete). Feeds the latency heatmap.
+///
+/// # Errors
+///
+/// Returns an error if a query fails.
+pub async fn latency_hourly(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    since: i64,
+) -> sqlx::Result<Vec<(i64, i64)>> {
+    let buckets = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT hour, avg_latency_ms FROM checks_hourly \
+         WHERE monitor_id = ?1 AND hour >= ?2 AND avg_latency_ms IS NOT NULL",
+    )
+    .bind(monitor_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    let raw = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT (time / 3600) * 3600 AS hour, CAST(AVG(latency_ms) AS INTEGER) FROM checks \
+         WHERE monitor_id = ?1 AND time >= ?2 AND latency_ms IS NOT NULL GROUP BY hour",
+    )
+    .bind(monitor_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+
+    // Buckets first, raw second: on overlap the raw average overwrites.
+    let merged: BTreeMap<i64, i64> = buckets.into_iter().chain(raw).collect();
+    Ok(merged.into_iter().collect())
+}
+
 /// The stored certificate `not_after` for every monitor that has one.
 ///
 /// # Errors
@@ -550,6 +586,53 @@ pub async fn cert_all(pool: &SqlitePool) -> sqlx::Result<HashMap<String, i64>> {
         .fetch_all(pool)
         .await?;
     Ok(rows.into_iter().collect())
+}
+
+/// Store (or refresh) a monitor's registered-domain expiration (RDAP).
+///
+/// # Errors
+///
+/// Returns an error if the upsert fails.
+pub async fn upsert_domain_expiry(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    domain: &str,
+    expires_at: i64,
+    checked_at: i64,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO domain_expiry (monitor_id, domain, expires_at, checked_at) \
+         VALUES (?, ?, ?, ?) \
+         ON CONFLICT(monitor_id) DO UPDATE SET \
+            domain = excluded.domain, expires_at = excluded.expires_at, \
+            checked_at = excluded.checked_at",
+    )
+    .bind(monitor_id)
+    .bind(domain)
+    .bind(expires_at)
+    .bind(checked_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The stored `(domain, expires_at, checked_at)` for a monitor, if any. The
+/// watcher uses `checked_at` to poll RDAP at most once a day per monitor, and
+/// `domain` to re-query immediately when the configured domain changed.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn domain_expiry(
+    pool: &SqlitePool,
+    monitor_id: &str,
+) -> sqlx::Result<Option<(String, i64, i64)>> {
+    sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT domain, expires_at, checked_at FROM domain_expiry WHERE monitor_id = ?",
+    )
+    .bind(monitor_id)
+    .fetch_optional(pool)
+    .await
 }
 
 /// Store (or refresh) the certificate pin (SHA-256 fingerprint of the leaf public key).
@@ -1111,6 +1194,13 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
     sqlx::query(
+        "DELETE FROM domain_expiry WHERE NOT EXISTS \
+         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = domain_expiry.monitor_id)",
+    )
+    .bind(&keep)
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "DELETE FROM incidents WHERE NOT EXISTS \
          (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = incidents.monitor_id)",
     )
@@ -1271,6 +1361,37 @@ mod tests {
             ("2021-01-01", 1, 1)
         );
         assert_eq!((rows[1].day.as_str(), rows[1].up), ("2021-01-02", 1));
+    }
+
+    #[tokio::test]
+    async fn latency_hourly_merges_raw_and_buckets() {
+        let pool = memory_pool().await;
+        let hour0 = 10 * 86_400;
+        let hour1 = hour0 + 3600;
+
+        // hour0 exists in both sources with different averages; hour1 only as
+        // raw checks; an older hour only as a downsampled bucket.
+        sqlx::query(
+            "INSERT INTO checks_hourly \
+                (monitor_id, hour, up_count, down_count, degraded_count, avg_latency_ms) \
+             VALUES ('m', ?, 10, 0, 0, 999), ('m', ?, 5, 0, 0, 50)",
+        )
+        .bind(hour0)
+        .bind(hour0 - 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+        insert(&pool, "m", hour0 + 10, 1, Some(100)).await;
+        insert(&pool, "m", hour0 + 20, 1, Some(200)).await;
+        insert(&pool, "m", hour1 + 10, 1, Some(300)).await;
+
+        let cells = latency_hourly(&pool, "m", 0).await.unwrap();
+        // Oldest first; on the hour0 overlap the raw average (150) wins.
+        assert_eq!(cells, vec![(hour0 - 3600, 50), (hour0, 150), (hour1, 300)]);
+
+        // `since` trims the window.
+        let recent = latency_hourly(&pool, "m", hour0).await.unwrap();
+        assert_eq!(recent.len(), 2);
     }
 
     #[tokio::test]

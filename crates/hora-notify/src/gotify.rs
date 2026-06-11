@@ -5,7 +5,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
+    topology_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -43,6 +44,17 @@ impl GotifyNotifier {
             Event::Recovered { monitor } => (format!("RECOVERED: {monitor}"), 2),
             Event::CertExpiring { monitor, days_left } => (
                 format!("CERT: {monitor} {}", cert_expiry_phrase(days_left)),
+                5,
+            ),
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => (
+                format!(
+                    "DOMAIN: {monitor} {}",
+                    domain_expiry_phrase(domain, days_left)
+                ),
                 5,
             ),
             Event::PeerLinkDegraded { peer, witness } => (
@@ -91,7 +103,7 @@ impl Notifier for GotifyNotifier {
         "gotify"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let payload = Self::payload(event);
         // The token travels as a header, not in the URL: query strings end up
         // in proxy and server access logs.
@@ -102,6 +114,6 @@ impl Notifier for GotifyNotifier {
                 .header("X-Gotify-Key", &self.token)
                 .json(&payload)
         };
-        send_retrying(build, "gotify", &[self.token.as_str()]).await;
+        send_retrying(build, "gotify", &[self.token.as_str()]).await
     }
 }

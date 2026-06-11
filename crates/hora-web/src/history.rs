@@ -17,6 +17,38 @@ pub(crate) struct HistoryTemplate {
     /// The status page title, linked back to from the footer.
     pub(crate) title: String,
     pub(crate) incidents: Vec<IncidentRow>,
+    /// Monitors whose latency heatmap is offered below the incidents
+    /// (collapsed; each `<img>` loads its SVG lazily from the API).
+    pub(crate) heatmaps: Vec<HeatmapRef>,
+    /// `?token=...` to append to the heatmap image URLs, so a viewer
+    /// authenticated by query token sees private monitors' heatmaps too. An
+    /// `<img>` cannot carry an Authorization header, so Bearer-authenticated
+    /// viewers fall back to the public heatmaps only.
+    pub(crate) token_query: String,
+}
+
+/// One monitor offered in the heatmap section.
+pub(crate) struct HeatmapRef {
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
+/// Percent-encode `value` for safe embedding in a query string (RFC 3986
+/// unreserved characters pass through).
+pub(crate) fn url_encode(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// One incident, formatted for display.

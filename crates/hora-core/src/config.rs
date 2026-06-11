@@ -409,6 +409,10 @@ pub struct Alerts {
     /// Warn this many days before a TLS certificate expires.
     #[serde(default = "default_cert_expiry_days")]
     pub cert_expiry_days: u16,
+    /// Warn this many days before a registered domain expires (RDAP); applies
+    /// to monitors that opt in with `domain_expiry = "example.com"`.
+    #[serde(default = "default_domain_expiry_days")]
+    pub domain_expiry_days: u16,
     /// Default storage retention, overridable per monitor.
     #[serde(default = "default_retention_days")]
     pub default_retention_days: u16,
@@ -427,6 +431,7 @@ impl Default for Alerts {
             fail_threshold: default_threshold(),
             alert_on_degraded: false,
             cert_expiry_days: default_cert_expiry_days(),
+            domain_expiry_days: default_domain_expiry_days(),
             default_retention_days: default_retention_days(),
             group_window_secs: default_group_window(),
         }
@@ -695,6 +700,13 @@ pub struct Monitor {
     /// set, an alert fires if the key changes (MITM / unexpected renewal detection).
     #[serde(default)]
     pub cert_pin: Option<String>,
+    /// The monitor's *registered* domain ("example.com", not the subdomain the
+    /// target uses), checked daily against the registry over RDAP; an alert
+    /// fires `alerts.domain_expiry_days` before it expires. Explicit rather
+    /// than derived from `target`: registrable-domain extraction needs a
+    /// public-suffix list, and the operator already knows the answer.
+    #[serde(default)]
+    pub domain_expiry: Option<String>,
 }
 
 // Manual `Debug` (rather than derived) so credentials never leak: `target` and
@@ -738,6 +750,7 @@ impl std::fmt::Debug for Monitor {
             .field("dns_expected", &self.dns_expected)
             .field("dns_resolver", &self.dns_resolver)
             .field("cert_pin", &self.cert_pin)
+            .field("domain_expiry", &self.domain_expiry)
             .finish()
     }
 }
@@ -864,6 +877,9 @@ fn default_timeout() -> u64 {
 fn default_cert_expiry_days() -> u16 {
     14
 }
+fn default_domain_expiry_days() -> u16 {
+    14
+}
 fn default_retention_days() -> u16 {
     90
 }
@@ -936,6 +952,10 @@ pub fn parse(toml_str: &str) -> anyhow::Result<Config> {
     for monitor in &mut config.monitors {
         if let Some(pin) = &mut monitor.cert_pin {
             pin.make_ascii_lowercase();
+        }
+        // Domain names are case-insensitive; RDAP servers expect lowercase.
+        if let Some(domain) = &mut monitor.domain_expiry {
+            domain.make_ascii_lowercase();
         }
     }
     validate(&config)?;
@@ -1352,6 +1372,16 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
     );
     // A malformed pin (wrong length, non-hex) can never match the observed
     // fingerprint, which silently disables pinning after one spurious alert.
+    validate_pins(monitor)?;
+    if monitor.dual_stack() {
+        validate_dual_stack(monitor)?;
+    }
+    validate_schedule_and_slo(monitor)?;
+    Ok(())
+}
+
+/// Validate the identity assertions: the certificate pin and the RDAP domain.
+fn validate_pins(monitor: &Monitor) -> anyhow::Result<()> {
     if let Some(pin) = &monitor.cert_pin {
         anyhow::ensure!(
             pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -1359,10 +1389,18 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
             monitor.id
         );
     }
-    if monitor.dual_stack() {
-        validate_dual_stack(monitor)?;
+    // A bare registrable name ("example.com"): an URL or a path would query
+    // RDAP for garbage, and a name without a dot is a TLD, not a domain.
+    if let Some(domain) = &monitor.domain_expiry {
+        anyhow::ensure!(
+            domain.contains('.')
+                && !domain.contains('/')
+                && !domain.contains(':')
+                && !domain.contains(char::is_whitespace),
+            "monitor {}: domain_expiry must be a bare domain name like \"example.com\"",
+            monitor.id
+        );
     }
-    validate_schedule_and_slo(monitor)?;
     Ok(())
 }
 
@@ -2548,6 +2586,45 @@ mod tests {
         let config = super::parse(&cfg(&"A".repeat(64))).expect("valid pin");
         let lower = "a".repeat(64);
         assert_eq!(config.monitors[0].cert_pin.as_deref(), Some(lower.as_str()));
+    }
+
+    #[test]
+    fn domain_expiry_must_be_a_bare_domain_and_is_lowercased() {
+        let cfg = |domain: &str| {
+            format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "web"
+                name = "Web"
+                target = "https://api.example.com"
+                interval_secs = 60
+                domain_expiry = "{domain}"
+            "#
+            )
+        };
+
+        // URLs, host:port, paths and TLD-only names are rejected at load.
+        for bad in [
+            "https://example.com",
+            "example.com/x",
+            "example.com:443",
+            "com",
+        ] {
+            let err = super::parse(&cfg(bad)).unwrap_err().to_string();
+            assert!(err.contains("bare domain name"), "{bad}: {err}");
+        }
+
+        // Domain names are case-insensitive; canonicalized for RDAP.
+        let config = super::parse(&cfg("Example.COM")).expect("valid domain");
+        assert_eq!(
+            config.monitors[0].domain_expiry.as_deref(),
+            Some("example.com")
+        );
+
+        // The default warning window parallels the certificate one.
+        assert_eq!(config.alerts.domain_expiry_days, 14);
     }
 
     #[test]

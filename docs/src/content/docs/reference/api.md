@@ -20,6 +20,7 @@ Editor...) at it.
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. |
 | `POST /api/silence` | Mute alerts ad hoc (deploy hook). |
+| `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge. |
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code. |

@@ -163,6 +163,20 @@ An unexpected key change - MITM, botched renewal - alerts once per change,
 with the old and new fingerprints. Disable expiry checking per monitor with
 `check_cert = false`.
 
+## Domain expiry (RDAP)
+
+The natural sibling of the TLS warnings: *"your domain expires in 14 days"*.
+
+```toml
+domain_expiry = "example.com"
+```
+
+The **registered** domain (not the subdomain the target uses - that's why it
+is explicit rather than derived) is checked once a day against the registry
+over RDAP - JSON over HTTP, no whois parsing - and an alert fires
+`alerts.domain_expiry_days` (default 14) before it expires, with the same
+edge-triggered, maintenance-muted policy as certificates.
+
 ## Visibility
 
 ```toml

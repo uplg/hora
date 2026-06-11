@@ -54,6 +54,13 @@ pub enum Event<'a> {
     Recovered { monitor: &'a str },
     /// A monitor's TLS certificate is within the warning window (or expired).
     CertExpiring { monitor: &'a str, days_left: i64 },
+    /// A monitor's registered domain is within the warning window (or expired),
+    /// as reported by the registry over RDAP.
+    DomainExpiring {
+        monitor: &'a str,
+        domain: &'a str,
+        days_left: i64,
+    },
     /// A peer is unreachable from here, but a third-party witness still sees it
     /// up: likely a network partition on the local-to-peer link, not a peer
     /// outage. Lower severity than [`Event::Down`].
@@ -85,8 +92,10 @@ pub trait Notifier: Send + Sync {
     /// Channel name, used in logs.
     fn name(&self) -> &'static str;
 
-    /// Deliver one event. Implementations must not panic; log and move on.
-    async fn notify(&self, event: Event<'_>);
+    /// Deliver one event. Implementations must not panic; they log their own
+    /// failure (the daemon fires and forgets) *and* return it, so a caller
+    /// that cares - `hora test-alert`'s exit code - can see delivery failed.
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()>;
 }
 
 /// A registered channel: its routing name plus the delivery backend.
@@ -129,14 +138,23 @@ impl Dispatcher {
     /// Deliver `event` to the matching channels concurrently: all of them when
     /// `only` is `None`, otherwise just those whose name appears in the list. A
     /// slow channel never holds up the others (or the monitor loop behind them).
-    pub async fn dispatch(&self, event: Event<'_>, only: Option<&[String]>) {
-        let deliveries = self
+    ///
+    /// Returns the routing names of the channels whose delivery failed, in
+    /// configuration order. Each failure was already logged by the channel
+    /// itself; the daemon ignores the list, `hora test-alert` exits on it.
+    pub async fn dispatch(&self, event: Event<'_>, only: Option<&[String]>) -> Vec<&str> {
+        let targets: Vec<&Channel> = self
             .channels
             .iter()
             .filter(|channel| {
                 only.is_none_or(|names| names.iter().any(|name| name == &channel.name))
             })
-            .map(|channel| channel.notifier.notify(event));
-        join_all(deliveries).await;
+            .collect();
+        let outcomes = join_all(targets.iter().map(|channel| channel.notifier.notify(event))).await;
+        targets
+            .iter()
+            .zip(outcomes)
+            .filter_map(|(channel, outcome)| outcome.is_err().then_some(channel.name.as_str()))
+            .collect()
     }
 }

@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, latency_suffix, send_retrying, topology_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
+    topology_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -50,6 +51,17 @@ impl PushoverNotifier {
                 format!("CERT: {monitor} {}", cert_expiry_phrase(days_left)),
                 0,
             ),
+            Event::DomainExpiring {
+                monitor,
+                domain,
+                days_left,
+            } => (
+                format!(
+                    "DOMAIN: {monitor} {}",
+                    domain_expiry_phrase(domain, days_left)
+                ),
+                0,
+            ),
             Event::PeerLinkDegraded { peer, witness } => (
                 format!("PEER: {peer} unreachable, but {witness} sees it up (partition)"),
                 0,
@@ -84,7 +96,7 @@ impl Notifier for PushoverNotifier {
         "pushover"
     }
 
-    async fn notify(&self, event: Event<'_>) {
+    async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
         let (message, priority) = Self::message(event);
         let build = || {
             self.client.post(PUSHOVER_API).json(&serde_json::json!({
@@ -101,6 +113,6 @@ impl Notifier for PushoverNotifier {
             "pushover",
             &[self.token.as_str(), self.user.as_str()],
         )
-        .await;
+        .await
     }
 }

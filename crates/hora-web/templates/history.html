@@ -179,6 +179,40 @@
       padding: 48px 0;
     }
 
+    .section-title {
+      font-family: var(--brand);
+      font-size: 18px;
+      font-weight: 600;
+      margin: 36px 0 12px;
+      letter-spacing: 0.01em;
+    }
+
+    .heatmaps {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .heatmap {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--card);
+      padding: 8px 12px;
+    }
+
+    .heatmap summary {
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .heatmap img {
+      display: block;
+      margin-top: 8px;
+      max-width: 100%;
+      height: auto;
+    }
+
     footer {
       color: var(--muted);
       font-size: 12px;
@@ -232,6 +266,19 @@
         </details>
         {% endif %}
       </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if !heatmaps.is_empty() %}
+    <h2 class="section-title">Latency heatmaps · last 28 days</h2>
+    <div class="heatmaps">
+      {% for monitor in heatmaps %}
+      <details class="heatmap">
+        <summary>{{ monitor.name }}</summary>
+        <img loading="lazy" src="/api/monitors/{{ monitor.id }}/heatmap.svg{{ token_query }}"
+          alt="Latency heatmap of {{ monitor.name }}: hours by days, colour = latency vs the monitor's median" />
+      </details>
       {% endfor %}
     </div>
     {% endif %}

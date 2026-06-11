@@ -38,6 +38,12 @@ use crate::notifications::Notifiers;
 
 const CHECK_INTERVAL: Duration = Duration::from_hours(12);
 
+/// RDAP lookups happen at most this often per monitor (just under a day, so
+/// the 12h ticks land on a daily cadence): registries rate-limit, the answer
+/// moves yearly, and the gate is the stored `checked_at`, so a restart never
+/// re-queries early.
+const DOMAIN_CHECK_SECS: i64 = 20 * 3600;
+
 /// A verifier that accepts any certificate: we want to read the dates, not
 /// establish trust.
 #[derive(Debug)]
@@ -148,13 +154,15 @@ fn host_port(target: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
-/// Spawn the certificate watcher: checks every HTTPS monitor every 12 hours.
-/// A shutdown signal lets it stop between ticks instead of being aborted.
+/// Spawn the certificate watcher: checks every HTTPS monitor every 12 hours,
+/// plus the daily RDAP domain-expiry checks for monitors that opt in. A
+/// shutdown signal lets it stop between ticks instead of being aborted.
 #[must_use]
 pub fn spawn_watcher(
     pool: SqlitePool,
     config: watch::Receiver<Arc<Config>>,
     notifier: Notifiers,
+    client: reqwest::Client,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -167,6 +175,7 @@ pub fn spawn_watcher(
         };
 
         let mut warned: HashMap<String, bool> = HashMap::new();
+        let mut domain_warned: HashMap<String, bool> = HashMap::new();
         let mut ticker = tokio::time::interval(CHECK_INTERVAL);
 
         loop {
@@ -178,8 +187,19 @@ pub fn spawn_watcher(
             let threshold_days = i64::from(snapshot.alerts.cert_expiry_days);
             let now = chrono::Utc::now().timestamp();
 
-            // Forget monitors that no longer exist so the alert-dedup map stays bounded.
+            // Forget monitors that no longer exist so the alert-dedup maps stay bounded.
             warned.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
+            domain_warned.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
+
+            check_domains(
+                &pool,
+                &snapshot,
+                &notifier,
+                &client,
+                &mut domain_warned,
+                now,
+            )
+            .await;
 
             for monitor in snapshot.monitors.iter().filter(|m| m.checks_cert()) {
                 let Some((host, port)) = host_port(&monitor.target) else {
@@ -260,6 +280,81 @@ pub fn spawn_watcher(
             }
         }
     })
+}
+
+/// One pass of the RDAP domain-expiry checks: for each monitor with a
+/// `domain_expiry`, refresh the registry's expiration date at most daily
+/// (gated on the stored `checked_at`, so restarts never re-query early) and
+/// alert once when it enters the warning window - the same edge-triggered,
+/// maintenance-muted policy as the certificate expiry above.
+async fn check_domains(
+    pool: &SqlitePool,
+    snapshot: &Config,
+    notifier: &Notifiers,
+    client: &reqwest::Client,
+    domain_warned: &mut HashMap<String, bool>,
+    now: i64,
+) {
+    let threshold_days = i64::from(snapshot.alerts.domain_expiry_days);
+    for monitor in &snapshot.monitors {
+        let Some(domain) = &monitor.domain_expiry else {
+            continue;
+        };
+        let stored = match db::domain_expiry(pool, &monitor.id).await {
+            Ok(stored) => stored,
+            Err(err) => {
+                warn!(monitor = %monitor.id, "failed to read domain expiry: {err:#}");
+                continue;
+            }
+        };
+        // A changed `domain_expiry` in the config re-queries immediately.
+        let expires_at = match stored {
+            Some((ref stored_domain, expires_at, checked_at))
+                if stored_domain == domain && now - checked_at < DOMAIN_CHECK_SECS =>
+            {
+                expires_at
+            }
+            _ => match crate::rdap::domain_expiration(client, domain).await {
+                Ok(expires_at) => {
+                    if let Err(err) =
+                        db::upsert_domain_expiry(pool, &monitor.id, domain, expires_at, now).await
+                    {
+                        warn!(monitor = %monitor.id, "failed to store domain expiry: {err:#}");
+                    }
+                    let days_left = (expires_at - now) / SECONDS_PER_DAY;
+                    info!(monitor = %monitor.id, domain, days_left, "checked domain expiry (RDAP)");
+                    expires_at
+                }
+                Err(err) => {
+                    warn!(monitor = %monitor.id, domain, "RDAP domain check failed: {err:#}");
+                    continue;
+                }
+            },
+        };
+
+        let days_left = (expires_at - now) / SECONDS_PER_DAY;
+        let expiring = days_left <= threshold_days;
+        let already_warned = domain_warned.get(&monitor.id).copied().unwrap_or(false);
+        // Mute (without recording the warned state) during maintenance, so
+        // the alert still fires once the window ends.
+        if snapshot.in_maintenance(&monitor.id, chrono::Utc::now()) {
+            continue;
+        }
+        if expiring && !already_warned {
+            notifier
+                .load_full()
+                .dispatch(
+                    Event::DomainExpiring {
+                        monitor: &monitor.name,
+                        domain,
+                        days_left,
+                    },
+                    monitor.notify.as_deref(),
+                )
+                .await;
+        }
+        domain_warned.insert(monitor.id.clone(), expiring);
+    }
 }
 
 /// The pinning verdict for one check: `Some(old)` when an alert should fire,

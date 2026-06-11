@@ -49,6 +49,7 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         silence,
         status_badge,
         uptime_badge,
+        heatmap_svg,
         healthz
     ),
     components(schemas(
@@ -299,9 +300,28 @@ pub(crate) async fn history_page(
     let config = state.config.borrow().clone();
     let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
     let incidents = visible_incidents(&state.pool, &config, authenticated, 100).await?;
+    // The heatmap section lists what this viewer may see; the images load
+    // lazily from the API. Push monitors have no latency series to show.
+    let heatmaps = config
+        .monitors
+        .iter()
+        .filter(|monitor| (monitor.public || authenticated) && monitor.kind != Kind::Push)
+        .map(|monitor| history::HeatmapRef {
+            id: monitor.id.clone(),
+            name: monitor.name.clone(),
+        })
+        .collect();
+    let token_query = auth_query
+        .token
+        .as_deref()
+        .filter(|_| authenticated)
+        .map(|token| format!("?token={}", history::url_encode(token)))
+        .unwrap_or_default();
     let html = history::HistoryTemplate {
         title: config.page.title.clone(),
         incidents: history::incident_rows(&incidents, &monitor_names(&config)),
+        heatmaps,
+        token_query,
     }
     .render()?;
     Ok(Html(html))
@@ -390,6 +410,44 @@ pub(crate) async fn latency_json(
     let points = db::latency_series(&pool, &id, since, bucket_secs).await?;
     // The SQL already respects the cap; downsample stays as a pure backstop.
     Ok(Json(downsample(points, MAX_LATENCY_POINTS)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/monitors/{id}/heatmap.svg",
+    params(("id" = String, Path, description = "Monitor id")),
+    responses(
+        (status = 200, description = "28-day hours-by-days latency heatmap (SVG)"),
+        (status = 404, description = "Unknown monitor")
+    )
+)]
+pub(crate) async fn heatmap_svg(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let AppState { pool, config, .. } = state;
+    let config = config.borrow().clone();
+    // Same visibility rule as the latency endpoint: a private monitor answers
+    // exactly like a missing one unless the caller is authenticated.
+    let monitor = config
+        .monitors
+        .iter()
+        .find(|monitor| {
+            monitor.id == id
+                && (monitor.public
+                    || is_authenticated(&headers, auth_query.token.as_deref(), &config))
+        })
+        .ok_or(AppError::NotFound("unknown monitor"))?;
+    let now = Utc::now().timestamp();
+    let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
+    let cells = db::latency_hourly(&pool, &id, since).await?;
+    Ok(svg_response(crate::heatmap::render(
+        &cells,
+        now,
+        &monitor.name,
+    )))
 }
 
 #[derive(Debug, Deserialize)]
