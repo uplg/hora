@@ -78,8 +78,8 @@ Full guides for everything below live in the
   config, `hora announce` or `POST /api/announce`, with optional auto-expiry
   (`--until 4h`): the mini-Statuspage half of self-hosted monitoring.
 - **`hora top`** - a live terminal dashboard over the JSON API (statuses,
-  uptime, p50/p95/p99, a latency sparkline, current trouble). Self-hosters
-  live in SSH.
+  uptime, p50/p95/p99, a latency sparkline, current trouble) that also acts:
+  announce, silence, clear banners - straight from SSH.
 - **Incident history** as HTML and an **Atom feed**, with **failure snapshots**
   (what the service actually answered) and **operator annotations**
   (`hora annotate 42 "fiber cut"`).

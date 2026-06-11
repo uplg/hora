@@ -23,9 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   monitor, and the current trouble, refreshed in place (default 5s).
   `--url`/`--token` point it at any Hora (the token also reads `HORA_TOKEN`,
   kept out of `ps`); without `--url` the local config's bind is used
-  (wildcard binds map to loopback, so it works in `docker exec`). Read-only,
-  tolerant of older/newer servers, and the terminal is restored even on a
-  panic. Costs ~0.2 MB of binary.
+  (wildcard binds map to loopback, so it works in `docker exec`). It acts,
+  too: `a` pins an announcement (`title :: body`, `--severity`, `--until`),
+  `s` silences the selected monitor, `C` clears the banners - all through
+  the same authenticated API, with the outcome shown in the footer and the
+  pinned banners visible in the trouble panel. Selection scrolling is
+  debounced and HTTP 429 triggers a polling back-off, so the dashboard stays
+  within the default per-IP rate limit. Tolerant of older/newer servers, and
+  the terminal is restored even on a panic. Costs ~0.2 MB of binary.
 - **Exec probes** (`kind = "exec"`): run an external check following the
   monitoring-plugins convention - exit 0 = up, 1 = degraded, anything else
   = down, first stdout line = message (`|perfdata` stripped, output bounded,

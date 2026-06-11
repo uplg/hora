@@ -78,7 +78,21 @@ keys), and the current trouble. `--url` and `--token` point it at any Hora -
 local or remote (`HORA_TOKEN` works too, keeping the token out of `ps`);
 without `--url` the local config's bind address is used, so `hora top` just
 works on the daemon's host - including inside `docker exec -it hora hora
-top`. `q` quits, `r` forces a refresh.
+top`.
+
+It also *acts*, through the same authenticated API (`--token` required):
+
+| Key | Action |
+| --- | --- |
+| `a` | Pin an announcement: `title :: body`, optional `--severity` / `--until` |
+| `s` | Silence the selected monitor (pre-filled `10m`, editable) |
+| `C` | Clear every pinned announcement |
+| `↑`/`↓` | Select (the sparkline follows, debounced) |
+| `r` / `q` | Force a refresh / quit |
+
+Pinned banners show in the trouble panel, so what you announce is what you
+see. Selection scrolling is debounced and a server 429 backs the polling
+off, so `hora top` stays comfortably within the default API rate limit.
 
 ## `hora digest`
 
