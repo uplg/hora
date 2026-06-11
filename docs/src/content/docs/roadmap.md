@@ -10,6 +10,12 @@ records what actually shipped.
 
 ## Exploring
 
+- **Per-vantage data on the status page** - the observability residue of a
+  "multi-region mesh" now that [multi-vantage
+  confirmation](../guides/peers/#multi-vantage-confirmation) covers the
+  anti-false-positive side: a region badge and per-vantage latency ("80 ms
+  from EU, 220 ms from US"), aggregated read-only from the peers'
+  `/api/summary`. A display increment, not an architecture project.
 - **Escalation & acknowledgement** - if an alert is not acknowledged within
   N minutes, notify the next channel; ack via a signed link in the
   notification. The biggest item on the list, and more natural once
@@ -44,6 +50,12 @@ Declined with reasons, so they stay declined:
   toward a DSL and away from a simple `config.toml`.
 - **Content change detection** - same flap logic as alerting on DNS answer
   rotation: change is not failure.
+- **An "agent mode" multi-region mesh** - lightweight satellites phoning home
+  to a central brain. It reintroduces exactly the single point of failure the
+  peer mesh exists to avoid (the brain dies, monitoring goes blind), for the
+  price of one duplicated TOML file. Symmetric full nodes with
+  [multi-vantage confirmation](../guides/peers/#multi-vantage-confirmation)
+  embody the one-small-binary thesis better.
 - **gRPC health probes** - the dependency tree doesn't pass the project's
   supply-chain policy (`cargo-deny`).
 - **Email subscriptions to the status page** - subscriber storage,
