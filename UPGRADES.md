@@ -4,6 +4,19 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.5.0 → 0.5.1
+
+Two things to know:
+
+- **Deploy the binary before the config.** The config is validated with
+  `deny_unknown_fields`, so a config using the new keys (`domain_expiry` on a
+  monitor, `alerts.domain_expiry_days`) is *rejected by a 0.5.0 binary* -
+  upgrade Hora first, then ship the config that uses the new features. One
+  schema migration (the `domain_expiry` table) applies automatically.
+- **`hora test-alert` now exits non-zero when a channel fails** (naming the
+  failing channels). A script that relied on it always exiting 0 will now
+  surface broken channels - which is the point, but check your pipelines.
+
 ## 0.4.2 → 0.5.0
 
 No behavioural changes: every addition is opt-in or a new subcommand. Notes:
