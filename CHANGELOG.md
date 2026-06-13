@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`hora tune [monitor_id] [--days N]`**: replay a monitor's stored check
+  history against alternative anti-flap settings and recommend, per monitor,
+  what to change - the project's thesis ("nobody helps tune a monitor")
+  quantified on the user's own data. Pure read-only analytics over the raw
+  `checks` table (which survives the full retention window, default 90 days):
+  it never probes and never writes. For **`fail_threshold`** it counts how
+  many down alerts each candidate value would have fired and the detection
+  delay it costs ("threshold 5 -> 4 alerts instead of 11, same real outages,
+  +40s"), recommending the value that sits just above the flap cluster (the
+  widest gap in the failure-run lengths) so flaps are filtered but every real
+  outage is still caught; it also flags a threshold so high a real multi-check
+  outage went undetected. For **`degraded_over_ms`** it reports the latency
+  distribution (p50/p95/p99/max) of the up checks and recommends a threshold
+  near p99, warning when the current one flags normal traffic as degraded.
+  **`probe_retries`** is deliberately not replayed - only a probe's final
+  attempt reaches the database - so the command says so and surfaces the
+  single-check-blip count, whose cross-tick lever is `fail_threshold`.
+
 ## [0.7.0] - 2026-06-12
 
 ### Added

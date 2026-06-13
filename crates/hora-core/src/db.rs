@@ -206,6 +206,39 @@ pub async fn recent_checks(
     .await
 }
 
+/// A stored check reduced to what `hora tune` replays: when it ran, its status
+/// (0 down, 1 up, 2 degraded) and the latency sample, if any.
+#[derive(Debug, sqlx::FromRow)]
+pub struct CheckSample {
+    pub time: i64,
+    pub status: i64,
+    pub latency_ms: Option<i64>,
+}
+
+/// Every stored check for a monitor since `since`, oldest first - the raw
+/// material [`crate::tune`] replays against alternative thresholds. Raw rows
+/// survive the monitor's full retention window (default 90 days): the 7-day
+/// downsampling only *copies* them into the hourly aggregate, so this reaches
+/// as far back as retention even though [`latency_series`] reads the buckets.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn check_samples(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    since: i64,
+) -> sqlx::Result<Vec<CheckSample>> {
+    sqlx::query_as::<_, CheckSample>(
+        "SELECT time, status, latency_ms FROM checks \
+         WHERE monitor_id = ? AND time >= ? ORDER BY time ASC",
+    )
+    .bind(monitor_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await
+}
+
 /// The timestamp of a monitor's most recent check, if any (push staleness).
 ///
 /// # Errors

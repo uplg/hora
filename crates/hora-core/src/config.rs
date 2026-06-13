@@ -630,6 +630,21 @@ pub enum Kind {
     Dns,
 }
 
+impl Kind {
+    /// Lowercase name, as written in the config and the API.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Tcp => "tcp",
+            Self::Icmp => "icmp",
+            Self::Exec => "exec",
+            Self::Push => "push",
+            Self::Dns => "dns",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Monitor {

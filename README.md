@@ -163,6 +163,8 @@ hora announce "Fibre incident" "ETA 6pm" --severity warning --until 4h
                                        # pin a public banner on the status page
 hora top --url https://status.example.com --token $TOK
                                        # live terminal dashboard over the JSON API
+hora tune                              # replay history: recommend fail_threshold / degraded_over_ms per monitor
+hora tune api --days 30                # ... for one monitor, over the last 30 days
 hora digest                            # print the weekly digest (dry run of [digest])
 hora report 2026-05                    # print the monthly SLA report (default: last month)
 hora incidents                         # list recent incidents with their ids
@@ -189,6 +191,17 @@ as `POST /api/silence` for CI pipelines.
 ("fiber cut, ETA 6pm"), displayed on `/history` and in the Atom feed - notes
 are written for visitors and shown to anonymous viewers too. An empty note
 clears it; `hora incidents` lists recent incidents with their ids.
+
+`hora tune` answers the question no light monitor helps with: *is this monitor
+set up right?* It replays the stored check history against alternative settings
+and recommends, per monitor, what to change - all read-only analytics over data
+that already exists. For `fail_threshold` it shows how many down alerts each
+candidate value would have fired and the detection delay it costs ("threshold
+5 -> 4 alerts instead of 11, same real outages, +40s"), and recommends the
+value that filters the flaps while still catching every real outage; for
+`degraded_over_ms` it reports the latency distribution and recommends a
+threshold near p99 so only genuine slowness is flagged. (`probe_retries` is not
+replayable - only a probe's final attempt is stored - so the command says so.)
 
 `hora backup <dest>` snapshots the database with SQLite's `VACUUM INTO`:
 consistent and compacted, safe while the daemon is running, and a one-liner in

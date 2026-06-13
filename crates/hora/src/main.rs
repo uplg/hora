@@ -99,6 +99,9 @@ async fn run_subcommand() -> anyhow::Result<bool> {
             "doctor" => {
                 doctor().await?;
             }
+            "tune" => {
+                tune(&args[2..]).await?;
+            }
             "announce" => {
                 announce(&args[2..]).await?;
             }
@@ -203,6 +206,8 @@ fn print_help() {
     println!("  check               Validate the configuration and exit");
     println!("  doctor              Diagnose the runtime environment (IPv6, ICMP socket,");
     println!("                      DNS resolver, listen port, database)");
+    println!("  tune [id] [--days N]  Replay stored history against other fail_threshold /");
+    println!("                      degraded_over_ms settings and recommend per monitor");
     println!("  test-alert [id]     Send a test down + recovered through the configured");
     println!("                      channels (all of them, or the routed ones of monitor [id])");
     println!("  silence <ids> <for> [reason]  Mute alerts for monitors (comma-separated ids");
@@ -471,6 +476,296 @@ async fn report(month: Option<&str>) -> anyhow::Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// `hora tune [monitor_id] [--days N]`: replay the stored check history against
+/// alternative anti-flap settings and print per-monitor recommendations. Pure
+/// read-only analytics over data that already exists - it never probes, never
+/// writes. With an id, it focuses one monitor; without, every monitor that has
+/// history. `--days` narrows the lookback (default: the monitor's retention).
+async fn tune(args: &[String]) -> anyhow::Result<()> {
+    let mut only: Option<&str> = None;
+    let mut days: Option<i64> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--days" => {
+                let raw = iter.next().unwrap_or_else(|| {
+                    eprintln!("Usage: hora tune [monitor_id] [--days N]");
+                    std::process::exit(1);
+                });
+                let parsed = raw.parse::<i64>().ok().filter(|&d| d > 0);
+                let Some(parsed) = parsed else {
+                    eprintln!("--days must be a positive number of days");
+                    std::process::exit(1);
+                };
+                days = Some(parsed);
+            }
+            other if only.is_none() => only = Some(other),
+            other => {
+                eprintln!(
+                    "Unexpected argument {other:?} (usage: hora tune [monitor_id] [--days N])"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let (config, pool) = open_database().await?;
+    let selected: Vec<&hora_core::config::Monitor> = match only {
+        Some(id) => {
+            let Some(monitor) = config.monitors.iter().find(|monitor| monitor.id == id) else {
+                eprintln!("Unknown monitor {id:?}. Configured ids:");
+                for monitor in &config.monitors {
+                    eprintln!("  {}", monitor.id);
+                }
+                std::process::exit(1);
+            };
+            vec![monitor]
+        }
+        None => config.monitors.iter().collect(),
+    };
+
+    let lookback = days.unwrap_or_else(|| {
+        // The widest per-monitor retention bounds how far raw checks reach.
+        selected
+            .iter()
+            .map(|monitor| i64::from(monitor.retention_days(config.alerts.default_retention_days)))
+            .max()
+            .unwrap_or(90)
+    });
+    println!(
+        "hora tune - {} (replaying up to {})",
+        config::path().display(),
+        days_label(lookback)
+    );
+
+    let now = chrono::Utc::now().timestamp();
+    let mut printed = 0_usize;
+    for monitor in selected {
+        let retention = i64::from(monitor.retention_days(config.alerts.default_retention_days));
+        let window_days = days.map_or(retention, |d| d.min(retention));
+        let since = now - window_days * hora_core::SECONDS_PER_DAY;
+        let samples = hora_core::db::check_samples(&pool, &monitor.id, since).await?;
+
+        let ctx = hora_core::tune::MonitorContext {
+            id: &monitor.id,
+            name: &monitor.name,
+            group: monitor.group.as_deref(),
+            kind: monitor.kind.as_str(),
+            interval_secs: monitor.interval_secs,
+            current_threshold: config.alerts.fail_threshold,
+            current_degraded_over_ms: monitor.degraded_over_ms,
+        };
+        let tuning = hora_core::tune::analyze(&ctx, &samples);
+
+        if tuning.checks == 0 {
+            // Only nag about an empty window when one monitor was asked for;
+            // when sweeping all, silently skip the ones with no history.
+            if only.is_some() {
+                println!();
+                println!(
+                    "{} has no checks in the last {}.",
+                    tuning.name,
+                    days_label(window_days)
+                );
+            }
+            continue;
+        }
+        println!();
+        print_tuning(&tuning);
+        printed += 1;
+    }
+    if printed == 0 && only.is_none() {
+        println!();
+        println!("No check history yet - let the daemon run, then tune against real data.");
+    }
+    Ok(())
+}
+
+/// Render one monitor's tuning block (see [`hora_core::tune`] for the model).
+fn print_tuning(t: &hora_core::tune::MonitorTuning) {
+    println!("{}  ({}, every {}s)", t.name, t.kind, t.interval_secs);
+
+    let window = t.window.map_or_else(String::new, |(first, last)| {
+        format!("{} -> {}, ", format_epoch(first), format_epoch(last))
+    });
+    println!(
+        "  {} checks, {window}{} down  [fail_threshold={}]",
+        t.checks, t.down_checks, t.current_threshold
+    );
+
+    if t.runs.is_empty() {
+        println!("  no failures in the window - nothing to tune for fail_threshold");
+    } else {
+        let lengths: Vec<String> = t.runs.iter().map(ToString::to_string).collect();
+        println!("  failure runs: {}  ({})", t.runs.len(), lengths.join(", "));
+        println!("  fail_threshold   alerts   detect after");
+        for row in &t.table {
+            let marker = if row.threshold == t.current_threshold {
+                "*"
+            } else {
+                " "
+            };
+            let current = if row.threshold == t.current_threshold {
+                "  (current)"
+            } else {
+                ""
+            };
+            println!(
+                "    {marker} {:<2}            {:>4}    {:>8}{current}",
+                row.threshold,
+                row.alerts,
+                format_secs(row.detect_after_secs),
+            );
+        }
+        print_threshold_advice(t);
+    }
+
+    print_degraded_advice(t);
+
+    println!(
+        "  probe_retries: not replayable from history (only a probe's final attempt is stored); \
+         {} single-check failure{} seen - fail_threshold absorbs those across ticks",
+        t.single_check_failures,
+        if t.single_check_failures == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+}
+
+/// The one-line `fail_threshold` recommendation under the replay table.
+fn print_threshold_advice(t: &hora_core::tune::MonitorTuning) {
+    let interval = i64::try_from(t.interval_secs).unwrap_or(0);
+    let longest = t.advice.longest_run;
+
+    // Every failure was an isolated single-check blip: this is the anti-flap
+    // question, not the outage-detection one. A threshold above 1 filtering
+    // these is the design working - never a reason to lower it.
+    if longest == 1 {
+        if t.current_threshold <= 1 {
+            println!(
+                "  -> every failure was a single-check blip; raise fail_threshold to 2 so a \
+                 one-off never pages"
+            );
+        } else {
+            println!(
+                "  -> only single-check blips ({}) occurred; fail_threshold {} filtered them all \
+                 - the anti-flap working as intended",
+                t.single_check_failures, t.current_threshold
+            );
+        }
+        return;
+    }
+
+    // A multi-check outage that the current threshold never confirmed: a real
+    // misconfiguration, this monitor would have stayed silent through it.
+    if t.never_alerts() {
+        println!(
+            "  ! fail_threshold {} never fires here: the longest outage was {longest} checks - \
+             lower it to {longest} or less to catch real outages",
+            t.current_threshold
+        );
+        return;
+    }
+
+    let Some(rec) = t.advice.recommended else {
+        println!(
+            "  -> no clear flap/outage split in the runs above - the table shows the trade-off; \
+             current fail_threshold {} looks reasonable",
+            t.current_threshold
+        );
+        return;
+    };
+    let flap_max = t.advice.flap_max.unwrap_or(0);
+    let rec_alerts = t
+        .table
+        .iter()
+        .find(|row| row.threshold == rec)
+        .map_or(0, |row| row.alerts);
+
+    match rec.cmp(&t.current_threshold) {
+        std::cmp::Ordering::Equal => println!(
+            "  -> fail_threshold {rec} looks right: flaps (runs <= {flap_max}) filtered, \
+             longest outage ({} checks) still caught",
+            t.advice.longest_run
+        ),
+        std::cmp::Ordering::Greater => {
+            let delay = i64::from(rec - t.current_threshold).saturating_mul(interval);
+            println!(
+                "  -> raise fail_threshold to {rec}: {} alerts instead of {} over the window \
+                 (drops flaps <= {flap_max}), same real outages, +{} to detect",
+                rec_alerts,
+                t.current_alerts,
+                format_secs(delay)
+            );
+        }
+        std::cmp::Ordering::Less => {
+            let saved = i64::from(t.current_threshold - rec).saturating_mul(interval);
+            println!(
+                "  -> fail_threshold {rec} would catch the same outages {} sooner; \
+                 the current {} only adds delay (no extra flaps above {flap_max} to filter)",
+                format_secs(saved),
+                t.current_threshold
+            );
+        }
+    }
+}
+
+/// The one-line `degraded_over_ms` recommendation from the latency spread.
+fn print_degraded_advice(t: &hora_core::tune::MonitorTuning) {
+    let Some(stats) = &t.latency else {
+        return;
+    };
+    println!(
+        "  latency, up checks: p50 {}ms  p95 {}ms  p99 {}ms  max {}ms{}",
+        stats.p50,
+        stats.p95,
+        stats.p99,
+        stats.max,
+        t.current_degraded_over_ms
+            .map_or_else(String::new, |ms| format!("  [degraded_over_ms={ms}]"))
+    );
+    let Some(rec) = t.recommended_degraded_over_ms else {
+        return;
+    };
+    match (t.current_degraded_over_ms, t.currently_degraded) {
+        (Some(current), Some(flagged)) => {
+            let pct = percent(flagged, stats.count);
+            if current < stats.p95 {
+                println!(
+                    "    {current}ms flags {flagged} of {} up checks ({pct}%) - that is normal \
+                     traffic; recommend degraded_over_ms {rec} (~p99, ~1%)",
+                    stats.count
+                );
+            } else {
+                println!(
+                    "    {current}ms flags {flagged} of {} up checks ({pct}%); ~p99 is {rec}ms",
+                    stats.count
+                );
+            }
+        }
+        _ => println!(
+            "    no degraded_over_ms set - recommend {rec} (~p99) to flag genuine slowness"
+        ),
+    }
+}
+
+/// `"1 day"` / `"30 days"` - the only place the lookback is pluralised.
+fn days_label(days: i64) -> String {
+    format!("{days} day{}", if days == 1 { "" } else { "s" })
+}
+
+/// Percentage of `part` in `whole`, one decimal place; `0.0` for an empty whole.
+/// Integer math (tenths of a percent, rounded) to stay exact and lint-clean.
+fn percent(part: usize, whole: usize) -> String {
+    if whole == 0 {
+        return "0.0".to_owned();
+    }
+    let tenths = (part * 1000 + whole / 2) / whole;
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 
 /// List recent incidents with their ids - the lookup companion of `annotate`.
