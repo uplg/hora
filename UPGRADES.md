@@ -4,6 +4,13 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.7.0 → 0.7.1
+
+No behavioural changes, no schema migration, no new config keys. One new
+read-only subcommand, **`hora tune`**, replays the stored check history to
+recommend `fail_threshold` / `degraded_over_ms` per monitor; it never probes
+and never writes, so it is safe to run against the live database.
+
 ## 0.6.0 → 0.7.0
 
 No behavioural changes: everything is opt-in or a new subcommand. Notes:
