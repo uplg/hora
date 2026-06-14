@@ -102,6 +102,9 @@ async fn run_subcommand() -> anyhow::Result<bool> {
             "tune" => {
                 tune(&args[2..]).await?;
             }
+            "probe" => {
+                probe(&args[2..]).await?;
+            }
             "announce" => {
                 announce(&args[2..]).await?;
             }
@@ -208,6 +211,8 @@ fn print_help() {
     println!("                      DNS resolver, listen port, database)");
     println!("  tune [id] [--days N]  Replay stored history against other fail_threshold /");
     println!("                      degraded_over_ms settings and recommend per monitor");
+    println!("  probe <id|target> [--confirm] [--kind http|tcp|icmp|dns]");
+    println!("                      One-shot ad-hoc probe; --confirm asks the peers their verdict");
     println!("  test-alert [id]     Send a test down + recovered through the configured");
     println!("                      channels (all of them, or the routed ones of monitor [id])");
     println!("  silence <ids> <for> [reason]  Mute alerts for monitors (comma-separated ids");
@@ -766,6 +771,236 @@ fn percent(part: usize, whole: usize) -> String {
     }
     let tenths = (part * 1000 + whole / 2) / whole;
     format!("{}.{}", tenths / 10, tenths % 10)
+}
+
+/// `hora probe <monitor-id|target> [--confirm] [--kind http|tcp|icmp|dns]`: a
+/// one-shot ad-hoc probe from the terminal with full monitor semantics (status,
+/// latency, HTTP/DNS assertions, TLS expiry). A bare argument matching a
+/// configured monitor id is probed with that monitor's exact config; anything
+/// else is an ad-hoc target whose kind is inferred (or forced with `--kind`).
+/// `--confirm` asks the configured peers to probe the same target - the
+/// distributed "down for everyone or just me?" in one command. Exits non-zero
+/// when the target is down, so it doubles as a scriptable health check.
+async fn probe(args: &[String]) -> anyhow::Result<()> {
+    let parsed = parse_probe_args(args);
+    let config = config::load_from(&config::path()).context("loading configuration")?;
+
+    // A bare id (no --kind) reuses that monitor's full config - assertions,
+    // cert pin, dns expectation and all. --kind always means "ad-hoc target".
+    let configured = parsed
+        .kind_override
+        .is_none()
+        .then(|| config.monitors.iter().find(|m| m.id == parsed.target))
+        .flatten();
+    let mut monitor = if let Some(found) = configured {
+        found.clone()
+    } else {
+        let (kind, target) = match parsed.kind_override {
+            Some(kind) => (kind, hora_core::config::probe_target(kind, parsed.target)),
+            None => hora_core::config::infer_probe(parsed.target),
+        };
+        hora_core::config::Monitor::ad_hoc(kind, target)
+    };
+    // Push and exec monitors are evaluated from heartbeats / an external
+    // command, not a live network probe - reject them whichever way the monitor
+    // was resolved (a configured id, or an inferred kind).
+    if matches!(
+        monitor.kind,
+        hora_core::config::Kind::Push | hora_core::config::Kind::Exec
+    ) {
+        eprintln!(
+            "hora probe runs a live network check, but {:?} is a {} monitor (no active probe)",
+            monitor.id,
+            monitor.kind.as_str()
+        );
+        std::process::exit(1);
+    }
+    // Force confirmation on regardless of the monitor's own setting: the flag
+    // is the explicit ask. confirm_with_peers is read by confirm::enabled only.
+    if parsed.confirm {
+        monitor.confirm_with_peers = Some(true);
+    }
+
+    let header = if configured.is_some() {
+        format!(
+            "{} ({}, {})",
+            monitor.name,
+            monitor.kind.as_str(),
+            monitor.target
+        )
+    } else {
+        format!("{} {}", monitor.kind.as_str(), monitor.target)
+    };
+    println!("hora probe - {header}");
+    println!();
+
+    let client = hora_core::http::probe_client(monitor.proxy.as_deref())
+        .context("building the probe HTTP client")?;
+    let outcome = hora_core::probe::run(&client, &monitor).await;
+    print_probe_report(&monitor, &outcome).await;
+
+    if parsed.confirm {
+        confirm_probe(&config, &monitor, &outcome).await?;
+    }
+
+    // Down exits non-zero so `hora probe url && deploy` works as a gate;
+    // degraded is still up.
+    if !outcome.up {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// A parsed `hora probe` invocation. Borrows the target straight from `args`.
+struct ProbeArgs<'a> {
+    target: &'a str,
+    confirm: bool,
+    kind_override: Option<hora_core::config::Kind>,
+}
+
+/// Parse `hora probe`'s arguments, exiting with a usage message on anything
+/// malformed (a missing target, an unknown flag, a bad `--kind`, extra args).
+fn parse_probe_args(args: &[String]) -> ProbeArgs<'_> {
+    let mut target: Option<&str> = None;
+    let mut confirm = false;
+    let mut kind_override: Option<hora_core::config::Kind> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--confirm" => confirm = true,
+            "--kind" => {
+                let raw = iter.next().map_or("", String::as_str);
+                kind_override = Some(parse_probe_kind(raw).unwrap_or_else(|| {
+                    eprintln!("--kind must be one of: http, tcp, icmp (ping), dns");
+                    std::process::exit(1);
+                }));
+            }
+            flag if flag.starts_with('-') => {
+                eprintln!(
+                    "Unknown option {flag:?} (usage: hora probe <id|target> [--confirm] [--kind K])"
+                );
+                std::process::exit(1);
+            }
+            value if target.is_none() => target = Some(value),
+            extra => {
+                eprintln!("Unexpected argument {extra:?} - hora probe takes a single target");
+                std::process::exit(1);
+            }
+        }
+    }
+    let Some(target) = target else {
+        eprintln!("Usage: hora probe <monitor-id|target> [--confirm] [--kind http|tcp|icmp|dns]");
+        std::process::exit(1);
+    };
+    ProbeArgs {
+        target,
+        confirm,
+        kind_override,
+    }
+}
+
+/// Print the probe outcome, then the TLS expiry for https targets - the latter
+/// fail-open like the watcher: a handshake failure annotates, never changes the
+/// verdict.
+async fn print_probe_report(
+    monitor: &hora_core::config::Monitor,
+    outcome: &hora_core::probe::Outcome,
+) {
+    let status = if !outcome.up {
+        "DOWN"
+    } else if outcome.degraded {
+        "DEGRADED (up but slow)"
+    } else {
+        "UP"
+    };
+    println!("  status    {status}");
+    println!(
+        "  latency   {}",
+        outcome
+            .latency_ms
+            .map_or_else(|| "-".to_owned(), |ms| format!("{ms} ms"))
+    );
+    if let Some(code) = outcome.status_code {
+        println!("  code      {code}");
+    }
+    if let Some(error) = &outcome.error {
+        println!("  error     {error}");
+    }
+    if let Some(first_line) = outcome
+        .snapshot
+        .as_deref()
+        .and_then(|snapshot| snapshot.lines().next())
+    {
+        println!("  answered  {first_line}");
+    }
+
+    // Only read the certificate when the probe actually reached the server (up,
+    // or a response like a 5xx where TLS still answered). A transport failure
+    // means the cert handshake would just hit the same timeout twice.
+    let reached_server = outcome.up || outcome.status_code.is_some();
+    if reached_server
+        && monitor.kind == hora_core::config::Kind::Http
+        && monitor.target.starts_with("https://")
+    {
+        match hora_core::cert::inspect(&monitor.target, monitor.timeout()).await {
+            Ok(cert) => println!(
+                "  cert      {} (expires {})",
+                cert_days_phrase(cert.days_left),
+                format_date(cert.not_after)
+            ),
+            Err(err) => println!("  cert      could not read certificate: {err}"),
+        }
+    }
+}
+
+/// Ask the configured peers for their verdict on the target and print the
+/// multi-vantage summary from this node's perspective: a local down asks "down
+/// for everyone or just me?", a local up asks "is it up from elsewhere too?".
+/// Fail-open: peers being absent or unreachable never errors.
+async fn confirm_probe(
+    config: &hora_core::config::Config,
+    monitor: &hora_core::config::Monitor,
+    outcome: &hora_core::probe::Outcome,
+) -> anyhow::Result<()> {
+    let plain = hora_core::http::client(None).context("building the confirm HTTP client")?;
+    match hora_core::confirm::confirm_verdict(&plain, config, monitor, outcome.up).await {
+        Some(verdict) => println!("  vantage   {verdict}"),
+        None => {
+            println!(
+                "  vantage   no peers to ask - needs [health].id and [[peers]] with a ping_url"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Parse a `--kind` value into a probeable monitor kind (push/exec excluded).
+fn parse_probe_kind(raw: &str) -> Option<hora_core::config::Kind> {
+    use hora_core::config::Kind;
+    match raw.to_ascii_lowercase().as_str() {
+        "http" => Some(Kind::Http),
+        "tcp" => Some(Kind::Tcp),
+        "icmp" | "ping" => Some(Kind::Icmp),
+        "dns" => Some(Kind::Dns),
+        _ => None,
+    }
+}
+
+/// Human phrase for certificate days-left, handling the already-expired case.
+fn cert_days_phrase(days_left: i64) -> String {
+    if days_left < 0 {
+        format!("EXPIRED {} days ago", -days_left)
+    } else {
+        format!("{days_left} days left")
+    }
+}
+
+/// Format a unix timestamp as a `YYYY-MM-DD` date (UTC).
+fn format_date(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0).map_or_else(
+        || timestamp.to_string(),
+        |dt| dt.format("%Y-%m-%d").to_string(),
+    )
 }
 
 /// List recent incidents with their ids - the lookup companion of `annotate`.

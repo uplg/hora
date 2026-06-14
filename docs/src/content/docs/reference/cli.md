@@ -23,6 +23,7 @@ hora top [--url U] [--token T]         # live terminal dashboard
 hora digest                            # print the weekly digest (dry run)
 hora report [YYYY-MM]                  # print the monthly SLA report (default: last month)
 hora tune [monitor-id] [--days N]      # recommend fail_threshold / degraded_over_ms per monitor
+hora probe <id|target> [--confirm]     # one-shot ad-hoc probe; --confirm asks the peers
 hora doctor                            # diagnose the runtime environment
 hora incidents [limit]                 # list recent incidents with their ids
 hora annotate <id|last> "<note>"       # attach a note to an incident
@@ -154,6 +155,51 @@ reaches the database, so retries are invisible here. The command says so and
 surfaces the single-check-blip count instead - the cross-tick lever for those
 is `fail_threshold`, which it *does* replay. See
 [Configuration](../../configuration/) for the settings themselves.
+
+## `hora probe`
+
+A single ad-hoc check from the terminal, with the full monitor semantics:
+status, latency, status code, HTTP/DNS assertions, and TLS expiry for
+`https://` targets. It never touches the database - just a live probe and its
+result.
+
+```sh
+hora probe api.example.com           # bare hostname -> an https check
+hora probe db.example.com:5432       # host:port -> a tcp connect
+hora probe 192.0.2.10                # a bare IP -> an icmp ping
+hora probe api                       # a configured monitor id -> its exact config
+hora probe api.example.com --kind tcp  # force a kind for an ad-hoc target
+```
+
+A bare argument matching a configured monitor **id** is probed with that
+monitor's exact config (assertions, cert pin, proxy, dns expectation). Anything
+else is an **ad-hoc target** whose kind is inferred - a URL is `http`, an
+explicit `host:port` is `tcp`, a bare hostname is an `https` check (a name
+usually denotes a web service, and ICMP is widely filtered), a bare IP is an
+`icmp` ping - or set with `--kind http|tcp|icmp|dns`. The probe exits non-zero
+when the target is down, so it doubles as a scriptable health check
+(`hora probe url && deploy`).
+
+With **`--confirm`** it also asks the configured
+[peers](../../guides/peers/#multi-vantage-confirmation) to probe the same
+target and prints the multi-vantage verdict from this node's perspective, both
+ways:
+
+```
+hora probe - API (http, https://api.example.com)
+
+  status    DOWN
+  latency   -
+  error     connection failed
+  vantage   seen UP by hora-b - down from 1/2 vantage points (network issue near this node?)
+```
+
+A local **down** answers *"down for everyone or just me?"* (`confirmed down
+from 3/3`, or `seen UP by hora-b …`); a local **up** answers *"is it up from
+elsewhere too?"* (`up from 3/3 vantage points`, or `up here, but seen DOWN by
+hora-b …`). Confirmation needs `[health].id` and `[[peers]]` with a `ping_url`;
+the peer only answers for a target in *its own* config, so the two nodes must
+share the monitor (which is what putting the config in git gives you).
 
 ## `hora doctor`
 

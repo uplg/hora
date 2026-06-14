@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`hora probe <id|target> [--confirm] [--kind http|tcp|icmp|dns]`**: a
+  one-shot ad-hoc probe from the terminal with full monitor semantics - status,
+  latency, status code, HTTP/DNS assertions and TLS expiry (days left +
+  notAfter for `https://` targets). A bare argument that matches a configured
+  monitor id is probed with that monitor's exact config (assertions, cert pin,
+  proxy, dns expectation); anything else is an ad-hoc target whose kind is
+  inferred (URL → http, `host:port` → tcp, bare hostname → https, bare IP →
+  icmp ping) or forced with `--kind`. **`--confirm`** asks the configured peers to probe the same target
+  and prints the multi-vantage verdict from this node's perspective, both ways:
+  a local *down* answers "down for everyone or just me?" ("confirmed down from
+  3/3", or "seen UP by hora-b … network issue near this node?"), a local *up*
+  answers "is it up from elsewhere too?" ("up from 3/3 vantage points", or "up
+  here, but seen DOWN by hora-b … can they reach it?"). Reuses `probe::run`,
+  `cert` and the peer-probe path unchanged. Exits non-zero when the target is
+  down here, so it doubles as a scriptable health check (`hora probe url && deploy`).
+
 ## [0.7.1] - 2026-06-14
 
 ### Added

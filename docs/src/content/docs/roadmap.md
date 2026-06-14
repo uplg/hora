@@ -10,11 +10,6 @@ records what actually shipped.
 
 ## Next
 
-- **`hora probe <target> [--confirm]`** - a one-shot ad-hoc check from the
-  terminal with full monitor semantics (status, latency, cert days,
-  assertions), where `--confirm` also asks your
-  [peers](../guides/peers/#multi-vantage-confirmation) for their verdict: a
-  private, distributed *"down for everyone or just me?"* in one SSH command.
 - **Notification channel watchdog** - a broken Telegram channel currently
   fails silently in the logs until the next real incident. The dispatcher
   will track consecutive delivery failures per channel and alert *through

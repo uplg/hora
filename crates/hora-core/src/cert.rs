@@ -129,6 +129,40 @@ async fn fetch(
     Ok((not_after, fingerprint))
 }
 
+/// A one-shot read of a TLS endpoint's leaf certificate, for `hora probe`.
+#[derive(Debug, Clone)]
+pub struct CertInfo {
+    /// Leaf `notAfter`, unix seconds.
+    pub not_after: i64,
+    /// Whole days from now until `not_after` (negative once expired).
+    pub days_left: i64,
+    /// SHA-256 fingerprint of the leaf public key - the value `cert_pin` checks.
+    pub fingerprint: String,
+}
+
+/// Connect to an `https://…` URL, read its leaf certificate and return its
+/// expiry and public-key fingerprint. Like the watcher, trust is intentionally
+/// not verified: this reads the dates, not the chain. Reuses the watcher's
+/// exact handshake path.
+///
+/// # Errors
+///
+/// Returns an error if no host/port can be derived from `target`, or the
+/// TCP/TLS handshake fails within `timeout`.
+pub async fn inspect(target: &str, timeout: Duration) -> anyhow::Result<CertInfo> {
+    let (host, port) = host_port(target).ok_or_else(|| {
+        anyhow::anyhow!("cannot determine host:port for a cert check from {target:?}")
+    })?;
+    let tls = client_config()?;
+    let (not_after, fingerprint) = fetch(&tls, &host, port, timeout).await?;
+    let now = chrono::Utc::now().timestamp();
+    Ok(CertInfo {
+        not_after,
+        days_left: (not_after - now) / SECONDS_PER_DAY,
+        fingerprint,
+    })
+}
+
 /// Compute the SHA-256 hex digest of a byte slice. Byte-by-byte formatting:
 /// digest 0.11 dropped the `LowerHex` impl on the output array.
 fn sha256_hex(data: &[u8]) -> String {

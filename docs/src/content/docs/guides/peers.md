@@ -78,6 +78,11 @@ verdict:
 
 Two Raspberry Pi at two homes become a distributed Pingdom.
 
+The same round is available on demand from the terminal with
+[`hora probe <id> --confirm`](../../reference/cli/#hora-probe): it prints the
+verdict both ways - *"down for everyone or just me?"* when the target is down
+here, and *"up from 3/3 vantage points"* when it is up.
+
 ### How a probe request works
 
 The requester `POST`s to the peer's `/api/peer/probe` (derived from the

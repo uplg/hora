@@ -163,6 +163,8 @@ hora announce "Fibre incident" "ETA 6pm" --severity warning --until 4h
                                        # pin a public banner on the status page
 hora top --url https://status.example.com --token $TOK
                                        # live terminal dashboard over the JSON API
+hora probe https://api.example.com     # one-shot ad-hoc probe (status, latency, cert days, assertions)
+hora probe api --confirm               # probe monitor "api" and ask the peers their verdict
 hora tune                              # replay history: recommend fail_threshold / degraded_over_ms per monitor
 hora tune api --days 30                # ... for one monitor, over the last 30 days
 hora digest                            # print the weekly digest (dry run of [digest])
@@ -191,6 +193,17 @@ as `POST /api/silence` for CI pipelines.
 ("fiber cut, ETA 6pm"), displayed on `/history` and in the Atom feed - notes
 are written for visitors and shown to anonymous viewers too. An empty note
 clears it; `hora incidents` lists recent incidents with their ids.
+
+`hora probe` runs a single ad-hoc check from the terminal with the full monitor
+semantics - status, latency, status code, HTTP/DNS assertions, and TLS expiry
+for `https://` targets. A bare argument matching a configured monitor id reuses
+that monitor's exact config; anything else is an ad-hoc target whose kind is
+inferred (a URL is http, `host:port` is tcp, a bare hostname is an https check,
+a bare IP is a ping) or set with `--kind`. With `--confirm` it asks the configured peers to probe the same target
+and prints the multi-vantage verdict - the distributed *"down for everyone or
+just me?"* in one SSH command, and the same the other way ("up from 3/3 vantage
+points"). It exits non-zero when the target is down, so it slots into a
+`hora probe url && deploy` gate.
 
 `hora tune` answers the question no light monitor helps with: *is this monitor
 set up right?* It replays the stored check history against alternative settings
