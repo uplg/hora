@@ -4,6 +4,13 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.7.1 → 0.7.2
+
+No behavioural changes, no schema migration, no new config keys. One new
+read-only subcommand, **`hora probe`**, a one-shot ad-hoc check from the
+terminal (with `--confirm` for the multi-vantage verdict); it never writes and
+never touches the database, so it is safe to run anytime, daemon up or down.
+
 ## 0.7.0 → 0.7.1
 
 No behavioural changes, no schema migration, no new config keys. One new
