@@ -26,10 +26,6 @@ records what actually shipped.
   and automatic correlation in incidents ("down 3 minutes after *deploy api
   v2.3*"). The first diagnostic question is never "is it slow?" - it is
   "what changed?".
-- **`hora tune`** - replay your own history against other settings: "with
-  `fail_threshold = 5` you would have had 4 alerts last month instead of 11,
-  catching the same real outages 40 s later". Threshold recommendations
-  computed from your own data.
 
 ## Exploring
 

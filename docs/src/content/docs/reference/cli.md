@@ -1,6 +1,6 @@
 ---
 title: CLI
-description: Every hora subcommand - check, test-alert, silence, incidents, annotate, backup, import.
+description: Every hora subcommand - check, test-alert, silence, tune, incidents, annotate, backup, import.
 ---
 
 Plain `hora` (no arguments) runs the monitor. Everything else is a
@@ -22,6 +22,7 @@ hora announce list / clear             # pinned status-page banners
 hora top [--url U] [--token T]         # live terminal dashboard
 hora digest                            # print the weekly digest (dry run)
 hora report [YYYY-MM]                  # print the monthly SLA report (default: last month)
+hora tune [monitor-id] [--days N]      # recommend fail_threshold / degraded_over_ms per monitor
 hora doctor                            # diagnose the runtime environment
 hora incidents [limit]                 # list recent incidents with their ids
 hora annotate <id|last> "<note>"       # attach a note to an incident
@@ -105,6 +106,54 @@ dry run to check the wording (and the data) without notifying anyone. See
 Prints the monthly SLA report as text - the terminal twin of the printable
 [`/report/{month}` page](../../guides/multi-tenant/#monthly-sla-reports).
 Defaults to last month.
+
+## `hora tune`
+
+Replays the stored check history against alternative anti-flap settings and
+recommends, per monitor, what to change - the question no light monitor helps
+with: *is this monitor set up right?* It is pure read-only analytics over data
+that already exists (the raw `checks` table, which survives the full retention
+window - 90 days by default), so it never probes and never writes.
+
+```sh
+hora tune                  # every monitor that has history
+hora tune api              # just one monitor
+hora tune api --days 30    # ... over the last 30 days (default: the retention window)
+```
+
+Two settings are replayable from the recorded check sequence:
+
+- **`fail_threshold`** - because the per-check status sequence is exactly what
+  the scheduler's down state machine sees, `tune` can count how many down
+  alerts each candidate threshold would have fired and the detection delay it
+  costs, then recommend the value that sits just above the *flap cluster* (the
+  widest gap in the failure-run lengths): flaps are filtered, every real outage
+  is still caught. It also flags the opposite mistake - a threshold so high a
+  real multi-check outage went undetected.
+- **`degraded_over_ms`** - every up check carries its latency sample, so `tune`
+  reports the distribution (p50/p95/p99/max) and recommends a threshold near
+  p99, warning when the current one flags normal traffic as "degraded".
+
+```
+Uplg  (http, every 60s)
+  43182 checks, 2026-05-14 19:20:00 UTC -> 2026-06-13 19:20:00 UTC, 31 down  [fail_threshold=3]
+  failure runs: 11  (23, 6, 2, 2, 1, 1, 1, 1, 1, 1, 1)
+  fail_threshold   alerts   detect after
+      1               11         1m 0s
+      2                4         2m 0s
+    * 3                2         3m 0s  (current)
+      4                2         4m 0s
+      5                2         5m 0s
+  -> fail_threshold 3 looks right: flaps (runs <= 2) filtered, longest outage (23 checks) still caught
+  latency, up checks: p50 118ms  p95 124ms  p99 254ms  max 8812ms  [degraded_over_ms=1500]
+    1500ms flags 1 of 5668 up checks (0.0%); ~p99 is 300ms
+```
+
+`probe_retries` is deliberately **not** replayed: only a probe's final attempt
+reaches the database, so retries are invisible here. The command says so and
+surfaces the single-check-blip count instead - the cross-tick lever for those
+is `fail_threshold`, which it *does* replay. See
+[Configuration](../../configuration/) for the settings themselves.
 
 ## `hora doctor`
 

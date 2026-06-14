@@ -69,6 +69,11 @@ A single failure shows the monitor as *degraded* on the page; only
 Degraded alerts (up, but slower than the monitor's `degraded_over_ms`) are
 opt-in and use the same anti-flap threshold.
 
+Not sure what to set these to? [`hora tune`](../../reference/cli/#hora-tune)
+replays your own history and recommends a `fail_threshold` and
+`degraded_over_ms` per monitor - "with `fail_threshold = 5` you would have had
+4 alerts instead of 11, same real outages, +40s to detect".
+
 ## Root-cause grouping
 
 When a database takes ten services down with it, you get **one**
