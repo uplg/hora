@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
-    topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
+    send_retrying, topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -83,6 +83,13 @@ impl FreeMobileNotifier {
                 "BUDGET: {monitor} {}",
                 budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
             ),
+            // No emoji: keep the SMS in the cheaper GSM-7 encoding.
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => alert_phrase(monitor, severity, title, message),
         }
     }
 }

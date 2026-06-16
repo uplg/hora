@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-16
+
+### Added
+
+- **`POST /api/monitors/{id}/alert`**: let an external producer push its *own*
+  failure straight to a monitor's notification channels - "patch
+  materialization failed", "nightly export wrote 0 rows" - things a probe can
+  never see. The alert fans out to the monitor's `notify` channels immediately
+  and records a line on that monitor's `/history` timeline, but **never changes
+  the monitor's up/down status**: status stays driven by probes and heartbeats
+  alone, so a producer's hiccup can't make the status page lie. Stored in a new
+  `pushed_alerts` table kept apart from `checks`/`incidents`, so it skews no
+  uptime, MTTR or error-budget maths; surfaced in its own "Pushed alerts"
+  section on `/history` with the same public/private visibility as incidents
+  (anonymous viewers see public monitors only, and the free-form message is
+  collapsed unless the monitor opts in with `public_error_detail`). Answers
+  **202 Accepted**. Authenticated with the monitor's own `push_token`
+  (`X-Push-Token`, kept out of access logs) or the global `server.auth_token`
+  (`Authorization: Bearer` / `?token=`); the endpoint stays closed unless one
+  is configured and matches.
+  - **`dedup_key` + server-side anti-flood**: a repeat of the same key within
+    `alerts.push_alert_window_secs` (default 300, `0` disables) is *coalesced* -
+    dropped and counted, not dispatched again - and answers `202` with
+    `{"status":"coalesced","suppressed":N,"retry_after_secs":…}`. The
+    rate-limiting thus lives in Hora, so a flapping producer pages once and
+    every producer benefits without writing its own throttle.
+  - **`severity` → backend priority**: `info`/`warning`/`error`/`critical` map
+    onto the native priority of ntfy, Pushover and Gotify (so `critical` pages
+    louder than `info`); on the other channels the severity shows as a text
+    label, and the generic JSON `webhook` channel receives it structured
+    (`{"event":"alert","severity","title","message"}`).
+  - **`tags`**: an optional key/value map folded into the message (sorted, so
+    the same alert always reads identically).
+
 ## [0.7.2] - 2026-06-14
 
 ### Added

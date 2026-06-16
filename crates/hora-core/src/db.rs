@@ -948,6 +948,74 @@ async fn prune_announcements(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()>
     Ok(())
 }
 
+/// An alert pushed by an external producer to a monitor
+/// (`POST /api/monitors/{id}/alert`). A timeline annotation, never a probe
+/// result: it carries no status and is read only by the history page.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PushedAlert {
+    pub id: i64,
+    pub monitor_id: String,
+    /// `info` | `warning` | `error` | `critical` (validated at the endpoint).
+    pub severity: String,
+    pub title: String,
+    pub message: String,
+    /// The coalescing key the producer sent, if any.
+    pub dedup_key: Option<String>,
+    pub created_at: i64,
+}
+
+/// Record a pushed alert. Returns the new row id.
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn insert_pushed_alert(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    severity: &str,
+    title: &str,
+    message: &str,
+    dedup_key: Option<&str>,
+) -> sqlx::Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO pushed_alerts (monitor_id, severity, title, message, dedup_key, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(monitor_id)
+    .bind(severity)
+    .bind(title)
+    .bind(message)
+    .bind(dedup_key)
+    .bind(chrono::Utc::now().timestamp())
+    .execute(pool)
+    .await?;
+    Ok(result.last_insert_rowid())
+}
+
+/// The most recent pushed alerts, newest first - the history-page timeline.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn recent_pushed_alerts(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<PushedAlert>> {
+    sqlx::query_as::<_, PushedAlert>(
+        "SELECT id, monitor_id, severity, title, message, dedup_key, created_at \
+         FROM pushed_alerts ORDER BY created_at DESC, id DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Drop pushed alerts older than `cutoff` (by `created_at`).
+async fn prune_pushed_alerts(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM pushed_alerts WHERE created_at < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// An ad-hoc alert silence, created via `hora silence` or `POST /api/silence`.
 #[derive(Debug, sqlx::FromRow)]
 pub struct Silence {
@@ -1261,6 +1329,10 @@ async fn roll_up_history(pool: &SqlitePool, now: i64) {
     if let Err(err) = prune_announcements(pool, now).await {
         tracing::warn!("announcement prune failed: {err}");
     }
+    // Pushed alerts age out with the closed incidents (a year of timeline).
+    if let Err(err) = prune_pushed_alerts(pool, yearly_cutoff).await {
+        tracing::warn!("pushed-alert prune failed: {err}");
+    }
 }
 
 async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
@@ -1301,12 +1373,16 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
         .await?;
     }
 
-    // Drop everything left behind by monitors removed from the config. The ids
-    // to keep travel as a single JSON array, expanded by SQLite's `json_each`
-    // and matched with a `NOT EXISTS` anti-join - one static statement per
-    // table, with no `IN`-list size limit.
-    // Keep both monitor ids and watched peers' listen ids, so the orphan sweep
-    // never deletes a peer's heartbeat history.
+    delete_orphans(pool, config).await?;
+    Ok(())
+}
+
+/// Drop everything left behind by monitors removed from the config. The ids to
+/// keep travel as a single JSON array, expanded by `SQLite`'s `json_each` and
+/// matched with a `NOT EXISTS` anti-join - one static statement per table, with
+/// no `IN`-list size limit. Both monitor ids and watched peers' listen ids are
+/// kept, so the sweep never deletes a peer's heartbeat history.
+async fn delete_orphans(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     let keep: Vec<&str> = config
         .monitors
         .iter()
@@ -1351,6 +1427,13 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     sqlx::query(
         "DELETE FROM incidents WHERE NOT EXISTS \
          (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = incidents.monitor_id)",
+    )
+    .bind(&keep)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM pushed_alerts WHERE NOT EXISTS \
+         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = pushed_alerts.monitor_id)",
     )
     .bind(&keep)
     .execute(pool)

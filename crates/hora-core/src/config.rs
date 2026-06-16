@@ -458,6 +458,13 @@ pub struct Alerts {
     /// the pre-0.5 behaviour). Default 30.
     #[serde(default = "default_group_window")]
     pub group_window_secs: u64,
+    /// Anti-flood window, seconds, for pushed alerts that carry a `dedup_key`
+    /// (`POST /api/monitors/{id}/alert`): a repeat of the same key within the
+    /// window is coalesced (dropped, counted) instead of dispatched again, so
+    /// a flapping producer pages once, not a hundred times. 0 disables the
+    /// coalescing (every pushed alert dispatches). Default 300.
+    #[serde(default = "default_push_alert_window")]
+    pub push_alert_window_secs: u64,
 }
 
 impl Default for Alerts {
@@ -469,6 +476,7 @@ impl Default for Alerts {
             domain_expiry_days: default_domain_expiry_days(),
             default_retention_days: default_retention_days(),
             group_window_secs: default_group_window(),
+            push_alert_window_secs: default_push_alert_window(),
         }
     }
 }
@@ -1090,6 +1098,9 @@ fn default_grace() -> u64 {
 }
 fn default_group_window() -> u64 {
     30
+}
+fn default_push_alert_window() -> u64 {
+    300
 }
 fn default_rate_limit_burst() -> u32 {
     30

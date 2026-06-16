@@ -5,8 +5,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape, latency_suffix,
-    post_json, topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape,
+    latency_suffix, post_json, topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -94,6 +94,15 @@ impl SlackNotifier {
                 ":fire: *{}* {}",
                 escape(monitor),
                 budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs),
+            ),
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => format!(
+                ":bell: {}",
+                escape(&alert_phrase(monitor, severity, title, message))
             ),
         }
     }

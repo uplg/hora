@@ -97,6 +97,22 @@ impl TelegramNotifier {
                 escape(monitor),
                 budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs),
             ),
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => format!(
+                "\u{1F514} <b>[{}] {}</b>: {}{}",
+                severity.as_str().to_ascii_uppercase(),
+                escape(monitor),
+                escape(title),
+                if message.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{}", escape(message))
+                },
+            ),
         }
     }
 }

@@ -1246,7 +1246,12 @@ async fn serve() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    let state = hora_web::AppState::new(pool, handle.config.clone(), Arc::clone(&last_tick));
+    let state = hora_web::AppState::new(
+        pool,
+        handle.config.clone(),
+        Arc::clone(&last_tick),
+        handle.notifier.clone(),
+    );
     // Connect-info gives the rate limiter a peer IP to fall back on when there
     // is no `X-Forwarded-For` (i.e. direct access, not behind a proxy).
     let app = hora_web::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();

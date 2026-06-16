@@ -268,6 +268,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. Send the token as an `X-Push-Token` header (preferred - it stays out of proxy access logs) or as `?token=…`. Optional `status=up\|down\|degraded`, `msg`, `ping`. 401 on a wrong token, 404 if not a push monitor. |
+| `POST /api/monitors/{id}/alert` | Push an ad-hoc alert (a producer's own failure) to a monitor's channels: JSON `{severity, title, message?, dedup_key?, tags?}`. Fans out immediately and records a `/history` timeline line, but never changes the monitor's status. `severity` maps to backend priority (ntfy/Pushover/Gotify); `dedup_key` coalesces repeats within `alerts.push_alert_window_secs`. Auth with the monitor's `push_token` (`X-Push-Token`) or `server.auth_token`. Answers 202. |
 | `POST /api/silence?monitors=api,web&duration=10m` | Mute alerts ad hoc (deploy hook): `monitors` is a comma-separated id list or `all`, `duration` like `10m`/`1h30m` (max 7d), optional `reason`. **Requires `server.auth_token`** (as `Authorization: Bearer` or `?token=`); without one configured the endpoint is closed. |
 | `POST /api/announce?title=...&severity=warning&until=4h` | Pin a public banner on the status page (`DELETE` clears them all). **Requires `server.auth_token`.** |
 | `POST /api/peer/probe` | Multi-vantage confirmation between Hora nodes: probe a target *present in this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token` (`X-Push-Token`). Never probes arbitrary targets. |
@@ -277,7 +278,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /api/openapi.json` | The OpenAPI 3.1 spec, generated from the code (`utoipa`). |
 | `GET /healthz` | Liveness probe. |
 
-The `/api/*` endpoints (summary, latency, push) are **rate-limited per client IP**
+The `/api/*` endpoints (summary, latency, push, alert) are **rate-limited per client IP**
 (configurable; read once at startup) and send `x-ratelimit-*` / `retry-after`
 headers; the badges and `/api/openapi.json` are not. The client IP is taken from
 `X-Forwarded-For` / `X-Real-IP` by default, so run Hora behind a proxy that sets

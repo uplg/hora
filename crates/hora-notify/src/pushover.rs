@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
-    topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
+    send_retrying, topology_suffix, vantage_suffix,
 };
-use crate::{Event, Notifier};
+use crate::{AlertSeverity, Event, Notifier};
 
 const PUSHOVER_API: &str = "https://api.pushover.net/1/messages.json";
 
@@ -89,6 +89,21 @@ impl PushoverNotifier {
                 ),
                 1,
             ),
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => {
+                // Pushover priority: -1 quiet, 0 normal, 1 high. We stop at 1 -
+                // priority 2 (emergency) would require retry/expire parameters.
+                let priority = match severity {
+                    AlertSeverity::Info => -1,
+                    AlertSeverity::Warning => 0,
+                    AlertSeverity::Error | AlertSeverity::Critical => 1,
+                };
+                (alert_phrase(monitor, severity, title, message), priority)
+            }
         }
     }
 }

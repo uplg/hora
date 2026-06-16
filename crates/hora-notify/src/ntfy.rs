@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
-    topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
+    send_retrying, topology_suffix, vantage_suffix,
 };
-use crate::{Event, Notifier};
+use crate::{AlertSeverity, Event, Notifier};
 
 pub struct NtfyNotifier {
     client: Client,
@@ -97,6 +97,25 @@ impl NtfyNotifier {
                 "fire",
                 4,
             ),
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => {
+                // ntfy priority runs 1 (min) to 5 (max): map the severity onto it.
+                let (tag, priority) = match severity {
+                    AlertSeverity::Info => ("information_source", 2),
+                    AlertSeverity::Warning => ("warning", 3),
+                    AlertSeverity::Error => ("rotating_light", 4),
+                    AlertSeverity::Critical => ("rotating_light", 5),
+                };
+                (
+                    alert_phrase(monitor, severity, title, message),
+                    tag,
+                    priority,
+                )
+            }
         }
     }
 }

@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use askama::Template;
 use chrono::DateTime;
-use hora_core::db::Incident;
+use hora_core::db::{Incident, PushedAlert};
 
 /// The `/history` page; rows are pre-formatted [`IncidentRow`]s, Askama does
 /// the escaping.
@@ -17,6 +17,9 @@ pub(crate) struct HistoryTemplate {
     /// The status page title, linked back to from the footer.
     pub(crate) title: String,
     pub(crate) incidents: Vec<IncidentRow>,
+    /// Externally-pushed alerts (`POST /api/monitors/{id}/alert`), shown in
+    /// their own section below the incidents.
+    pub(crate) pushed_alerts: Vec<AlertRow>,
     /// Monitors whose latency heatmap is offered below the incidents
     /// (collapsed; each `<img>` loads its SVG lazily from the API).
     pub(crate) heatmaps: Vec<HeatmapRef>,
@@ -63,6 +66,37 @@ pub(crate) struct IncidentRow {
     impacted: Option<String>,
     note: Option<String>,
     snapshot: Option<String>,
+}
+
+/// One externally-pushed alert, formatted for display.
+pub(crate) struct AlertRow {
+    monitor: String,
+    /// `info` | `warning` | `error` | `critical`, used as a CSS class.
+    severity: String,
+    title: String,
+    message: Option<String>,
+    at: String,
+}
+
+/// Build the pushed-alert rows: ids resolved to display names, timestamp
+/// formatted, an emptied message (sanitized for anonymous viewers) dropped.
+pub(crate) fn alert_rows(
+    alerts: &[PushedAlert],
+    monitor_names: &HashMap<String, String>,
+) -> Vec<AlertRow> {
+    alerts
+        .iter()
+        .map(|alert| AlertRow {
+            monitor: monitor_names
+                .get(&alert.monitor_id)
+                .unwrap_or(&alert.monitor_id)
+                .clone(),
+            severity: alert.severity.clone(),
+            title: alert.title.clone(),
+            message: (!alert.message.is_empty()).then(|| alert.message.clone()),
+            at: format_utc(alert.created_at),
+        })
+        .collect()
 }
 
 /// Build the view rows: ids resolved to display names (falling back to the id
@@ -286,5 +320,34 @@ mod tests {
         let rows = incident_rows(&[orphan], &HashMap::new());
         assert_eq!(rows[0].monitor, "gone");
         assert!(!rows[0].resolved);
+    }
+
+    #[test]
+    fn alert_rows_resolve_names_and_drop_empty_message() {
+        let names = HashMap::from([("ekb".to_owned(), "EKB API".to_owned())]);
+        let with_message = PushedAlert {
+            id: 1,
+            monitor_id: "ekb".to_owned(),
+            severity: "error".to_owned(),
+            title: "Patch materialization failed".to_owned(),
+            message: "3/12 operations failed".to_owned(),
+            dedup_key: Some("ekb:mat".to_owned()),
+            created_at: 1000,
+        };
+        // An emptied message (sanitized for anonymous viewers) becomes None.
+        let sanitized = PushedAlert {
+            id: 2,
+            monitor_id: "ekb".to_owned(),
+            severity: "info".to_owned(),
+            title: "deploy started".to_owned(),
+            message: String::new(),
+            dedup_key: None,
+            created_at: 1001,
+        };
+        let rows = alert_rows(&[with_message, sanitized], &names);
+        assert_eq!(rows[0].monitor, "EKB API");
+        assert_eq!(rows[0].severity, "error");
+        assert_eq!(rows[0].message.as_deref(), Some("3/12 operations failed"));
+        assert!(rows[1].message.is_none());
     }
 }

@@ -11,11 +11,13 @@ use chrono::Utc;
 use serde::Deserialize;
 use utoipa::OpenApi;
 
-use hora_core::config::{Config, Kind};
+use hora_core::config::{Config, Kind, Monitor};
 use hora_core::db::{self, Point};
+use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::peer::{HealthReport, PeerSeen};
 
 use crate::error::AppError;
+use crate::flood;
 use crate::history;
 use crate::metrics;
 use crate::render::{badge, status_color, svg_response, uptime_color};
@@ -24,7 +26,8 @@ use crate::summary::{
 };
 use crate::text;
 use crate::{
-    AppState, FAVICON_SVG, FONT_WOFF2, MAX_LATENCY_HOURS, MAX_LATENCY_POINTS, MAX_PUSH_MSG_CHARS,
+    AppState, FAVICON_SVG, FONT_WOFF2, MAX_ALERT_DEDUP_CHARS, MAX_ALERT_TAG_CHARS, MAX_ALERT_TAGS,
+    MAX_ALERT_TITLE_CHARS, MAX_LATENCY_HOURS, MAX_LATENCY_POINTS, MAX_PUSH_MSG_CHARS,
     SECONDS_PER_HOUR, summary_for,
 };
 
@@ -46,6 +49,7 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         summary_json,
         latency_json,
         push,
+        post_alert,
         silence,
         announce,
         announce_clear,
@@ -67,6 +71,8 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         SilenceResponse,
         AnnounceResponse,
         AnnounceClearResponse,
+        AlertRequest,
+        AlertResponse,
         hora_core::confirm::ProbeRequest,
         hora_core::confirm::ProbeResponse
     ))
@@ -531,6 +537,42 @@ async fn visible_incidents(
     Ok(incidents)
 }
 
+/// Recent pushed alerts restricted to what the caller may see, mirroring
+/// [`visible_incidents`]: anonymous viewers get only public monitors' alerts,
+/// and the free-form message (which can carry producer detail like file paths)
+/// is collapsed unless the monitor opted in with `public_error_detail`. The
+/// title and severity always show (a short headline, like an incident's
+/// existence). Authenticated viewers see everything.
+async fn visible_pushed_alerts(
+    pool: &sqlx::SqlitePool,
+    config: &Config,
+    authenticated: bool,
+    limit: i64,
+) -> Result<Vec<db::PushedAlert>, AppError> {
+    let mut alerts = db::recent_pushed_alerts(pool, limit).await?;
+    if !authenticated {
+        let public: std::collections::HashSet<&str> = config
+            .monitors
+            .iter()
+            .filter(|monitor| monitor.public)
+            .map(|monitor| monitor.id.as_str())
+            .collect();
+        let detailed: std::collections::HashSet<&str> = config
+            .monitors
+            .iter()
+            .filter(|monitor| monitor.public && monitor.public_error_detail)
+            .map(|monitor| monitor.id.as_str())
+            .collect();
+        alerts.retain(|alert| public.contains(alert.monitor_id.as_str()));
+        for alert in &mut alerts {
+            if !detailed.contains(alert.monitor_id.as_str()) {
+                alert.message.clear();
+            }
+        }
+    }
+    Ok(alerts)
+}
+
 /// Map of monitor id to display name, for rendering incidents.
 fn monitor_names(config: &Config) -> std::collections::HashMap<String, String> {
     config
@@ -548,6 +590,7 @@ pub(crate) async fn history_page(
     let config = state.config.borrow().clone();
     let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
     let incidents = visible_incidents(&state.pool, &config, authenticated, 100).await?;
+    let pushed_alerts = visible_pushed_alerts(&state.pool, &config, authenticated, 100).await?;
     // The heatmap section lists what this viewer may see; the images load
     // lazily from the API. Push monitors have no latency series to show.
     let heatmaps = config
@@ -565,9 +608,11 @@ pub(crate) async fn history_page(
         .filter(|_| authenticated)
         .map(|token| format!("?token={}", history::url_encode(token)))
         .unwrap_or_default();
+    let names = monitor_names(&config);
     let html = history::HistoryTemplate {
         title: config.page.title.clone(),
-        incidents: history::incident_rows(&incidents, &monitor_names(&config)),
+        incidents: history::incident_rows(&incidents, &names),
+        pushed_alerts: history::alert_rows(&pushed_alerts, &names),
         heatmaps,
         token_query,
     }
@@ -857,6 +902,227 @@ pub(crate) async fn push(
     Ok("ok")
 }
 
+/// The JSON body of `POST /api/monitors/{id}/alert`. Every field is optional at
+/// the deserialization layer so a missing one yields a clean 400 from the
+/// handler rather than a 422 from the extractor.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub(crate) struct AlertRequest {
+    /// `info` (default) | `warning` | `error` | `critical`.
+    #[serde(default)]
+    severity: Option<String>,
+    /// Short headline (required, bounded).
+    #[serde(default)]
+    title: Option<String>,
+    /// Free-form detail (optional, bounded).
+    #[serde(default)]
+    message: Option<String>,
+    /// Coalescing key for the server-side anti-flood window (optional).
+    #[serde(default)]
+    dedup_key: Option<String>,
+    /// Arbitrary key/value pairs folded into the message (optional).
+    #[serde(default)]
+    tags: std::collections::HashMap<String, String>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertResponse {
+    /// `dispatched` (sent to the channels and recorded) or `coalesced` (a
+    /// `dedup_key` repeat dropped inside the anti-flood window).
+    status: &'static str,
+    /// The accepted severity.
+    severity: &'static str,
+    /// The recorded alert's id - only when `dispatched`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<i64>,
+    /// The dedup key - echoed only when `coalesced`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dedup_key: Option<String>,
+    /// Repeats coalesced in this window so far - only when `coalesced`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suppressed: Option<u64>,
+    /// Seconds until the window reopens - only when `coalesced`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_secs: Option<i64>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/monitors/{id}/alert",
+    params(
+        ("id" = String, Path, description = "Monitor id the alert is attached to"),
+        ("token" = Option<String>, Query, description = "server.auth_token (or Authorization: Bearer)")
+    ),
+    request_body = AlertRequest,
+    responses(
+        (status = 202, description = "Alert dispatched to the monitor's channels (or coalesced)", body = AlertResponse),
+        (status = 400, description = "Empty title or unknown severity"),
+        (status = 401, description = "Missing/wrong X-Push-Token and no matching server.auth_token"),
+        (status = 404, description = "Unknown monitor")
+    )
+)]
+pub(crate) async fn post_alert(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+    Json(request): Json<AlertRequest>,
+) -> Result<(StatusCode, Json<AlertResponse>), AppError> {
+    let config = state.config.borrow().clone();
+
+    // The monitor must exist; its id is already public (page + API), so a 404
+    // here reveals nothing a viewer could not already see.
+    let monitor = config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == id)
+        .ok_or(AppError::NotFound("unknown monitor"))?;
+
+    // Authenticate with the monitor's own push_token (preferred, via the
+    // X-Push-Token header kept out of access logs) or the global viewer token.
+    // Dispatching to channels can flood, so - unlike a read-only view - the
+    // endpoint stays closed unless a credential is configured and matches.
+    let item_token_ok = monitor.push_token.as_ref().is_some_and(|expected| {
+        headers
+            .get("x-push-token")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|token| ct_eq(token, expected.as_ref()))
+    });
+    if !item_token_ok && !is_authenticated(&headers, auth_query.token.as_deref(), &config) {
+        return Err(AppError::Unauthorized(
+            "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",
+        ));
+    }
+
+    // Validate the body.
+    let severity = match request.severity.as_deref() {
+        None | Some("") => AlertSeverity::Info,
+        Some(value) => AlertSeverity::parse(value).ok_or(AppError::BadRequest(
+            "severity must be info, warning, error or critical",
+        ))?,
+    };
+    let title: String = request
+        .title
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(MAX_ALERT_TITLE_CHARS)
+        .collect();
+    if title.is_empty() {
+        return Err(AppError::BadRequest("title must not be empty"));
+    }
+    let dedup_key: Option<String> = request
+        .dedup_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(|key| key.chars().take(MAX_ALERT_DEDUP_CHARS).collect());
+    // The producer's text, with any tags folded in ("just enrich the message"),
+    // bounded so a buggy producer can't bloat the row.
+    let message = render_alert_message(request.message.as_deref().unwrap_or(""), &request.tags);
+
+    // Anti-flood: a dedup_key that recurs inside the window is coalesced here,
+    // so the rate-limiting lives in Hora and every producer benefits.
+    let window = i64::try_from(config.alerts.push_alert_window_secs).unwrap_or(i64::MAX);
+    let now = Utc::now().timestamp();
+    if let flood::Admission::Coalesce {
+        suppressed,
+        retry_after,
+    } = state.flood.admit(&id, dedup_key.as_deref(), now, window)
+    {
+        tracing::info!(monitor = %id, suppressed, "pushed alert coalesced");
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(AlertResponse {
+                status: "coalesced",
+                severity: severity.as_str(),
+                id: None,
+                dedup_key,
+                suppressed: Some(suppressed),
+                retry_after_secs: Some(retry_after),
+            }),
+        ));
+    }
+
+    // Record the timeline line first (so the 202 reflects a durable row), then
+    // fan the alert out to the monitor's channels. The dispatch is spawned, so a
+    // slow channel never holds up the producer.
+    let alert_id = db::insert_pushed_alert(
+        &state.pool,
+        &id,
+        severity.as_str(),
+        &title,
+        &message,
+        dedup_key.as_deref(),
+    )
+    .await?;
+    spawn_alert_dispatch(&state, monitor, severity, title.clone(), message);
+
+    tracing::info!(monitor = %id, severity = severity.as_str(), %title, "pushed alert dispatched");
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AlertResponse {
+            status: "dispatched",
+            severity: severity.as_str(),
+            id: Some(alert_id),
+            dedup_key,
+            suppressed: None,
+            retry_after_secs: None,
+        }),
+    ))
+}
+
+/// Fan a pushed alert out to a monitor's channels in the background, so a slow
+/// channel never blocks the 202. The owned strings outlive the request.
+fn spawn_alert_dispatch(
+    state: &AppState,
+    monitor: &Monitor,
+    severity: AlertSeverity,
+    title: String,
+    message: String,
+) {
+    let notifier = state.notifier.clone();
+    let name = monitor.name.clone();
+    let notify = monitor.notify.clone();
+    tokio::spawn(async move {
+        notifier
+            .load_full()
+            .dispatch(
+                Event::Alert {
+                    monitor: &name,
+                    severity,
+                    title: &title,
+                    message: &message,
+                },
+                notify.as_deref(),
+            )
+            .await;
+    });
+}
+
+/// Build the stored/sent alert message: the producer's text, then each tag as a
+/// `key=value` line (sorted, so the same alert always reads identically). Every
+/// part is trimmed and bounded.
+fn render_alert_message(message: &str, tags: &std::collections::HashMap<String, String>) -> String {
+    let mut out: String = message.trim().chars().take(MAX_PUSH_MSG_CHARS).collect();
+    let mut pairs: Vec<(&String, &String)> = tags.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    for (key, value) in pairs.into_iter().take(MAX_ALERT_TAGS) {
+        let key: String = key.trim().chars().take(MAX_ALERT_TAG_CHARS).collect();
+        if key.is_empty() {
+            continue;
+        }
+        let value: String = value.trim().chars().take(MAX_ALERT_TAG_CHARS).collect();
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&key);
+        out.push('=');
+        out.push_str(&value);
+    }
+    out
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct SilenceQuery {
     /// Comma-separated monitor ids, or `all` (stored as the `*` wildcard).
@@ -1021,4 +1287,34 @@ pub(crate) fn downsample(points: Vec<Point>, max: usize) -> Vec<Point> {
 pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn alert_message_folds_tags_in_sorted_order() {
+        let tags = HashMap::from([
+            ("task_id".to_owned(), "t1".to_owned()),
+            ("patch_id".to_owned(), "9f3c".to_owned()),
+        ]);
+        // Producer text first, then each tag as `key=value`, keys sorted so the
+        // same alert always reads identically.
+        assert_eq!(
+            render_alert_message("3/12 ops failed", &tags),
+            "3/12 ops failed\npatch_id=9f3c\ntask_id=t1"
+        );
+    }
+
+    #[test]
+    fn alert_message_handles_empty_text_and_tags() {
+        assert_eq!(render_alert_message("  boom  ", &HashMap::new()), "boom");
+        // No producer text: the message is just the tag lines.
+        let tags = HashMap::from([("k".to_owned(), "v".to_owned())]);
+        assert_eq!(render_alert_message("", &tags), "k=v");
+        // Nothing at all yields an empty message.
+        assert_eq!(render_alert_message("", &HashMap::new()), "");
+    }
 }

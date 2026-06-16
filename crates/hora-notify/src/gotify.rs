@@ -5,10 +5,10 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
-    topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
+    send_retrying, topology_suffix, vantage_suffix,
 };
-use crate::{Event, Notifier};
+use crate::{AlertSeverity, Event, Notifier};
 
 pub struct GotifyNotifier {
     client: Client,
@@ -84,6 +84,21 @@ impl GotifyNotifier {
                 ),
                 8,
             ),
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => {
+                // Gotify priority runs 0..10 (4-7 normal, 8+ high): map severity on.
+                let priority = match severity {
+                    AlertSeverity::Info => 2,
+                    AlertSeverity::Warning => 5,
+                    AlertSeverity::Error => 8,
+                    AlertSeverity::Critical => 9,
+                };
+                (alert_phrase(monitor, severity, title, message), priority)
+            }
         };
         Payload {
             title: "Hora Alert".to_owned(),

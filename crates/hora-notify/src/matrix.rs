@@ -5,8 +5,8 @@ use reqwest::{Client, Url};
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, send_retrying,
-    topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
+    send_retrying, topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -101,6 +101,15 @@ impl MatrixNotifier {
             } => format!(
                 "\u{1F525} {monitor} {}",
                 budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
+            ),
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => format!(
+                "\u{1F514} {}",
+                alert_phrase(monitor, severity, title, message)
             ),
         }
     }

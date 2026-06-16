@@ -133,6 +133,12 @@ default_retention_days = 90
 # notification - one alert per incident, not one per affected monitor. Its
 # recovery stays silent too. 0 = every monitor alerts independently.
 # group_window_secs = 30
+#
+# Anti-flood window for pushed alerts (POST /api/monitors/{id}/alert) that
+# carry a `dedup_key`: a repeat of the same key within this many seconds is
+# coalesced (dropped and counted) instead of dispatched again, so a flapping
+# producer pages once. 0 = dispatch every pushed alert. Default: 300.
+# push_alert_window_secs = 300
 
 # --- Weekly digest ----------------------------------------------------------
 # A recap of the last 7 days through the notification channels: "99.97%

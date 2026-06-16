@@ -24,7 +24,7 @@ each monitor to specific ones. Ten backends are built in:
 | `pushover` | application `token` + `user` key |
 | `email` | SMTP: `host`, `port` (587 STARTTLS default, `implicit_tls` for 465), `from`, `to` |
 | `freemobile` | Free Mobile SMS: `user` + `pass` |
-| `webhook` | POSTs `{ event, monitor, message?, days_left? }` as JSON to `url` |
+| `webhook` | POSTs a structured JSON event (`{ event, monitor, … }`) to `url` |
 
 ```toml
 [[channels]]
@@ -124,6 +124,44 @@ transitions are muted, picked up on the next tick. The HTTP endpoint
 **strictly requires** `server.auth_token`; unknown monitor ids are rejected
 so a typo'd hook fails loudly instead of silencing nothing. Expired silences
 are swept automatically.
+
+## Pushed alerts (from your own jobs)
+
+Probes tell you a service is *reachable*; they cannot tell you a batch job
+wrote zero rows or a patch failed to apply. `POST /api/monitors/{id}/alert`
+lets a producer push its **own** failure straight to a monitor's channels:
+
+```sh
+curl -fsS -X POST -H "X-Push-Token: $TOKEN" -H "Content-Type: application/json" \
+  "https://status.example.com/api/monitors/ekb-api/alert" -d '{
+    "severity":"error",
+    "title":"Patch materialization failed",
+    "message":"3/12 operations failed: SourceFile not found",
+    "dedup_key":"ekb-api:materialization",
+    "tags":{"task_id":"4711"}
+  }'
+```
+
+The alert fans out to the monitor's `notify` channels immediately and adds a
+line to that monitor's timeline (shown on `/history`) - but it **never marks
+the monitor down**: status stays driven by probes and heartbeats alone, so a
+producer's hiccup can't make your status page lie.
+
+Two things Hora does for you here:
+
+- **`dedup_key` + anti-flood.** A repeat of the same key within
+  `alerts.push_alert_window_secs` (default 300) is coalesced - dropped and
+  counted, not re-sent. The throttle lives in Hora, so a retrying job pages
+  once and every producer benefits without writing its own rate-limiter.
+- **`severity` → priority.** On ntfy, Pushover and Gotify the severity
+  (`info`/`warning`/`error`/`critical`) maps onto the backend's native
+  priority; elsewhere it is a text label, and the `webhook` channel gets it
+  structured.
+
+Authenticate with the monitor's `push_token` (`X-Push-Token`) or
+`server.auth_token` (`Authorization: Bearer`). See the
+[API reference](../../reference/api/#post-apimonitorsidalert) for the full
+request/response shape.
 
 ## Weekly digest
 

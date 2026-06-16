@@ -8,13 +8,14 @@ use crate::util::{
     budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, post_json,
     topology_suffix, vantage_suffix,
 };
-use crate::{Event, Notifier};
+use crate::{AlertSeverity, Event, Notifier};
 
 // Embed accent colours, matching the status badges: red / green / orange.
 const COLOR_DOWN: u32 = 0x00E0_5D44;
 const COLOR_UP: u32 = 0x0044_CC11;
 const COLOR_CERT: u32 = 0x00FE_7D37;
 const COLOR_DEGRADED: u32 = 0x00DF_B317;
+const COLOR_INFO: u32 = 0x0035_82F6;
 
 /// Posts alerts to a Discord channel through an incoming webhook.
 pub struct DiscordNotifier {
@@ -114,6 +115,28 @@ impl DiscordNotifier {
                 title: format!("\u{1F525} {monitor} error budget burn"),
                 description: Some(budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)),
                 color: COLOR_DEGRADED,
+            },
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => Self::alert_embed(monitor, severity, title, message),
+        }
+    }
+
+    /// The embed for a pushed alert: a bell-prefixed title and a severity colour.
+    fn alert_embed(monitor: &str, severity: AlertSeverity, title: &str, message: &str) -> Embed {
+        Embed {
+            title: format!(
+                "\u{1F514} [{}] {monitor}: {title}",
+                severity.as_str().to_ascii_uppercase()
+            ),
+            description: (!message.is_empty()).then(|| message.to_owned()),
+            color: match severity {
+                AlertSeverity::Info => COLOR_INFO,
+                AlertSeverity::Warning => COLOR_DEGRADED,
+                AlertSeverity::Error | AlertSeverity::Critical => COLOR_DOWN,
             },
         }
     }

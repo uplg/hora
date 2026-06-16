@@ -21,6 +21,7 @@ Editor...) at it.
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor. |
+| `POST /api/monitors/{id}/alert` | Push an ad-hoc alert to a monitor's channels (a producer's own failure); records a timeline line, never changes the monitor's status. |
 | `POST /api/silence` | Mute alerts ad hoc (deploy hook). |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
 | `POST /api/announce` | Pin a public status-page banner (`DELETE` clears); auto-expiry via `until`. Requires `server.auth_token`. |
@@ -54,6 +55,50 @@ Optional query: `status=up|down|degraded` (default up), `msg=...` (recorded
 with the heartbeat, bounded), `ping=<ms>`. Answers 401 on a wrong token, 404
 if the id is not a push target.
 
+## `POST /api/monitors/{id}/alert`
+
+Let a producer push its **own** failure straight to a monitor's notification
+channels - "patch materialization failed", "nightly export wrote 0 rows" -
+without it pretending to be a probe result. The alert fans out to the
+monitor's `notify` channels immediately, adds a line to that monitor's
+timeline (shown on `/history`), and **never** marks the monitor down: status
+stays driven by probes/heartbeats alone.
+
+Authenticate with the monitor's own `push_token` as an `X-Push-Token` header
+(preferred), or with `server.auth_token` as `Authorization: Bearer` / `?token=`.
+The endpoint is closed unless one of those is configured and matches.
+
+```sh
+curl -fsS -X POST \
+  -H "X-Push-Token: ${TOKEN}" -H "Content-Type: application/json" \
+  "https://status.example.com/api/monitors/ekb-api/alert" -d '{
+    "severity": "error",
+    "title":    "Patch materialization failed",
+    "message":  "patch 9f3c… — 3/12 operations failed: SourceFile not found",
+    "dedup_key":"ekb-api:materialization",
+    "tags":     {"task_id":"4711","patch_id":"9f3c"}
+  }'
+```
+
+JSON body: `severity` (`info` default, `warning`, `error`, `critical`),
+`title` (required), `message` (optional), `dedup_key` (optional) and `tags`
+(optional map, folded into the message). Answers **202 Accepted** with
+`{"status":"dispatched","id":…}`; a 400 on an empty title or unknown severity,
+401/404 like the push endpoint.
+
+**Severity → priority.** On backends that have a native priority - ntfy,
+Pushover, Gotify - the severity maps onto it (so `critical` pages louder than
+`info`); elsewhere it shows as a text label. The generic JSON `webhook`
+channel receives it structured: `{"event":"alert","severity","title","message"}`.
+
+**`dedup_key` + anti-flood.** When two alerts share a `dedup_key`, any repeat
+inside `alerts.push_alert_window_secs` (default 300) is **coalesced** - dropped
+and counted, not dispatched again - and answers `202` with
+`{"status":"coalesced","suppressed":N,"retry_after_secs":…}`. The rate-limiting
+thus lives in Hora, so a flapping producer pages once and every producer
+benefits without implementing its own throttle. Set the window to `0` to
+dispatch every alert.
+
 ## `POST /api/silence`
 
 Mute alerts for some monitors ad hoc - made for CI deploy hooks:
@@ -72,8 +117,8 @@ alerting is muted.
 
 ## Rate limiting & security headers
 
-The `/api/*` endpoints (summary, latency, push, silence) are **rate-limited
-per client IP** (configurable; read once at startup) and send
+The `/api/*` endpoints (summary, latency, push, alert, silence) are
+**rate-limited per client IP** (configurable; read once at startup) and send
 `x-ratelimit-*` / `retry-after` headers; the badges and `/api/openapi.json`
 are not. The client IP is taken from `X-Forwarded-For` / `X-Real-IP` by
 default, so run Hora behind a proxy that sets it - a direct client could

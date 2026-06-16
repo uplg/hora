@@ -16,8 +16,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
     announce, announce_clear, favicon, font, group_page, healthz, heatmap_svg, history_atom,
-    history_page, latency_json, metrics_prometheus, openapi, page, peer_probe, push, report_page,
-    silence, status_badge, summary_json, uptime_badge,
+    history_page, latency_json, metrics_prometheus, openapi, page, peer_probe, post_alert, push,
+    report_page, silence, status_badge, summary_json, uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
     let mut api = Router::new()
         .route("/api/summary", get(summary_json))
         .route("/api/monitors/{id}/latency", get(latency_json))
+        .route("/api/monitors/{id}/alert", post(post_alert))
         .route("/api/push/{id}", post(push))
         .route("/api/silence", post(silence))
         .route("/api/announce", post(announce).delete(announce_clear))
@@ -239,8 +240,16 @@ mod tests {
             "#,
         )
         .expect("config");
-        let (_tx, rx) = watch::channel(Arc::new(config));
-        let app = router(AppState::new(pool.clone(), rx, Arc::new(AtomicU64::new(0))));
+        let config = Arc::new(config);
+        let client = hora_core::http::client(None).expect("client");
+        let notifier = hora_core::notifications::shared(&config, &client);
+        let (_tx, rx) = watch::channel(config);
+        let app = router(AppState::new(
+            pool.clone(),
+            rx,
+            Arc::new(AtomicU64::new(0)),
+            notifier,
+        ));
         (app, pool)
     }
 
@@ -324,6 +333,227 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// A JSON POST to the alert endpoint, with an optional `X-Push-Token` (the
+    /// item token) and/or `Authorization: Bearer` (the global token).
+    fn alert(
+        uri: &str,
+        body: &str,
+        push_token: Option<&str>,
+        bearer: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .extension(fake_peer());
+        if let Some(token) = push_token {
+            builder = builder.header("x-push-token", token);
+        }
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::from(body.to_owned())).expect("request")
+    }
+
+    #[tokio::test]
+    async fn alert_dispatches_with_item_token_and_records_it() {
+        let (app, pool) = test_app_with_pool().await;
+        let res = app
+            .oneshot(alert(
+                "/api/monitors/beat/alert",
+                r#"{"severity":"error","title":"Patch failed","message":"3/12 ops","tags":{"task_id":"t1"}}"#,
+                Some("s3cret"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+        let alerts = hora_core::db::recent_pushed_alerts(&pool, 10)
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].monitor_id, "beat");
+        assert_eq!(alerts[0].severity, "error");
+        assert_eq!(alerts[0].title, "Patch failed");
+        // The tag is folded into the stored message alongside the producer text.
+        assert!(
+            alerts[0].message.contains("3/12 ops") && alerts[0].message.contains("task_id=t1"),
+            "{}",
+            alerts[0].message
+        );
+    }
+
+    #[tokio::test]
+    async fn alert_accepts_global_auth_token_for_a_non_push_monitor() {
+        // "web" is an HTTP monitor with no push_token: the global viewer token
+        // authorizes, via either the Bearer header or the ?token= query.
+        let res = test_app()
+            .await
+            .oneshot(alert(
+                "/api/monitors/web/alert",
+                r#"{"title":"deploy started"}"#,
+                None,
+                Some("0123456789abcdef"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+        let res = test_app()
+            .await
+            .oneshot(alert(
+                "/api/monitors/web/alert?token=0123456789abcdef",
+                r#"{"title":"deploy started"}"#,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn alert_rejects_wrong_or_missing_token() {
+        for (push_token, bearer) in [(Some("wrong"), None), (None, None), (None, Some("nope"))] {
+            let res = test_app()
+                .await
+                .oneshot(alert(
+                    "/api/monitors/beat/alert",
+                    r#"{"title":"x"}"#,
+                    push_token,
+                    bearer,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::UNAUTHORIZED,
+                "{push_token:?} {bearer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn alert_unknown_monitor_is_404() {
+        let res = test_app()
+            .await
+            .oneshot(alert(
+                "/api/monitors/nope/alert",
+                r#"{"title":"x"}"#,
+                None,
+                Some("0123456789abcdef"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn alert_rejects_empty_title_and_bad_severity() {
+        for body in [r#"{"title":"   "}"#, r#"{"severity":"boom","title":"x"}"#] {
+            let res = test_app()
+                .await
+                .oneshot(alert(
+                    "/api/monitors/beat/alert",
+                    body,
+                    Some("s3cret"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn alert_coalesces_a_repeated_dedup_key() {
+        let (app, pool) = test_app_with_pool().await;
+        let body = r#"{"severity":"error","title":"flap","dedup_key":"ekb:mat"}"#;
+
+        let first = app
+            .clone()
+            .oneshot(alert(
+                "/api/monitors/beat/alert",
+                body,
+                Some("s3cret"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        assert!(body_text(first).await.contains("dispatched"));
+
+        // Same key inside the window: coalesced, not dispatched or recorded again.
+        let second = app
+            .clone()
+            .oneshot(alert(
+                "/api/monitors/beat/alert",
+                body,
+                Some("s3cret"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::ACCEPTED);
+        assert!(body_text(second).await.contains("coalesced"));
+
+        let alerts = hora_core::db::recent_pushed_alerts(&pool, 10)
+            .await
+            .unwrap();
+        assert_eq!(alerts.len(), 1, "the repeat must not add a second row");
+    }
+
+    #[tokio::test]
+    async fn alert_history_respects_public_and_private_visibility() {
+        let (app, _pool) = test_app_with_pool().await;
+        // A public monitor's alert ("web" has no push_token: global token).
+        let res = app
+            .clone()
+            .oneshot(alert(
+                "/api/monitors/web/alert",
+                r#"{"severity":"warning","title":"web alert","message":"web detail"}"#,
+                None,
+                Some("0123456789abcdef"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        // A private monitor's alert ("intra" is public = false).
+        let res = app
+            .clone()
+            .oneshot(alert(
+                "/api/monitors/intra/alert",
+                r#"{"severity":"error","title":"intra alert","message":"intra detail"}"#,
+                None,
+                Some("0123456789abcdef"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+        // Anonymous: the public monitor's title shows, its message is collapsed,
+        // and the private monitor's alert is hidden outright.
+        let anon = body_text(app.clone().oneshot(get("/history")).await.unwrap()).await;
+        assert!(anon.contains("web alert"), "{anon}");
+        assert!(!anon.contains("web detail"), "{anon}");
+        assert!(!anon.contains("intra alert"), "{anon}");
+
+        // Authenticated: full detail, private monitor included.
+        let full = body_text(
+            app.oneshot(get("/history?token=0123456789abcdef"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            full.contains("web detail")
+                && full.contains("intra alert")
+                && full.contains("intra detail"),
+            "{full}"
+        );
+    }
+
     #[tokio::test]
     async fn report_renders_and_rejects_bad_months() {
         let res = test_app()
@@ -381,11 +611,18 @@ mod tests {
             .await
             .expect("pool");
         hora_core::db::migrator().run(&pool).await.expect("migrate");
-        let config = hora_core::config::parse(toml).expect("config");
-        let (tx, rx) = watch::channel(Arc::new(config));
+        let config = Arc::new(hora_core::config::parse(toml).expect("config"));
+        let client = hora_core::http::client(None).expect("client");
+        let notifier = hora_core::notifications::shared(&config, &client);
+        let (tx, rx) = watch::channel(config);
         // Keep the sender alive for the app's lifetime.
         std::mem::forget(tx);
-        router(AppState::new(pool, rx, Arc::new(AtomicU64::new(0))))
+        router(AppState::new(
+            pool,
+            rx,
+            Arc::new(AtomicU64::new(0)),
+            notifier,
+        ))
     }
 
     /// Node B's config for the peer-probe tests: it knows the tcp target and

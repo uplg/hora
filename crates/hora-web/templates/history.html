@@ -25,6 +25,7 @@
       --up: #10b981;
       --down: #ef4444;
       --degraded: #f59e0b;
+      --info: #3b82f6;
       --brand: "Cal Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
     }
 
@@ -110,6 +111,27 @@
 
     .incident.resolved {
       border-left-color: var(--up);
+    }
+
+    /* Pushed alerts: the left border tracks the producer-supplied severity. */
+    .incident.info {
+      border-left-color: var(--info);
+    }
+
+    .incident.warning {
+      border-left-color: var(--degraded);
+    }
+
+    .incident.error,
+    .incident.critical {
+      border-left-color: var(--down);
+    }
+
+    .sev {
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-size: 11px;
+      font-weight: 600;
     }
 
     .incident-head {
@@ -265,6 +287,22 @@
           <pre>{{ snapshot }}</pre>
         </details>
         {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if !pushed_alerts.is_empty() %}
+    <h2 class="section-title">Pushed alerts · external</h2>
+    <div class="incidents">
+      {% for alert in pushed_alerts %}
+      <div class="incident {{ alert.severity }}">
+        <div class="incident-head">
+          <span class="incident-title"><span class="sev">{{ alert.severity }}</span> · {{ alert.monitor }} · {{
+            alert.title }}</span>
+          <span class="incident-at">{{ alert.at }}</span>
+        </div>
+        {% if let Some(message) = alert.message %}<p class="incident-body">{{ message }}</p>{% endif %}
       </div>
       {% endfor %}
     </div>

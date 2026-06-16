@@ -1,6 +1,7 @@
 //! Web layer: the server-rendered status page and the JSON API.
 
 mod error;
+mod flood;
 mod handlers;
 mod heatmap;
 mod history;
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwapOption;
 use axum::http::{HeaderName, Request};
 use hora_core::config::Config;
+use hora_core::notifications::Notifiers;
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, watch};
 use tower_governor::errors::GovernorError;
@@ -33,6 +35,14 @@ pub(crate) const MAX_LATENCY_HOURS: i64 = 24 * 30;
 pub(crate) const SUMMARY_CACHE_TTL: Duration = Duration::from_secs(5);
 /// Cap on a pushed heartbeat message, so the endpoint can't bloat the database.
 pub(crate) const MAX_PUSH_MSG_CHARS: usize = 500;
+/// Cap on a pushed alert's title (matches the announcement-title cap).
+pub(crate) const MAX_ALERT_TITLE_CHARS: usize = 200;
+/// Cap on a pushed alert's `dedup_key`.
+pub(crate) const MAX_ALERT_DEDUP_CHARS: usize = 200;
+/// Cap on how many `tags` a pushed alert may fold into its message, and on the
+/// length of each key/value - a buggy producer can't bloat the row this way.
+pub(crate) const MAX_ALERT_TAGS: usize = 20;
+pub(crate) const MAX_ALERT_TAG_CHARS: usize = 100;
 /// Cap on points returned by the latency endpoint (evenly downsampled beyond it).
 pub(crate) const MAX_LATENCY_POINTS: usize = 2000;
 /// Number of time buckets a 24h card sparkline is averaged into, so its size is
@@ -83,6 +93,12 @@ pub struct AppState {
     /// The scheduler's liveness beacon, written by the monitor loops and read by
     /// `/healthz` to report whether the scheduler is still ticking.
     last_tick: Arc<AtomicU64>,
+    /// The hot-swappable notification channels, so the alert endpoint can fan a
+    /// pushed alert out to a monitor's channels (shared with the daemon's
+    /// supervisor, which rebuilds it on config reload).
+    notifier: Notifiers,
+    /// Per-process anti-flood state for pushed alerts carrying a `dedup_key`.
+    flood: Arc<flood::Flood>,
 }
 
 impl AppState {
@@ -91,12 +107,15 @@ impl AppState {
         pool: SqlitePool,
         config: watch::Receiver<Arc<Config>>,
         last_tick: Arc<AtomicU64>,
+        notifier: Notifiers,
     ) -> Self {
         Self {
             pool,
             config,
             cache: Arc::new(Cache::default()),
             last_tick,
+            notifier,
+            flood: Arc::new(flood::Flood::default()),
         }
     }
 }

@@ -4,6 +4,26 @@ use reqwest::{Client, RequestBuilder};
 use serde::Serialize;
 use tracing::warn;
 
+use crate::AlertSeverity;
+
+/// The text of a pushed-alert notification, shared so every channel words it
+/// identically: `"[ERROR] Monitor: title"`, then the message on its own line
+/// when the producer sent one. The per-channel emoji/markup wraps around this.
+pub(crate) fn alert_phrase(
+    monitor: &str,
+    severity: AlertSeverity,
+    title: &str,
+    message: &str,
+) -> String {
+    let label = severity.as_str().to_ascii_uppercase();
+    let head = format!("[{label}] {monitor}: {title}");
+    if message.is_empty() {
+        head
+    } else {
+        format!("{head}\n{message}")
+    }
+}
+
 /// Escape the characters special to HTML / Slack mrkdwn (`& < >`).
 pub(crate) fn escape(input: &str) -> String {
     input
@@ -230,6 +250,19 @@ mod tests {
     #[test]
     fn escapes_metacharacters() {
         assert_eq!(escape("a<b>&c"), "a&lt;b&gt;&amp;c");
+    }
+
+    #[test]
+    fn alert_phrasing() {
+        assert_eq!(
+            alert_phrase("API", AlertSeverity::Error, "boom", "stack trace"),
+            "[ERROR] API: boom\nstack trace"
+        );
+        // No message: just the head line, no trailing newline.
+        assert_eq!(
+            alert_phrase("API", AlertSeverity::Info, "deploy started", ""),
+            "[INFO] API: deploy started"
+        );
     }
 
     #[test]

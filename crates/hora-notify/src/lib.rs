@@ -33,6 +33,43 @@ pub use slack::SlackNotifier;
 pub use telegram::TelegramNotifier;
 pub use webhook::WebhookNotifier;
 
+/// Severity of an externally-pushed alert (`POST /api/monitors/{id}/alert`),
+/// mapped onto each backend's native priority where it has one (ntfy, Pushover,
+/// Gotify) and shown as a text label everywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertSeverity {
+    Info,
+    Warning,
+    Error,
+    Critical,
+}
+
+impl AlertSeverity {
+    /// Lowercase label, as accepted in the API and stored in the database.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Critical => "critical",
+        }
+    }
+
+    /// Parse the severity sent in the request body; `None` for anything else,
+    /// which the handler turns into a 400.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "info" => Some(Self::Info),
+            "warning" => Some(Self::Warning),
+            "error" => Some(Self::Error),
+            "critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+}
+
 /// An alertable event. Borrows its data so emitting one is allocation-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event<'a> {
@@ -90,6 +127,17 @@ pub enum Event<'a> {
         window: &'a str,
         /// Estimated seconds until the budget is fully spent at this rate.
         exhausted_in_secs: Option<i64>,
+    },
+    /// An alert pushed by an external producer to a monitor
+    /// (`POST /api/monitors/{id}/alert`): dispatched straight to the monitor's
+    /// channels, never touching its up/down status. Any `tags` are pre-rendered
+    /// into `message` by the handler, so the variant stays `Copy`.
+    Alert {
+        monitor: &'a str,
+        severity: AlertSeverity,
+        title: &'a str,
+        /// Free-form detail; empty when the producer sent only a title.
+        message: &'a str,
     },
 }
 

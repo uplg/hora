@@ -16,9 +16,9 @@ use reqwest::Client;
 
 use crate::config::{Channel, Config};
 
-// Re-exported so the binary can emit one (`hora test-alert`) without its own
-// hora-notify dependency.
-pub use hora_notify::Event;
+// Re-exported so the binary and web layer can emit one (`hora test-alert`, the
+// alert endpoint) without their own hora-notify dependency.
+pub use hora_notify::{AlertSeverity, Event};
 
 /// A hot-swappable set of notification channels shared across tasks.
 pub type Notifiers = Arc<ArcSwap<Dispatcher>>;

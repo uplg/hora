@@ -9,7 +9,7 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use tracing::warn;
 
-use crate::{Event, Notifier};
+use crate::{AlertSeverity, Event, Notifier};
 
 /// Sends alerts as plain-text e-mails through an SMTP relay.
 pub struct EmailNotifier {
@@ -158,7 +158,30 @@ impl EmailNotifier {
                     crate::util::budget_burn_phrase(burn_rate_x10, window, exhausted_in_secs)
                 ),
             ),
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => Self::alert_mail(monitor, severity, title, message),
         }
+    }
+
+    /// Subject and body for a pushed alert: `[ERROR] Monitor: title`, with the
+    /// detail (if any) as the body.
+    fn alert_mail(
+        monitor: &str,
+        severity: AlertSeverity,
+        title: &str,
+        message: &str,
+    ) -> (String, String) {
+        let label = severity.as_str().to_ascii_uppercase();
+        let body = if message.is_empty() {
+            format!("{monitor}: {title}")
+        } else {
+            format!("{monitor}: {title}\n\n{message}")
+        };
+        (format!("[{label}] {monitor}: {title}"), body)
     }
 }
 

@@ -88,6 +88,17 @@ impl WebhookNotifier {
                 exhausted_in_secs,
                 ..Payload::new("budget_burn", monitor)
             },
+            Event::Alert {
+                monitor,
+                severity,
+                title,
+                message,
+            } => Payload {
+                severity: Some(severity.as_str()),
+                title: Some(title),
+                message: (!message.is_empty()).then_some(message),
+                ..Payload::new("alert", monitor)
+            },
         }
     }
 }
@@ -96,6 +107,12 @@ impl WebhookNotifier {
 struct Payload<'a> {
     event: &'static str,
     monitor: &'a str,
+    /// Severity of a pushed alert (`info`/`warning`/`error`/`critical`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<&'a str>,
+    /// The title of a pushed alert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,6 +153,8 @@ impl<'a> Payload<'a> {
         Self {
             event,
             monitor,
+            severity: None,
+            title: None,
             message: None,
             cause: None,
             impacted: None,
@@ -176,6 +195,7 @@ impl Notifier for WebhookNotifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AlertSeverity;
 
     #[test]
     fn payload_per_event() {
@@ -231,5 +251,26 @@ mod tests {
         assert_eq!(partition.event, "peer_link_degraded");
         assert_eq!(partition.monitor, "Hora B");
         assert_eq!(partition.witness, Some("Hora C"));
+
+        let alert = WebhookNotifier::payload(Event::Alert {
+            monitor: "ekb-api",
+            severity: AlertSeverity::Error,
+            title: "Patch materialization failed",
+            message: "3/12 operations failed",
+        });
+        assert_eq!(alert.event, "alert");
+        assert_eq!(alert.monitor, "ekb-api");
+        assert_eq!(alert.severity, Some("error"));
+        assert_eq!(alert.title, Some("Patch materialization failed"));
+        assert_eq!(alert.message, Some("3/12 operations failed"));
+
+        // An alert with only a title omits the message field entirely.
+        let titled = WebhookNotifier::payload(Event::Alert {
+            monitor: "ekb-api",
+            severity: AlertSeverity::Info,
+            title: "deploy started",
+            message: "",
+        });
+        assert!(titled.message.is_none());
     }
 }
