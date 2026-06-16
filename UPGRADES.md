@@ -4,6 +4,17 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.7.2 → 0.8.0
+
+One schema migration (the `pushed_alerts` table) applies automatically. One
+new optional config key, `alerts.push_alert_window_secs` (the anti-flood
+window for pushed alerts, default 300) - as always with new config keys,
+deploy the binary before a config that sets it (`deny_unknown_fields`). The
+new `POST /api/monitors/{id}/alert` endpoint stays closed until a monitor
+`push_token` or `server.auth_token` is configured, like the other write
+endpoints. No change to existing monitors: a pushed alert never affects a
+monitor's up/down status.
+
 ## 0.7.1 → 0.7.2
 
 No behavioural changes, no schema migration, no new config keys. One new
