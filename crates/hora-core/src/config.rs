@@ -465,6 +465,12 @@ pub struct Alerts {
     /// coalescing (every pushed alert dispatches). Default 300.
     #[serde(default = "default_push_alert_window")]
     pub push_alert_window_secs: u64,
+    /// Consecutive delivery failures before the notification watchdog alerts
+    /// the *other* channels that a channel is broken ("your telegram channel
+    /// has been failing"). The dead-man's switch applied to notifications
+    /// themselves. Default 3.
+    #[serde(default = "default_channel_fail_threshold")]
+    pub channel_fail_threshold: u32,
 }
 
 impl Default for Alerts {
@@ -477,6 +483,7 @@ impl Default for Alerts {
             default_retention_days: default_retention_days(),
             group_window_secs: default_group_window(),
             push_alert_window_secs: default_push_alert_window(),
+            channel_fail_threshold: default_channel_fail_threshold(),
         }
     }
 }
@@ -1101,6 +1108,9 @@ fn default_group_window() -> u64 {
 }
 fn default_push_alert_window() -> u64 {
     300
+}
+fn default_channel_fail_threshold() -> u32 {
+    3
 }
 fn default_rate_limit_burst() -> u32 {
     30

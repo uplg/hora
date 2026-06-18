@@ -139,6 +139,14 @@ default_retention_days = 90
 # coalesced (dropped and counted) instead of dispatched again, so a flapping
 # producer pages once. 0 = dispatch every pushed alert. Default: 300.
 # push_alert_window_secs = 300
+#
+# Notification channel watchdog: consecutive delivery failures before Hora
+# alerts the OTHER channels that a channel is broken ("channel 'telegram' is
+# failing"). Each delivery already retries 3 times internally, so the default
+# of 3 represents 9 total failed attempts — enough to ride through a transient
+# blip. The alert fires once per failure streak; a successful delivery resets
+# the counter. 1 = alert on the first failure (aggressive). Default: 3.
+# channel_fail_threshold = 3
 
 # --- Weekly digest ----------------------------------------------------------
 # A recap of the last 7 days through the notification channels: "99.97%

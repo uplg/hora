@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwapOption;
 use axum::http::{HeaderName, Request};
 use hora_core::config::Config;
-use hora_core::notifications::Notifiers;
+use hora_core::notifications::{self, Notifiers};
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, watch};
 use tower_governor::errors::GovernorError;
@@ -179,6 +179,7 @@ pub(crate) async fn summary_for(
     config: &Arc<Config>,
     cache: &Cache,
     full: bool,
+    notifier: &Notifiers,
 ) -> Arc<Summary> {
     let slot = if full { &cache.full } else { &cache.public };
     if let Some(fresh) = fresh_summary(slot, config) {
@@ -189,7 +190,14 @@ pub(crate) async fn summary_for(
     if let Some(fresh) = fresh_summary(slot, config) {
         return fresh;
     }
-    let summary = Arc::new(build_summary(pool, config, full).await);
+    // Channel health is read live from the dispatcher — only for the
+    // authenticated view, and only on a cache miss (every 5s at most).
+    let health = if full {
+        notifications::health_snapshot(notifier)
+    } else {
+        Vec::new()
+    };
+    let summary = Arc::new(build_summary(pool, config, full, &health).await);
     slot.store(Some(Arc::new(Cached {
         at: Instant::now(),
         config: Arc::clone(config),

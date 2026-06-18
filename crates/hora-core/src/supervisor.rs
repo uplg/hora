@@ -154,9 +154,15 @@ async fn supervise(
             Ok(config) => {
                 last_raw = raw;
                 let config = Arc::new(config);
-                // Rebuild the channels too, so credential/channel changes apply live.
-                deps.notifier
-                    .store(Arc::new(notifications::build(&config, &deps.client)));
+                // Rebuild the channels too, so credential/channel changes
+                // apply live. The per-channel failure counters are carried over
+                // so a channel that has been failing survives the reload.
+                let health = deps.notifier.load().health();
+                deps.notifier.store(Arc::new(notifications::build(
+                    &config,
+                    &deps.client,
+                    Some(health),
+                )));
                 if tx.send(Arc::clone(&config)).is_err() {
                     break;
                 }

@@ -15,7 +15,7 @@ documents every option; this page covers the mechanics.
 | `[page]` | Status page title, days rendered in the uptime bars |
 | `[server]` | Bind address, database path, CORS, rate limits, viewer token |
 | `[[channels]]` | Named notification channels (Telegram, Discord, email, ...) |
-| `[alerts]` | Fail threshold, cert expiry warning, retention, alert grouping |
+| `[alerts]` | Fail threshold, cert expiry warning, retention, alert grouping, channel watchdog |
 | `[[maintenance]]` | Scheduled windows that mute alerts |
 | `[[incidents]]` | Manual announcements shown as a status page banner |
 | `[[monitors]]` | The monitors themselves |

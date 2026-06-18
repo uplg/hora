@@ -27,12 +27,27 @@ struct Summary {
     /// The pinned status-page banners (config + `hora announce`).
     #[serde(default)]
     incidents: Vec<Banner>,
+    /// Notification-channel health (authenticated API only; empty/absent on
+    /// older or unauthenticated servers).
+    #[serde(default)]
+    channels: Vec<Channel>,
 }
 
 #[derive(Deserialize)]
 struct Banner {
     title: String,
     severity: String,
+}
+
+#[derive(Deserialize)]
+struct Channel {
+    name: String,
+    #[serde(default)]
+    failing: bool,
+    #[serde(default)]
+    consecutive_failures: u32,
+    #[serde(default)]
+    failing_for_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -603,7 +618,9 @@ fn monitor_table(app: &App) -> Table<'static> {
 }
 
 /// Pinned banners first, then every monitor that is not up with its reason -
-/// or one green line.
+/// or one green line. Failing notification channels are shown here too: a
+/// broken Telegram bot discovered at incident time is the failure this dashboard
+/// exists to prevent.
 fn trouble_lines(app: &App) -> Vec<Line<'static>> {
     let mut banners: Vec<Line> = app.summary.as_ref().map_or_else(Vec::new, |summary| {
         summary
@@ -635,13 +652,33 @@ fn trouble_lines(app: &App) -> Vec<Line<'static>> {
             })
             .collect()
     });
-    if troubled.is_empty() && banners.is_empty() {
+    let broken_channels: Vec<Line> = app.summary.as_ref().map_or_else(Vec::new, |summary| {
+        summary
+            .channels
+            .iter()
+            .filter(|ch| ch.failing)
+            .map(|ch| {
+                Line::from(Span::styled(
+                    format!(
+                        " ⚠ channel '{}' failing ({} failures, {})",
+                        ch.name,
+                        ch.consecutive_failures,
+                        ch.failing_for_secs
+                            .map_or_else(|| "?".to_owned(), human_elapsed),
+                    ),
+                    Style::new().fg(Color::Yellow),
+                ))
+            })
+            .collect()
+    });
+    if troubled.is_empty() && banners.is_empty() && broken_channels.is_empty() {
         return vec![Line::from(Span::styled(
             " all monitors up",
             Style::new().fg(Color::Green),
         ))];
     }
     banners.extend(troubled);
+    banners.extend(broken_channels);
     banners
 }
 
@@ -656,6 +693,19 @@ fn severity_style(severity: &str) -> Style {
 
 fn ms(value: Option<i64>) -> String {
     value.map_or_else(|| "-".to_owned(), |ms| format!("{ms}ms"))
+}
+
+/// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"` — coarse, for the channel-failing line.
+fn human_elapsed(secs: u64) -> String {
+    if secs >= 2 * 86_400 {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
+    } else if secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
 }
 
 fn status_dot(status: &str) -> &'static str {

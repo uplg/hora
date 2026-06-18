@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Notification channel watchdog**: a delivery channel that breaks (a revoked
+  Telegram bot token, a dead SMTP relay, a deleted Discord webhook) fails
+  silently in the logs — you discover it during the real incident, when the
+  alert that should have paged you never arrived. Hora now counts consecutive
+  delivery failures per channel and, at `alerts.channel_fail_threshold` (default
+  3), alerts the *other* channels: "channel 'telegram' is failing — 3
+  consecutive delivery failures since 2h". The dead-man's switch applied to
+  notifications themselves. Each `send_retrying` call already retries 3 times
+  internally, so the default threshold represents 9 total failed attempts —
+  enough to ride through a transient blip without crying wolf. The alert fires
+  once per failure streak (a flag prevents re-spamming on every subsequent
+  dispatch); a single successful delivery resets the counter and the flag, so a
+  channel that recovers and breaks again alerts again. The failure counters
+  survive a config reload (they belong to the channel *name*, not to a
+  particular notifier instance), so touching an unrelated setting does not
+  silently forgive a channel that has been failing for two days. Channels
+  removed from the config drop their counter; channels renamed start fresh.
+  - **`hora doctor`** now reports the configured notification channels
+    (active vs. disabled by an empty secret), so a config with zero working
+    channels — the one class of problem the watchdog itself can't warn about
+    (it needs at least one working channel to reach you) — is caught at
+    `doctor` time.
+  - **`/api/summary`** (authenticated only) exposes a `channels` array with
+    each channel's `failing` flag, `consecutive_failures` count and
+    `failing_for_secs`; the public status page never sees it (channel names
+    and delivery health are the operator's business, not a client's).
+  - **`hora top`** shows failing channels in the trouble panel: a yellow line
+    per broken channel with its failure count and duration.
+
 ## [0.8.0] - 2026-06-16
 
 ### Added

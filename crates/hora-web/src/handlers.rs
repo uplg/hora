@@ -134,10 +134,11 @@ pub(crate) async fn state_summary(state: AppState, full: bool) -> Arc<Summary> {
         pool,
         config,
         cache,
+        notifier,
         ..
     } = state;
     let config = config.borrow().clone();
-    summary_for(&pool, &config, &cache, full).await
+    summary_for(&pool, &config, &cache, full, &notifier).await
 }
 
 /// Whether the request carries the configured viewer token, as

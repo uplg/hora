@@ -2,15 +2,18 @@
 //!
 //! The set of channels is rebuilt on every config reload and swapped in
 //! atomically, so changing credentials or adding a channel takes effect live,
-//! without a restart.
+//! without a restart. The per-channel failure counters (the notification
+//! watchdog's state) are carried across rebuilds via a shared [`HealthMap`], so
+//! a channel that has been failing for two days is not silently forgiven just
+//! because the operator touched an unrelated setting.
 
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use hora_notify::{
     DiscordNotifier, Dispatcher, EmailConfig, EmailNotifier, FreeMobileNotifier, GotifyNotifier,
-    MatrixNotifier, Notifier, NtfyNotifier, PushoverNotifier, SlackNotifier, TelegramNotifier,
-    WebhookNotifier,
+    HealthMap, MatrixNotifier, Notifier, NtfyNotifier, PushoverNotifier, SlackNotifier,
+    TelegramNotifier, WebhookNotifier,
 };
 use reqwest::Client;
 
@@ -18,16 +21,42 @@ use crate::config::{Channel, Config};
 
 // Re-exported so the binary and web layer can emit one (`hora test-alert`, the
 // alert endpoint) without their own hora-notify dependency.
-pub use hora_notify::{AlertSeverity, Event};
+pub use hora_notify::{AlertSeverity, ChannelHealthEntry, Event};
 
 /// A hot-swappable set of notification channels shared across tasks.
 pub type Notifiers = Arc<ArcSwap<Dispatcher>>;
 
 /// Build the dispatcher for the current configuration. Channels whose secret is
 /// empty (e.g. an unset `${VAR}`) are skipped rather than failing at send time.
+/// When `health` is `Some`, the existing per-channel failure counters are
+/// reused — used on config reload so the watchdog's memory survives.
 #[must_use]
-pub fn build(config: &Config, client: &Client) -> Dispatcher {
-    let channels = config
+pub fn build(config: &Config, client: &Client, health: Option<HealthMap>) -> Dispatcher {
+    let channels = build_channels(config, client);
+    let threshold = config.alerts.channel_fail_threshold;
+    match health {
+        Some(h) => Dispatcher::with_health(channels, threshold, h),
+        None => Dispatcher::new(channels, threshold),
+    }
+}
+
+/// Build the shared, hot-swappable notifier handle from the initial config.
+#[must_use]
+pub fn shared(config: &Config, client: &Client) -> Notifiers {
+    Arc::new(ArcSwap::from_pointee(build(config, client, None)))
+}
+
+/// A health snapshot of all channels, for `top` and `/api/summary`.
+#[must_use]
+pub fn health_snapshot(notifiers: &Notifiers) -> Vec<ChannelHealthEntry> {
+    notifiers.load().health_snapshot()
+}
+
+/// Instantiate the configured channels. Channels whose secret is empty (e.g. an
+/// unset `${VAR}`) are skipped rather than failing at send time; a misconfigured
+/// email relay disables just that channel (warned, not fatal).
+fn build_channels(config: &Config, client: &Client) -> Vec<(String, Box<dyn Notifier>)> {
+    config
         .channels
         .iter()
         .filter(|channel| channel.is_configured())
@@ -109,13 +138,5 @@ pub fn build(config: &Config, client: &Client) -> Dispatcher {
             };
             Some((channel.name().to_owned(), notifier))
         })
-        .collect();
-
-    Dispatcher::new(channels)
-}
-
-/// Build the shared, hot-swappable notifier handle from the initial config.
-#[must_use]
-pub fn shared(config: &Config, client: &Client) -> Notifiers {
-    Arc::new(ArcSwap::from_pointee(build(config, client)))
+        .collect()
 }

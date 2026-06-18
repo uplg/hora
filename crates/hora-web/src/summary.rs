@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 use hora_core::SECONDS_PER_DAY;
 use hora_core::config::{Config, Monitor};
 use hora_core::db::{self, DayRow, Latest, Point};
+use hora_core::notifications::ChannelHealthEntry;
 use hora_core::{slo, topology};
 
 use crate::SPARK_BUCKETS;
@@ -33,6 +34,9 @@ pub(crate) struct Summary {
     /// an empty-string key, always last.
     pub(crate) groups: Vec<GroupView>,
     pub(crate) peers: Vec<PeerView>,
+    /// Notification-channel health (operator only; empty in the public view).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) channels: Vec<ChannelView>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -72,6 +76,20 @@ pub(crate) struct PeerView {
     last_seen: Option<String>,
     /// Whether this node also heartbeats the peer (the OUT side is configured).
     pings: bool,
+}
+
+/// Notification-channel health, for the operator view only (`top`, authenticated
+/// `/api/summary`). The public status page never sees this: channel names and
+/// delivery health are the operator's business, not a client's.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ChannelView {
+    name: String,
+    failing: bool,
+    consecutive_failures: u32,
+    /// Seconds since the first failure in the current streak; `null` when the
+    /// channel is healthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failing_for_secs: Option<u64>,
 }
 
 #[derive(Clone, Serialize, ToSchema)]
@@ -172,8 +190,14 @@ pub(crate) struct SummaryCtx {
 
 /// Build the page/API view model. `full` includes private (`public = false`)
 /// monitors; the public variant filters them out entirely - cards, groups and
-/// daily bars alike.
-pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config, full: bool) -> Summary {
+/// daily bars alike. Channel health is only included in the `full` view
+/// (operator-private); the public summary gets an empty `channels` vec.
+pub(crate) async fn build_summary(
+    pool: &SqlitePool,
+    config: &Config,
+    full: bool,
+    channel_health: &[ChannelHealthEntry],
+) -> Summary {
     let now = Utc::now();
     let timestamp = now.timestamp();
     // The daily fetch also feeds the error-budget arithmetic, so it must cover
@@ -276,6 +300,11 @@ pub(crate) async fn build_summary(pool: &SqlitePool, config: &Config, full: bool
         monitors,
         groups,
         peers,
+        channels: if full {
+            channel_views(channel_health)
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -323,6 +352,24 @@ fn build_maintenances(
         .collect()
 }
 
+/// Build the channel-health view model from the dispatcher's snapshot. Only
+/// called for the authenticated (`full`) view; the public summary omits it.
+fn channel_views(health: &[ChannelHealthEntry]) -> Vec<ChannelView> {
+    health
+        .iter()
+        .map(|entry| ChannelView {
+            name: entry.name.clone(),
+            failing: entry.health.consecutive_failures > 0,
+            consecutive_failures: entry.health.consecutive_failures,
+            failing_for_secs: entry
+                .health
+                .first_failure_at
+                .and_then(|since| since.elapsed().ok())
+                .map(|d| d.as_secs()),
+        })
+        .collect()
+}
+
 /// Derive a single-group view from a built summary: the monitors of `group`
 /// only, the overall badge recomputed from them, the peers section hidden
 /// (the surveillance mesh is the operator's business, not a client's), and
@@ -364,6 +411,7 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
         }],
         monitors,
         peers: Vec::new(),
+        channels: Vec::new(),
     })
 }
 

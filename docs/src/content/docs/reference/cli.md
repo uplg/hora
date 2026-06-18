@@ -208,7 +208,11 @@ Diagnoses the runtime environment against what the configuration needs -
 honour it. Checks: database writable, listen port free (busy is a warning -
 the daemon is probably just running), IPv4/IPv6 routes (no packets sent),
 the unprivileged ICMP datagram socket (the rootless-Docker
-`net.ipv4.ping_group_range` catch), and a real system-resolver lookup.
+`net.ipv4.ping_group_range` catch), a real system-resolver lookup, and the
+configured notification channels (active vs. disabled by an empty secret —
+a config with zero working channels is the one class of problem the
+watchdog itself can't warn about, since it needs at least one working
+channel to reach you).
 Failures are judged against the config - no IPv6 route only fails when a
 `dual_stack` monitor needs one - and the process exits non-zero on any
 missing needed capability.

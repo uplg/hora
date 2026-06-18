@@ -149,7 +149,7 @@ async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
     };
 
     let client = hora_core::http::client(None).context("building HTTP client")?;
-    let dispatcher = hora_core::notifications::build(&config, &client);
+    let dispatcher = hora_core::notifications::build(&config, &client, None);
     let targeted: Vec<&str> = dispatcher
         .names()
         .filter(|channel| {

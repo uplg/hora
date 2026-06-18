@@ -10,12 +10,6 @@ records what actually shipped.
 
 ## Next
 
-- **Notification channel watchdog** - a broken Telegram channel currently
-  fails silently in the logs until the next real incident. The dispatcher
-  will track consecutive delivery failures per channel and alert *through
-  the other channels* ("your telegram channel has been failing for 2 days"),
-  surfacing it in `hora doctor` and `hora top` too - the dead-man philosophy
-  applied to the notifications themselves.
 - **Event markers** - `hora event "deploy api v2.3"` (or `POST /api/event`
   from a CI hook): a marker on the latency charts, a line in the history,
   and automatic correlation in incidents ("down 3 minutes after *deploy api

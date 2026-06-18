@@ -56,6 +56,44 @@ hora test-alert website    # ... through exactly the channels routed for "websit
 Any channel that fails logs a warning saying why ("chat not found", HTTP
 403, ...).
 
+### Channel watchdog
+
+A channel that breaks — a revoked bot token, a dead SMTP relay, a deleted
+Discord webhook — fails *silently* in the logs. You discover it during the
+real incident, when the alert that should have paged you never arrived.
+Hora counts consecutive delivery failures per channel and, at
+`alerts.channel_fail_threshold` (default 3), alerts the **other** channels:
+
+```
+channel 'telegram' is failing — 3 consecutive delivery failures since 2h
+```
+
+The dead-man's switch applied to notifications themselves. Each delivery
+already retries 3 times internally, so the default threshold represents 9
+total failed attempts — enough to ride through a transient blip without
+crying wolf. The alert fires once per failure streak (a flag prevents
+re-spamming on every subsequent dispatch); a single successful delivery
+resets the counter, so a channel that recovers and breaks again alerts
+again. The failure counters survive a config reload, so touching an
+unrelated setting does not silently forgive a channel that has been failing
+for two days.
+
+```toml
+[alerts]
+channel_fail_threshold = 3   # 1 = aggressive (alert on first failure)
+```
+
+Channel health is visible in three places:
+
+- **`hora top`** — a yellow line per broken channel in the trouble panel.
+- **`/api/summary`** (authenticated) — a `channels` array with `failing`,
+  `consecutive_failures` and `failing_for_secs` per channel. The public
+  status page never sees it: channel names and delivery health are the
+  operator's business, not a client's.
+- **`hora doctor`** — reports active vs. disabled-by-empty-secret channels,
+  so a config with zero working channels is caught before the first
+  incident.
+
 ## Confirmation threshold
 
 ```toml
