@@ -80,7 +80,7 @@ cargo run -p hora
 ```
 
 Building requires a C toolchain and `cmake` (for `aws-lc-rs`, the rustls
-crypto provider). The quality gate is `make gate` (fmt, clippy, cargo-deny,
+crypto provider). The quality gate is `just gate` (fmt, clippy, cargo-deny,
 cargo-audit, tests) - the exact checks CI runs.
 
 ## Environment variables

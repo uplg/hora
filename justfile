@@ -1,0 +1,25 @@
+# Local quality gate — mirrors .github/workflows/ci.yml so you can run the exact
+# same checks before pushing. `just gate` must be green for CI to pass.
+
+# The full gate: formatting, lints, license/advisory/ban checks, vuln audit, tests.
+gate: fmt clippy deny audit test
+
+fmt:
+    cargo fmt --all -- --check
+
+clippy:
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+
+deny:
+    cargo deny check
+
+audit:
+    cargo audit
+
+test:
+    cargo test --workspace --locked
+
+# Auto-fix what can be fixed (formatting + machine-applicable clippy suggestions).
+fix:
+    cargo fmt --all
+    cargo clippy --workspace --all-targets --fix --allow-dirty --allow-staged
