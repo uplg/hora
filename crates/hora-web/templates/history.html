@@ -170,6 +170,26 @@
       color: var(--text);
     }
 
+    /* The correlated change ("recent change: ..."). */
+    .incident-body.event {
+      color: var(--info);
+    }
+
+    /* Operator-recorded event markers get the info accent. */
+    .incident.event-marker {
+      border-left-color: var(--info);
+    }
+
+    .postmortem-link {
+      color: var(--muted);
+      text-decoration: none;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .postmortem-link:hover {
+      color: var(--text);
+    }
+
     /* The captured failing response, collapsed by default. */
     .snapshot {
       margin-top: 6px;
@@ -273,13 +293,16 @@
         <div class="incident-head">
           <span class="incident-title">{{ incident.monitor }} · {% if incident.resolved %}Resolved{% else
             %}Ongoing{% endif %}</span>
-          <span class="incident-at">{{ incident.started }}{% if let Some(ended) = incident.ended %} → {{ ended }}{%
+          <span class="incident-at"><a class="postmortem-link" href="/incident/{{ incident.id }}{{ token_query }}">post-mortem</a>
+            · {{ incident.started }}{% if let Some(ended) = incident.ended %} → {{ ended }}{%
             endif %}{% if let Some(duration) = incident.duration %} · {{ duration }}{% endif %}</span>
         </div>
         {% if let Some(error) = incident.error %}<p class="incident-body">{{ error }}</p>{% endif %}
+        {% if let Some(vantage) = incident.vantage %}<p class="incident-body">{{ vantage }}</p>{% endif %}
         {% if let Some(cause) = incident.cause %}<p class="incident-body cause">caused by {{ cause }}</p>{% endif %}
         {% if let Some(impacted) = incident.impacted %}<p class="incident-body impacted">impacts: {{ impacted }}</p>{%
         endif %}
+        {% if let Some(event) = incident.event %}<p class="incident-body event">recent change: {{ event }}</p>{% endif %}
         {% if let Some(note) = incident.note %}<p class="incident-body note">{{ note }}</p>{% endif %}
         {% if let Some(snapshot) = incident.snapshot %}
         <details class="snapshot">
@@ -303,6 +326,20 @@
           <span class="incident-at">{{ alert.at }}</span>
         </div>
         {% if let Some(message) = alert.message %}<p class="incident-body">{{ message }}</p>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if !events.is_empty() %}
+    <h2 class="section-title">Events · changes</h2>
+    <div class="incidents">
+      {% for event in events %}
+      <div class="incident event-marker">
+        <div class="incident-head">
+          <span class="incident-title">{{ event.title }}</span>
+          <span class="incident-at">{{ event.at }}</span>
+        </div>
       </div>
       {% endfor %}
     </div>

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use axum::http::header;
 use axum::response::IntoResponse;
 
-use hora_core::db::Point;
+use hora_core::db::{EventMarker, Point};
 
 // --- Server-rendered latency chart --------------------------------------
 // Colours come from CSS (the `status` class on the <svg>), not inline here.
@@ -19,8 +19,11 @@ pub(crate) fn coord<T: TryInto<i32>>(value: T) -> f64 {
     f64::from(value.try_into().unwrap_or(i32::MAX))
 }
 
-/// Render the last-24h latency series as a self-contained inline SVG sparkline.
-pub(crate) fn sparkline(points: &[Point], status: &str) -> String {
+/// Render the last-24h latency series as a self-contained inline SVG
+/// sparkline. `events` overlays operator-recorded markers ("deploy api
+/// v2.3") as vertical lines, positioned by time within the series' span -
+/// empty for the public view, where deploy titles must not leak.
+pub(crate) fn sparkline(points: &[Point], status: &str, events: &[EventMarker]) -> String {
     if points.is_empty() {
         return format!(
             "<svg viewBox=\"0 0 {CHART_W} {CHART_H}\" class=\"spark {status}\" preserveAspectRatio=\"none\">\
@@ -56,12 +59,39 @@ pub(crate) fn sparkline(points: &[Point], status: &str) -> String {
 
     let last_x = CHART_PAD + step * (coord(count) - 1.0);
     let baseline = CHART_H - CHART_PAD;
+    let markers = event_markers(points, events);
     format!(
         "<svg viewBox=\"0 0 {CHART_W} {CHART_H}\" class=\"spark {status}\" preserveAspectRatio=\"none\">\
          <path class=\"spark-area\" d=\"{line}L{last_x:.1} {baseline:.1} L{CHART_PAD:.1} {baseline:.1} Z\"/>\
          <path class=\"spark-line\" d=\"{line}\"/>\
-         </svg>"
+         {markers}</svg>"
     )
+}
+
+/// Vertical marker lines for the events falling inside the series' time span,
+/// each carrying its title as a hover tooltip. The x position interpolates the
+/// event's time between the first and last sample.
+fn event_markers(points: &[Point], events: &[EventMarker]) -> String {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return String::new();
+    };
+    let span = coord((last.t - first.t).max(1));
+    let plot_w = CHART_W - 2.0 * CHART_PAD;
+    let mut out = String::new();
+    for event in events
+        .iter()
+        .filter(|event| event.created_at >= first.t && event.created_at <= last.t)
+    {
+        let x = CHART_PAD + plot_w * (coord(event.created_at - first.t) / span);
+        let _ = write!(
+            out,
+            "<line class=\"spark-event\" x1=\"{x:.1}\" x2=\"{x:.1}\" y1=\"{CHART_PAD:.1}\" \
+             y2=\"{:.1}\"><title>{}</title></line>",
+            CHART_H - CHART_PAD,
+            xml_escape(&event.title),
+        );
+    }
+    out
 }
 
 // --- SVG status / uptime badges (flat shields style) --------------------
@@ -146,7 +176,7 @@ mod tests {
     use super::*;
     #[test]
     fn sparkline_renders_svg_with_status_class() {
-        assert!(sparkline(&[], "up").contains("no data"));
+        assert!(sparkline(&[], "up", &[]).contains("no data"));
         let points = vec![
             Point {
                 t: 1,
@@ -157,9 +187,43 @@ mod tests {
                 latency_ms: 20,
             },
         ];
-        let svg = sparkline(&points, "degraded");
+        let svg = sparkline(&points, "degraded", &[]);
         assert!(svg.contains("class=\"spark degraded\""));
         assert!(svg.contains("spark-line"));
+    }
+
+    #[test]
+    fn sparkline_overlays_events_inside_the_span_only() {
+        let points = vec![
+            Point {
+                t: 100,
+                latency_ms: 10,
+            },
+            Point {
+                t: 200,
+                latency_ms: 20,
+            },
+        ];
+        let events = vec![
+            EventMarker {
+                id: 1,
+                title: "deploy <v2>".to_owned(),
+                created_at: 150,
+            },
+            EventMarker {
+                id: 2,
+                title: "too old".to_owned(),
+                created_at: 50,
+            },
+        ];
+        let svg = sparkline(&points, "up", &events);
+        // In-span marker drawn at the interpolated midpoint, title escaped.
+        assert!(svg.contains("spark-event"), "{svg}");
+        assert!(svg.contains("<title>deploy &lt;v2&gt;</title>"), "{svg}");
+        let mid = CHART_PAD + (CHART_W - 2.0 * CHART_PAD) / 2.0;
+        assert!(svg.contains(&format!("x1=\"{mid:.1}\"")), "{svg}");
+        // Out-of-span events never render.
+        assert!(!svg.contains("too old"), "{svg}");
     }
 
     #[test]

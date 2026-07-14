@@ -5,8 +5,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
-    send_retrying, topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix,
+    latency_suffix, send_retrying, topology_suffix, vantage_suffix,
 };
 use crate::{AlertSeverity, Event, Notifier};
 
@@ -30,11 +30,16 @@ impl GotifyNotifier {
                 cause,
                 impacted,
                 vantage,
+                event,
             } => {
                 let suffix = topology_suffix(cause, impacted);
                 let vantage = vantage_suffix(vantage);
+                let event = event_suffix(event);
                 let detail = error.map_or_else(String::new, |e| format!("\n{e}"));
-                (format!("DOWN: {monitor}{detail}{suffix}{vantage}"), 8)
+                (
+                    format!("DOWN: {monitor}{detail}{suffix}{vantage}{event}"),
+                    8,
+                )
             }
             Event::Degraded {
                 monitor,

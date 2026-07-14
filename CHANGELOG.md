@@ -5,6 +5,55 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Event markers** (`hora event "deploy api v2.3"` / `POST /api/event`): the
+  answer to the first diagnostic question, *"what changed?"*. A marker is one
+  bounded title in a new `events` table, recorded from the CLI or a CI/deploy
+  hook (`POST /api/event?title=...`, closed without `server.auth_token` - the
+  same gesture as a silence). Three things happen with it:
+  - **Charts**: every latency sparkline overlays the markers in its 24h span
+    as dashed vertical lines (title on hover) - on the authenticated view
+    only, deploy titles are operator info and never reach the public page.
+  - **History**: an "Events · changes" section lists them on `/history`
+    (authenticated view only, same reasoning).
+  - **Correlation**: a monitor confirming down within an hour of the latest
+    marker carries **"recent change: deploy api v2.3, 3m before"** in every
+    notification channel (a new `event` field on down webhook payloads as
+    `change`) and on the incident record itself (new `incidents.event`
+    column), sanitized away from anonymous viewers unless the monitor opts in
+    with `public_error_detail`. Markers age out with the pruner after a year.
+- **Auto-generated post-mortems** (`hora postmortem <id|last>` /
+  `/incident/{id}`): assemble everything the incident already knows - first
+  failure and its reason, what the service actually answered (the stored
+  snapshot), the multi-vantage verdict, the topology cause/impacted, the
+  correlated change, the operator note and a start/end timeline - into
+  **markdown ready to paste into a ticket**, plus a server-rendered page with
+  the same content and the raw markdown in a copyable block. The multi-vantage
+  verdict is now recorded onto the incident (new `incidents.vantage` column)
+  when the peers answer, so the post-mortem replays what the mesh saw, not
+  just what this node saw. Visibility mirrors `/history`: a private monitor's
+  post-mortem answers 404 anonymously; a public one is sanitized (reason
+  category, no snapshot/change/vantage) unless `public_error_detail`.
+- **Certificate expiry over STARTTLS** (`starttls = "smtp" | "imap"` on a tcp
+  monitor): the cert machinery - 12h expiry checks, `alerts.cert_expiry_days`
+  warnings, `cert_pin` change detection - now covers the mail server's
+  certificate on 587/143, the one nobody looks at until it expires. The
+  watcher negotiates the protocol in plaintext (EHLO/STARTTLS for SMTP, the
+  tagged STARTTLS for IMAP; every read bounded), then reads the leaf exactly
+  like an https monitor. The regular tcp probe is unchanged - a connect is
+  still the up/down signal. `check_cert = false` opts back out;
+  `hora probe <id>` reads the certificate through the same negotiation.
+
+### Changed
+
+- The local quality gate moved from `make gate` to **`just gate`** (same
+  recipes, a `justfile` instead of a `Makefile`).
+- Dependencies refreshed across the workspace (ratatui unpinned to 0.30.2,
+  surge-ping 0.9); `tower-http` stays on 0.6 until reqwest moves.
+
 ## [0.8.1] - 2026-08-05
 
 ### Added

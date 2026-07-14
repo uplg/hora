@@ -53,6 +53,7 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         silence,
         announce,
         announce_clear,
+        post_event,
         peer_probe,
         status_badge,
         uptime_badge,
@@ -73,6 +74,7 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         AnnounceClearResponse,
         AlertRequest,
         AlertResponse,
+        EventResponse,
         hora_core::confirm::ProbeRequest,
         hora_core::confirm::ProbeResponse
     ))
@@ -344,6 +346,64 @@ pub(crate) async fn announce_clear(
     Ok(Json(AnnounceClearResponse { cleared }))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct EventQuery {
+    /// The event's title (required, bounded), e.g. `deploy api v2.3`.
+    title: String,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct EventResponse {
+    pub(crate) id: i64,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/event",
+    params(
+        ("title" = String, Query, description = "Event title, e.g. `deploy api v2.3`"),
+        ("token" = Option<String>, Query, description = "Viewer token (or Authorization: Bearer)")
+    ),
+    responses(
+        (status = 200, description = "Event marker recorded", body = EventResponse),
+        (status = 400, description = "Empty title"),
+        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+    )
+)]
+pub(crate) async fn post_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<EventQuery>,
+) -> Result<Json<EventResponse>, AppError> {
+    let config = state.config.borrow().clone();
+    // Recording a change marker is an operator action, same gesture as a
+    // silence: closed without a configured viewer token.
+    if config.server.auth_token.is_none()
+        || !is_authenticated(&headers, query.token.as_deref(), &config)
+    {
+        return Err(AppError::Unauthorized(
+            "recording events requires server.auth_token and a matching token",
+        ));
+    }
+    let title: String = query
+        .title
+        .trim()
+        .chars()
+        .take(MAX_ALERT_TITLE_CHARS)
+        .collect();
+    if title.is_empty() {
+        return Err(AppError::BadRequest("title must not be empty"));
+    }
+    let id = db::insert_event(&state.pool, &title).await?;
+    // The marker should appear on the (authenticated) sparklines now, not
+    // when the summary cache rolls.
+    state.cache.invalidate();
+    tracing::info!(%title, "event marker recorded via API");
+    Ok(Json(EventResponse { id }))
+}
+
 /// Validate a severity label, or answer 400.
 fn severity_or_400(value: &str) -> Result<&'static str, AppError> {
     match value {
@@ -488,54 +548,116 @@ async fn visible_incidents(
 ) -> Result<Vec<db::Incident>, AppError> {
     let mut incidents = db::recent_incidents(pool, limit).await?;
     if !authenticated {
-        let public: Vec<&hora_core::config::Monitor> = config
+        let visible: std::collections::HashSet<&str> = config
             .monitors
             .iter()
             .filter(|monitor| monitor.public)
-            .collect();
-        let visible: std::collections::HashSet<&str> =
-            public.iter().map(|monitor| monitor.id.as_str()).collect();
-        // cause/impacted store display names; allow ids too in case older rows
-        // recorded those.
-        let nameable: std::collections::HashSet<&str> = public
-            .iter()
-            .flat_map(|monitor| [monitor.id.as_str(), monitor.name.as_str()])
-            .collect();
-        // Monitors that opted into publishing their full failure detail.
-        let detailed: std::collections::HashSet<&str> = public
-            .iter()
-            .filter(|monitor| monitor.public_error_detail)
             .map(|monitor| monitor.id.as_str())
             .collect();
         incidents.retain(|incident| visible.contains(incident.monitor_id.as_str()));
-        // Operator notes (`hora annotate`) deliberately survive sanitization:
-        // they are written *for* visitors, unlike the captured failure detail.
         for incident in &mut incidents {
-            if !detailed.contains(incident.monitor_id.as_str()) {
-                incident.error = incident
-                    .error
-                    .as_deref()
-                    .map(|reason| hora_core::probe::public_reason(reason).to_owned());
-                // The captured response (headers, body start) is operator
-                // detail like the full reason: same opt-in to publish it.
-                incident.snapshot = None;
-            }
-            incident.cause = incident
-                .cause
-                .take()
-                .filter(|cause| nameable.contains(cause.as_str()));
-            // `impacted` is a JSON list of names; keep the public ones only.
-            incident.impacted = incident.impacted.as_deref().and_then(|json| {
-                let names: Vec<String> = serde_json::from_str::<Vec<String>>(json)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|name| nameable.contains(name.as_str()))
-                    .collect();
-                (!names.is_empty()).then(|| serde_json::to_string(&names).unwrap_or_default())
-            });
+            sanitize_incident(incident, config);
         }
     }
     Ok(incidents)
+}
+
+/// Collapse one (public) incident's operator detail for an anonymous viewer:
+/// the failure reason falls back to its safe category, the captured response,
+/// the correlated event ("deploy api v2.3") and the multi-vantage verdict
+/// (which names the mesh's nodes) are dropped - unless the monitor opted in
+/// with `public_error_detail` - and topology annotations keep only names that
+/// belong to public monitors. Operator notes (`hora annotate`) deliberately
+/// survive: they are written *for* visitors, unlike the captured detail.
+fn sanitize_incident(incident: &mut db::Incident, config: &Config) {
+    let public: Vec<&hora_core::config::Monitor> = config
+        .monitors
+        .iter()
+        .filter(|monitor| monitor.public)
+        .collect();
+    // cause/impacted store display names; allow ids too in case older rows
+    // recorded those.
+    let nameable: std::collections::HashSet<&str> = public
+        .iter()
+        .flat_map(|monitor| [monitor.id.as_str(), monitor.name.as_str()])
+        .collect();
+    let detailed = public
+        .iter()
+        .any(|monitor| monitor.id == incident.monitor_id && monitor.public_error_detail);
+    if !detailed {
+        incident.error = incident
+            .error
+            .as_deref()
+            .map(|reason| hora_core::probe::public_reason(reason).to_owned());
+        // The captured response (headers, body start) is operator detail
+        // like the full reason: same opt-in to publish it.
+        incident.snapshot = None;
+        incident.event = None;
+        incident.vantage = None;
+    }
+    incident.cause = incident
+        .cause
+        .take()
+        .filter(|cause| nameable.contains(cause.as_str()));
+    // `impacted` is a JSON list of names; keep the public ones only.
+    incident.impacted = incident.impacted.as_deref().and_then(|json| {
+        let names: Vec<String> = serde_json::from_str::<Vec<String>>(json)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| nameable.contains(name.as_str()))
+            .collect();
+        (!names.is_empty()).then(|| serde_json::to_string(&names).unwrap_or_default())
+    });
+}
+
+/// The auto-generated post-mortem page (`/incident/{id}`): everything the
+/// incident already knows, assembled server-side, with the raw markdown ready
+/// to copy into a ticket. Visibility mirrors the history page: a private
+/// monitor's incident (or one whose monitor left the config) answers 404 to
+/// anonymous viewers, and a public one is sanitized unless the monitor opted
+/// into `public_error_detail`.
+pub(crate) async fn incident_page(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<Html<String>, AppError> {
+    let config = state.config.borrow().clone();
+    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    let mut incident = db::incident_by_id(&state.pool, id)
+        .await?
+        .ok_or(AppError::NotFound("unknown incident"))?;
+
+    let monitor = config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == incident.monitor_id);
+    // Not in the config anymore, or private: only the operator sees it.
+    if !authenticated && !monitor.is_some_and(|monitor| monitor.public) {
+        return Err(AppError::NotFound("unknown incident"));
+    }
+    if !authenticated {
+        sanitize_incident(&mut incident, &config);
+    }
+
+    let monitor_name = monitor
+        .map_or(incident.monitor_id.as_str(), |monitor| {
+            monitor.name.as_str()
+        })
+        .to_owned();
+    let markdown = hora_core::postmortem::render(&incident, &monitor_name);
+    let html = crate::history::IncidentTemplate {
+        title: config.page.title.clone(),
+        monitor: monitor_name,
+        row: crate::history::incident_rows(
+            std::slice::from_ref(&incident),
+            &monitor_names(&config),
+        )
+        .remove(0),
+        markdown,
+    }
+    .render()?;
+    Ok(Html(html))
 }
 
 /// Recent pushed alerts restricted to what the caller may see, mirroring
@@ -592,6 +714,12 @@ pub(crate) async fn history_page(
     let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
     let incidents = visible_incidents(&state.pool, &config, authenticated, 100).await?;
     let pushed_alerts = visible_pushed_alerts(&state.pool, &config, authenticated, 100).await?;
+    // Event markers are operator info (deploy titles): authenticated only.
+    let events = if authenticated {
+        db::recent_events(&state.pool, 100).await?
+    } else {
+        Vec::new()
+    };
     // The heatmap section lists what this viewer may see; the images load
     // lazily from the API. Push monitors have no latency series to show.
     let heatmaps = config
@@ -614,6 +742,7 @@ pub(crate) async fn history_page(
         title: config.page.title.clone(),
         incidents: history::incident_rows(&incidents, &names),
         pushed_alerts: history::alert_rows(&pushed_alerts, &names),
+        events: history::event_rows(&events),
         heatmaps,
         token_query,
     }

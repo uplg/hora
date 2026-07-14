@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use askama::Template;
 use chrono::DateTime;
-use hora_core::db::{Incident, PushedAlert};
+use hora_core::db::{EventMarker, Incident, PushedAlert};
 
 /// The `/history` page; rows are pre-formatted [`IncidentRow`]s, Askama does
 /// the escaping.
@@ -20,6 +20,9 @@ pub(crate) struct HistoryTemplate {
     /// Externally-pushed alerts (`POST /api/monitors/{id}/alert`), shown in
     /// their own section below the incidents.
     pub(crate) pushed_alerts: Vec<AlertRow>,
+    /// Operator-recorded event markers (`hora event`), shown in their own
+    /// section - authenticated viewers only (deploy titles are operator info).
+    pub(crate) events: Vec<EventRow>,
     /// Monitors whose latency heatmap is offered below the incidents
     /// (collapsed; each `<img>` loads its SVG lazily from the API).
     pub(crate) heatmaps: Vec<HeatmapRef>,
@@ -56,6 +59,7 @@ pub(crate) fn url_encode(value: &str) -> String {
 
 /// One incident, formatted for display.
 pub(crate) struct IncidentRow {
+    id: i64,
     monitor: String,
     resolved: bool,
     started: String,
@@ -66,6 +70,42 @@ pub(crate) struct IncidentRow {
     impacted: Option<String>,
     note: Option<String>,
     snapshot: Option<String>,
+    /// Correlated event marker ("deploy api v2.3, 3m before"), when one was
+    /// recorded shortly before the down.
+    event: Option<String>,
+    /// Multi-vantage verdict recorded once the peers answered.
+    vantage: Option<String>,
+}
+
+/// One operator-recorded event marker, formatted for display.
+pub(crate) struct EventRow {
+    title: String,
+    at: String,
+}
+
+/// Build the event rows: newest first, timestamps formatted.
+pub(crate) fn event_rows(events: &[EventMarker]) -> Vec<EventRow> {
+    events
+        .iter()
+        .map(|event| EventRow {
+            title: event.title.clone(),
+            at: format_utc(event.created_at),
+        })
+        .collect()
+}
+
+/// The auto-generated post-mortem page (`/incident/{id}`): the incident card
+/// plus the raw markdown ready to paste into a ticket.
+#[derive(Template)]
+#[template(path = "incident.html")]
+pub(crate) struct IncidentTemplate {
+    /// The status page title, linked back to from the footer.
+    pub(crate) title: String,
+    /// The monitor's display name.
+    pub(crate) monitor: String,
+    pub(crate) row: IncidentRow,
+    /// The markdown post-mortem, shown in a copyable block.
+    pub(crate) markdown: String,
 }
 
 /// One externally-pushed alert, formatted for display.
@@ -108,6 +148,7 @@ pub(crate) fn incident_rows(
     incidents
         .iter()
         .map(|incident| IncidentRow {
+            id: incident.id,
             monitor: monitor_names
                 .get(&incident.monitor_id)
                 .unwrap_or(&incident.monitor_id)
@@ -126,6 +167,8 @@ pub(crate) fn incident_rows(
                 .map(|impacted| impacted.join(", ")),
             note: incident.note.clone(),
             snapshot: incident.snapshot.clone(),
+            event: incident.event.clone(),
+            vantage: incident.vantage.clone(),
         })
         .collect()
 }
@@ -292,6 +335,8 @@ mod tests {
             error: Some("boom".to_owned()),
             note: Some("fiber cut".to_owned()),
             snapshot: Some("HTTP/2 503\n\nmaintenance".to_owned()),
+            event: Some("deploy api v2.3, 3m before".to_owned()),
+            vantage: Some("confirmed down from 2/2 vantage points".to_owned()),
             created_at: 1000,
         };
         let names = HashMap::from([("db".to_owned(), "Database".to_owned())]);
@@ -302,6 +347,11 @@ mod tests {
         assert_eq!(rows[0].duration.as_deref(), Some("1m 30s"));
         assert_eq!(rows[0].impacted.as_deref(), Some("API, Web"));
         assert_eq!(rows[0].note.as_deref(), Some("fiber cut"));
+        assert_eq!(rows[0].event.as_deref(), Some("deploy api v2.3, 3m before"));
+        assert_eq!(
+            rows[0].vantage.as_deref(),
+            Some("confirmed down from 2/2 vantage points")
+        );
 
         // Unknown id (monitor removed from config): fall back to the id.
         let orphan = Incident {
@@ -315,6 +365,8 @@ mod tests {
             error: None,
             note: None,
             snapshot: None,
+            event: None,
+            vantage: None,
             created_at: 1000,
         };
         let rows = incident_rows(&[orphan], &HashMap::new());

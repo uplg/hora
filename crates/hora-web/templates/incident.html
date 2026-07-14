@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }} · Post-mortem #{{ row.id }}</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="preload" href="/assets/CalSans-SemiBold.woff2" as="font" type="font/woff2" crossorigin />
+  <style>
+    @font-face {
+      font-family: "Cal Sans";
+      src: url("/assets/CalSans-SemiBold.woff2") format("woff2");
+      font-weight: 600;
+      font-display: swap;
+    }
+
+    :root {
+      --bg: #0b0e14;
+      --card: #11161f;
+      --border: #1d2430;
+      --text: #e6e8eb;
+      --muted: #8b93a1;
+      --up: #10b981;
+      --down: #ef4444;
+      --degraded: #f59e0b;
+      --info: #3b82f6;
+      --brand: "Cal Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap {
+      width: 100%;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 20px 56px;
+    }
+
+    .top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px 16px;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      font-family: var(--brand);
+      font-size: 24px;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: 0.01em;
+    }
+
+    .nav {
+      margin-left: auto;
+      display: flex;
+      gap: 8px;
+    }
+
+    .nav-pill {
+      color: var(--muted);
+      font-size: 13px;
+      text-decoration: none;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 8px 14px;
+      background: var(--card);
+    }
+
+    .nav-pill:hover {
+      color: var(--text);
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: 8px;
+      padding: 14px 16px;
+      background: var(--card);
+    }
+
+    .card.ongoing {
+      border-left-color: var(--down);
+    }
+
+    .card.resolved {
+      border-left-color: var(--up);
+    }
+
+    .meta {
+      margin: 0;
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 4px 14px;
+    }
+
+    .meta dt {
+      color: var(--muted);
+    }
+
+    .meta dd {
+      margin: 0;
+    }
+
+    .meta dd.cause {
+      color: var(--degraded);
+    }
+
+    .meta dd.impacted {
+      color: var(--down);
+    }
+
+    .meta dd.event {
+      color: var(--info);
+    }
+
+    .section-title {
+      font-family: var(--brand);
+      font-size: 18px;
+      font-weight: 600;
+      margin: 28px 0 10px;
+      letter-spacing: 0.01em;
+    }
+
+    pre {
+      margin: 0;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--card);
+      color: var(--text);
+      font-size: 12.5px;
+      line-height: 1.5;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    pre.snapshot {
+      color: var(--muted);
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      margin: 6px 0 0;
+    }
+
+    footer {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      margin-top: 28px;
+    }
+
+    footer a {
+      color: var(--muted);
+      text-decoration: none;
+      border-bottom: 1px solid var(--border);
+    }
+
+    footer a:hover {
+      color: var(--text);
+    }
+  </style>
+</head>
+
+<body>
+  <main class="wrap">
+    <div class="top">
+      <h1>Post-mortem #{{ row.id }} · {{ monitor }}</h1>
+      <nav class="nav">
+        <a class="nav-pill" href="/history">History</a>
+        <a class="nav-pill" href="/">Status page</a>
+      </nav>
+    </div>
+
+    <div class="card {% if row.resolved %}resolved{% else %}ongoing{% endif %}">
+      <dl class="meta">
+        <dt>Status</dt>
+        <dd>{% if row.resolved %}Resolved{% else %}Ongoing{% endif %}</dd>
+        <dt>Started</dt>
+        <dd>{{ row.started }}</dd>
+        {% if let Some(ended) = row.ended %}<dt>Ended</dt>
+        <dd>{{ ended }}</dd>{% endif %}
+        {% if let Some(duration) = row.duration %}<dt>Duration</dt>
+        <dd>{{ duration }}</dd>{% endif %}
+        {% if let Some(error) = row.error %}<dt>First failure</dt>
+        <dd>{{ error }}</dd>{% endif %}
+        {% if let Some(vantage) = row.vantage %}<dt>Multi-vantage</dt>
+        <dd>{{ vantage }}</dd>{% endif %}
+        {% if let Some(cause) = row.cause %}<dt>Probable cause</dt>
+        <dd class="cause">{{ cause }}</dd>{% endif %}
+        {% if let Some(impacted) = row.impacted %}<dt>Impacted</dt>
+        <dd class="impacted">{{ impacted }}</dd>{% endif %}
+        {% if let Some(event) = row.event %}<dt>Recent change</dt>
+        <dd class="event">{{ event }}</dd>{% endif %}
+        {% if let Some(note) = row.note %}<dt>Operator note</dt>
+        <dd>{{ note }}</dd>{% endif %}
+      </dl>
+    </div>
+
+    {% if let Some(snapshot) = row.snapshot %}
+    <h2 class="section-title">What the service answered</h2>
+    <pre class="snapshot">{{ snapshot }}</pre>
+    {% endif %}
+
+    <h2 class="section-title">Markdown</h2>
+    <pre>{{ markdown }}</pre>
+    <p class="hint">Select and copy - ready to paste into a ticket or a wiki page.</p>
+
+    <footer>
+      Powered by <a href="https://github.com/uplg/hora" rel="noopener">Hora</a>
+    </footer>
+  </main>
+</body>
+
+</html>

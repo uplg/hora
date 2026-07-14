@@ -56,6 +56,13 @@ pub(crate) fn vantage_suffix(vantage: Option<&str>) -> String {
     vantage.map_or_else(String::new, |verdict| format!("\n{verdict}"))
 }
 
+/// Event-correlation annotation for a down alert
+/// (`"\nrecent change: deploy api v2.3, 3m before"`), empty when no event was
+/// recorded shortly before the down - one wording for every channel.
+pub(crate) fn event_suffix(event: Option<&str>) -> String {
+    event.map_or_else(String::new, |event| format!("\nrecent change: {event}"))
+}
+
 /// Human phrasing for a budget-burn event, shared so every channel words the
 /// rate and the exhaustion estimate the same way:
 /// `"burning error budget at 14.4x (1h) - exhausted in ~23h at this rate"`.

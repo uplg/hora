@@ -354,6 +354,7 @@ pub(crate) fn spawn_watch(
                             cause: None,
                             impacted: &[],
                             vantage: None,
+                            event: None,
                         },
                     )
                     .await;

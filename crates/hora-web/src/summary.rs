@@ -248,6 +248,13 @@ pub(crate) async fn build_summary(
     );
     let certs = or_empty(db::cert_all(pool).await, "certificates");
     let recent = recent_checks_map(pool, &visible_monitors, ctx.threshold.max(1)).await;
+    // Event markers overlay the sparklines - operator info (deploy titles),
+    // so only the authenticated view fetches them; the public one stays bare.
+    let events = if full {
+        or_empty(db::events_since(pool, ctx.since_24h).await, "events")
+    } else {
+        Vec::new()
+    };
 
     let data = MonitorData {
         recent: &recent,
@@ -256,6 +263,7 @@ pub(crate) async fn build_summary(
         percentiles: &percentiles,
         sparklines: &sparklines,
         certs: &certs,
+        events: &events,
     };
 
     let monitors: Vec<MonitorView> = visible_monitors
@@ -526,6 +534,8 @@ pub(crate) struct MonitorData<'a> {
     percentiles: &'a HashMap<String, Percentiles>,
     sparklines: &'a HashMap<String, Vec<Point>>,
     certs: &'a HashMap<String, i64>,
+    /// Event markers overlaying every sparkline (empty in the public view).
+    events: &'a [db::EventMarker],
 }
 
 /// Build a monitor's view from the pre-fetched batch maps. Pure: a monitor with
@@ -562,7 +572,7 @@ pub(crate) fn build_monitor_view(
         .get(&monitor.id)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let chart_svg = sparkline(spark_points, status);
+    let chart_svg = sparkline(spark_points, status, data.events);
     let pct = data.percentiles.get(&monitor.id).copied();
     let slo_state = slo_state(monitor.slo_latency_ms, pct.map(|p| p.p95));
 

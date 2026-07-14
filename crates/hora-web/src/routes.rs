@@ -16,8 +16,8 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
     announce, announce_clear, favicon, font, group_page, healthz, heatmap_svg, history_atom,
-    history_page, latency_json, metrics_prometheus, openapi, page, peer_probe, post_alert, push,
-    report_page, silence, status_badge, summary_json, uptime_badge,
+    history_page, incident_page, latency_json, metrics_prometheus, openapi, page, peer_probe,
+    post_alert, post_event, push, report_page, silence, status_badge, summary_json, uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/{id}", post(push))
         .route("/api/silence", post(silence))
         .route("/api/announce", post(announce).delete(announce_clear))
+        .route("/api/event", post(post_event))
         .route("/api/peer/probe", post(peer_probe));
 
     // Parameters are clamped to >= 1, so `finish` always succeeds; if it ever
@@ -73,6 +74,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics_prometheus))
         .route("/history", get(history_page))
         .route("/history.atom", get(history_atom))
+        .route("/incident/{id}", get(incident_page))
         .route("/status/{group}", get(group_page))
         .route("/report/{month}", get(report_page))
         .merge(api)
@@ -552,6 +554,130 @@ mod tests {
                 && full.contains("intra detail"),
             "{full}"
         );
+    }
+
+    #[tokio::test]
+    async fn event_requires_token_records_and_validates() {
+        let (app, pool) = test_app_with_pool().await;
+        // Recording a change marker is an operator action: closed anonymously.
+        let res = app
+            .clone()
+            .oneshot(push("/api/event?title=deploy+api+v2.3"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let res = app
+            .clone()
+            .oneshot(push(
+                "/api/event?title=deploy+api+v2.3&token=0123456789abcdef",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let events = hora_core::db::recent_events(&pool, 10).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "deploy api v2.3");
+
+        let res = app
+            .oneshot(push("/api/event?title=++&token=0123456789abcdef"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn events_reach_authenticated_viewers_only() {
+        let (app, pool) = test_app_with_pool().await;
+        hora_core::db::insert_event(&pool, "deploy api v2.3")
+            .await
+            .unwrap();
+
+        // Deploy titles are operator info: hidden from the anonymous history
+        // page and from the public sparklines.
+        let anon = body_text(app.clone().oneshot(get("/history")).await.unwrap()).await;
+        assert!(!anon.contains("deploy api v2.3"), "{anon}");
+        let page = body_text(app.clone().oneshot(get("/")).await.unwrap()).await;
+        assert!(!page.contains("deploy api v2.3"), "{page}");
+
+        let full = body_text(
+            app.oneshot(get("/history?token=0123456789abcdef"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(full.contains("deploy api v2.3"), "{full}");
+    }
+
+    #[tokio::test]
+    async fn incident_page_sanitizes_for_anonymous_and_serves_markdown() {
+        let (app, pool) = test_app_with_pool().await;
+        let id = hora_core::db::insert_incident_start(
+            &pool,
+            "web",
+            Some("HTTP 503: secret stack trace"),
+            None,
+            &[],
+            Some("HTTP/2 503\n\nsecret body"),
+            Some("deploy api v2.3, 3m before"),
+        )
+        .await
+        .unwrap();
+        hora_core::db::update_incident_vantage(&pool, id, "seen UP by Hora B")
+            .await
+            .unwrap();
+
+        // Anonymous ("web" is public, no public_error_detail): the reason
+        // collapses to its category; snapshot, change and vantage stay private.
+        let anon = body_text(
+            app.clone()
+                .oneshot(get(&format!("/incident/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(anon.contains("HTTP 503"), "{anon}");
+        for hidden in ["secret stack trace", "secret body", "deploy api", "Hora B"] {
+            assert!(!anon.contains(hidden), "{hidden} leaked:\n{anon}");
+        }
+
+        // Authenticated: full detail plus the copyable markdown post-mortem.
+        let full = body_text(
+            app.clone()
+                .oneshot(get(&format!("/incident/{id}?token=0123456789abcdef")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(full.contains("secret stack trace") && full.contains("secret body"));
+        assert!(full.contains("deploy api v2.3, 3m before"));
+        assert!(full.contains("seen UP by Hora B"));
+        assert!(full.contains("# Post-mortem"), "{full}");
+
+        let res = app.oneshot(get("/incident/99999")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn private_monitor_incident_page_is_hidden_from_anonymous() {
+        let (app, pool) = test_app_with_pool().await;
+        let id = hora_core::db::insert_incident_start(&pool, "intra", None, None, &[], None, None)
+            .await
+            .unwrap();
+
+        // A private monitor's post-mortem answers like a missing page.
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/incident/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let res = app
+            .oneshot(get(&format!("/incident/{id}?token=0123456789abcdef")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[tokio::test]

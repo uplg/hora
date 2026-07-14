@@ -5,8 +5,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape, latency_suffix,
-    post_json, topology_suffix, vantage_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, escape, event_suffix,
+    latency_suffix, post_json, topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -35,12 +35,14 @@ impl TelegramNotifier {
                 cause,
                 impacted,
                 vantage,
+                event,
             } => format!(
-                "\u{1F534} <b>{}</b> is DOWN\n<code>{}</code>{}{}",
+                "\u{1F534} <b>{}</b> is DOWN\n<code>{}</code>{}{}{}",
                 escape(monitor),
                 escape(error.unwrap_or("no response")),
                 escape(&topology_suffix(cause, impacted)),
                 escape(&vantage_suffix(vantage)),
+                escape(&event_suffix(event)),
             ),
             Event::Degraded {
                 monitor,
@@ -162,6 +164,7 @@ mod tests {
             cause: None,
             impacted: &[],
             vantage: None,
+            event: None,
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
 
@@ -171,6 +174,7 @@ mod tests {
             cause: Some("DB"),
             impacted: &[],
             vantage: None,
+            event: None,
         });
         assert!(symptom.contains("caused by DB"));
 
@@ -180,6 +184,7 @@ mod tests {
             cause: None,
             impacted: &["API", "Web"],
             vantage: None,
+            event: None,
         });
         assert!(root.contains("impacts 2") && root.contains("API"));
 

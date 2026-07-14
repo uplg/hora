@@ -124,6 +124,9 @@ pub enum Event<'a> {
         /// Multi-vantage verdict, when peers were asked ("confirmed down from
         /// 3/3 vantage points" / "seen UP by hora-b ...").
         vantage: Option<&'a str>,
+        /// The correlated event marker, when one was recorded shortly before
+        /// the down ("deploy api v2.3, 3m before") - the "what changed?" line.
+        event: Option<&'a str>,
     },
     /// A monitor is up but degraded: slower than its `degraded_over_ms` budget.
     Degraded {

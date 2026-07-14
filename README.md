@@ -85,6 +85,16 @@ Full guides for everything below live in the
 - **Incident history** as HTML and an **Atom feed**, with **failure snapshots**
   (what the service actually answered) and **operator annotations**
   (`hora annotate 42 "fiber cut"`).
+- **Event markers** - `hora event "deploy api v2.3"` (or `POST /api/event` from
+  the CI hook) answers the first diagnostic question, *"what changed?"*: a
+  dashed marker on the latency charts, a line on `/history`, and a down
+  confirming within the hour is annotated **"recent change: deploy api v2.3,
+  3m before"** in the alert and the incident record.
+- **Auto-generated post-mortems** - `hora postmortem 42` (or `/incident/42`)
+  assembles everything the incident already knows - first failure, what the
+  service answered, multi-vantage verdict, cause/impacted, correlated change,
+  operator note, timeline - into **markdown ready to paste into a ticket**.
+  The chore nobody writes, written by the tool that saw everything.
 - **Latency heatmaps** - a smokeping-style hours-by-days SVG per monitor on
   `/history`, colour relative to the monitor's own median: "slow every Monday
   at 9am" at a glance.
@@ -173,6 +183,9 @@ hora digest                            # print the weekly digest (dry run of [di
 hora report 2026-05                    # print the monthly SLA report (default: last month)
 hora incidents                         # list recent incidents with their ids
 hora annotate last "fiber cut"         # attach a note to an incident (shown on /history)
+hora event "deploy api v2.3"           # record an event marker ("what changed?"), correlated into incidents
+hora event list                        # list the recent event markers
+hora postmortem last                   # print an incident's auto-generated markdown post-mortem
 hora backup /mnt/nas/hora-backup.db    # consistent snapshot of the database (VACUUM INTO)
 hora import kuma backup.json > out.toml  # convert an Uptime Kuma backup to Hora monitors
 hora --version
@@ -266,6 +279,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /history` | Incident history page (HTML). |
 | `GET /history.atom` | Incident history as an Atom feed. |
 | `GET /status/{group}` | Status page restricted to one display group. A `server.group_tokens` entry reveals that group's full view (and nothing else). |
+| `GET /incident/{id}` | Auto-generated post-mortem page for one incident, with the raw markdown ready to copy. Anonymous viewers get the sanitized view (private monitors answer 404). |
 | `GET /report/{YYYY-MM}` | Printable monthly SLA report: uptime per monitor/group, incidents, MTTR, error budget. `?group=` scopes it (group token accepted). |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
@@ -273,6 +287,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `POST /api/monitors/{id}/alert` | Push an ad-hoc alert (a producer's own failure) to a monitor's channels: JSON `{severity, title, message?, dedup_key?, tags?}`. Fans out immediately and records a `/history` timeline line, but never changes the monitor's status. `severity` maps to backend priority (ntfy/Pushover/Gotify); `dedup_key` coalesces repeats within `alerts.push_alert_window_secs`. Auth with the monitor's `push_token` (`X-Push-Token`) or `server.auth_token`. Answers 202. |
 | `POST /api/silence?monitors=api,web&duration=10m` | Mute alerts ad hoc (deploy hook): `monitors` is a comma-separated id list or `all`, `duration` like `10m`/`1h30m` (max 7d), optional `reason`. **Requires `server.auth_token`** (as `Authorization: Bearer` or `?token=`); without one configured the endpoint is closed. |
 | `POST /api/announce?title=...&severity=warning&until=4h` | Pin a public banner on the status page (`DELETE` clears them all). **Requires `server.auth_token`.** |
+| `POST /api/event?title=deploy+api+v2.3` | Record an event marker from a CI/deploy hook ("what changed?"): overlaid on the latency charts, listed on `/history` (authenticated view), correlated into incidents confirming within the hour. **Requires `server.auth_token`.** |
 | `POST /api/peer/probe` | Multi-vantage confirmation between Hora nodes: probe a target *present in this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token` (`X-Push-Token`). Never probes arbitrary targets. |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge for a monitor. |

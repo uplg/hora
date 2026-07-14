@@ -52,6 +52,9 @@ pub struct DownAlert {
     pub notify: Option<Vec<String>>,
     /// Multi-vantage verdict, when peers were asked before this alert.
     pub vantage: Option<String>,
+    /// Correlated event marker, when one was recorded shortly before the down
+    /// ("deploy api v2.3, 3m before").
+    pub event: Option<String>,
 }
 
 /// How long a sent (or folded) down alert keeps absorbing late symptom
@@ -263,6 +266,7 @@ async fn send_down(notifier: &Notifiers, alert: &DownAlert) {
                 cause: alert.cause_name.as_deref(),
                 impacted: &impacted,
                 vantage: alert.vantage.as_deref(),
+                event: alert.event.as_deref(),
             },
             alert.notify.as_deref(),
         )
@@ -283,6 +287,7 @@ mod tests {
             impacted: Vec::new(),
             notify: None,
             vantage: None,
+            event: None,
         }
     }
 

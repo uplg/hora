@@ -765,9 +765,17 @@ pub struct Monitor {
     /// Default 1800 (30 minutes).
     #[serde(default)]
     pub grace_secs: Option<u64>,
-    /// Override TLS certificate checking. Defaults to on for `https://` HTTP monitors.
+    /// Override TLS certificate checking. Defaults to on for `https://` HTTP
+    /// monitors, and for tcp monitors with [`starttls`](Self::starttls) set.
     #[serde(default)]
     pub check_cert: Option<bool>,
+    /// TCP monitor: negotiate `STARTTLS` (`"smtp"` or `"imap"`) before the
+    /// certificate check, so the expiry/pin machinery covers mail servers on
+    /// 587/143 - the certificate nobody ever looks at until it expires. The
+    /// regular tcp probe is unchanged (a connect is still the up/down signal);
+    /// only the certificate watcher upgrades the connection.
+    #[serde(default)]
+    pub starttls: Option<String>,
     /// Override how long this monitor's checks are kept before pruning.
     #[serde(default)]
     pub retention_days: Option<u16>,
@@ -862,6 +870,7 @@ impl std::fmt::Debug for Monitor {
             .field("schedule", &self.schedule)
             .field("grace_secs", &self.grace_secs)
             .field("check_cert", &self.check_cert)
+            .field("starttls", &self.starttls)
             .field("retention_days", &self.retention_days)
             .field("group", &self.group)
             .field("depends_on", &self.depends_on)
@@ -914,11 +923,15 @@ impl Monitor {
         self.dual_stack.unwrap_or(false)
     }
 
-    /// Whether this monitor should have its TLS certificate expiry checked.
+    /// Whether this monitor should have its TLS certificate expiry checked:
+    /// on by default for `https://` HTTP monitors and for tcp monitors with
+    /// `starttls` set, overridable either way with `check_cert`.
     #[must_use]
     pub fn checks_cert(&self) -> bool {
-        self.check_cert
-            .unwrap_or_else(|| self.kind == Kind::Http && self.target.starts_with("https://"))
+        self.check_cert.unwrap_or_else(|| {
+            (self.kind == Kind::Http && self.target.starts_with("https://"))
+                || (self.kind == Kind::Tcp && self.starttls.is_some())
+        })
     }
 
     /// Effective storage retention in days, falling back to the global default.
@@ -993,6 +1006,7 @@ impl Monitor {
             schedule: None,
             grace_secs: None,
             check_cert: None,
+            starttls: None,
             retention_days: None,
             group: None,
             depends_on: None,
@@ -1750,6 +1764,7 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
         "monitor {}: dns_record/dns_expected/dns_resolver require a dns monitor",
         monitor.id
     );
+    validate_starttls(monitor)?;
     // A malformed pin (wrong length, non-hex) can never match the observed
     // fingerprint, which silently disables pinning after one spurious alert.
     validate_pins(monitor)?;
@@ -1786,6 +1801,26 @@ fn validate_body_assertions(monitor: &Monitor) -> anyhow::Result<()> {
             monitor.id
         );
     }
+    Ok(())
+}
+
+/// STARTTLS is the certificate watcher's business: it only makes sense on a
+/// tcp monitor (the protocols it speaks live on host:port targets), and only
+/// for the protocols the negotiation implements.
+fn validate_starttls(monitor: &Monitor) -> anyhow::Result<()> {
+    let Some(mode) = &monitor.starttls else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        monitor.kind == Kind::Tcp,
+        "monitor {}: starttls requires a tcp monitor",
+        monitor.id
+    );
+    anyhow::ensure!(
+        matches!(mode.as_str(), "smtp" | "imap"),
+        "monitor {}: starttls must be \"smtp\" or \"imap\"",
+        monitor.id
+    );
     Ok(())
 }
 
@@ -3309,6 +3344,49 @@ mod tests {
         let config = super::parse(&cfg(&"A".repeat(64))).expect("valid pin");
         let lower = "a".repeat(64);
         assert_eq!(config.monitors[0].cert_pin.as_deref(), Some(lower.as_str()));
+    }
+
+    #[test]
+    fn starttls_is_tcp_only_and_protocol_checked() {
+        let cfg = |kind_and_target: &str, mode: &str| {
+            format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "mail"
+                name = "Mail"
+                {kind_and_target}
+                interval_secs = 60
+                starttls = "{mode}"
+            "#
+            )
+        };
+
+        // The happy path: a tcp monitor speaking one of the known protocols.
+        let config = super::parse(&cfg(
+            "kind = \"tcp\"\ntarget = \"mail.example.org:587\"",
+            "smtp",
+        ))
+        .expect("valid starttls monitor");
+        assert!(config.monitors[0].checks_cert());
+        // check_cert = false still turns the watcher off.
+        let off = super::parse(&cfg(
+            "kind = \"tcp\"\ntarget = \"mail.example.org:143\"\ncheck_cert = false",
+            "imap",
+        ))
+        .expect("valid");
+        assert!(!off.monitors[0].checks_cert());
+
+        // Not tcp, or an unknown protocol: rejected at load.
+        let err = super::parse(&cfg("target = \"https://example.com\"", "smtp"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires a tcp monitor"), "{err}");
+        let err = super::parse(&cfg("kind = \"tcp\"\ntarget = \"x:21\"", "ftp"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"smtp\" or \"imap\""), "{err}");
     }
 
     #[test]

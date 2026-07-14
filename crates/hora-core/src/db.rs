@@ -723,6 +723,12 @@ pub struct Incident {
     /// What the service actually answered: the failing response's status line,
     /// headers and body start, captured (bounded) when the down was confirmed.
     pub snapshot: Option<String>,
+    /// The correlated event phrase ("deploy api v2.3, 3m before"), resolved
+    /// when the down was confirmed - the "what changed?" answer.
+    pub event: Option<String>,
+    /// The multi-vantage verdict recorded once the peers answered; `None` when
+    /// no peers were asked.
+    pub vantage: Option<String>,
     pub created_at: i64,
 }
 
@@ -738,13 +744,14 @@ pub async fn insert_incident_start(
     cause: Option<&str>,
     impacted: &[String],
     snapshot: Option<&str>,
+    event: Option<&str>,
 ) -> sqlx::Result<i64> {
     let now = chrono::Utc::now().timestamp();
     let impacted_json = serde_json::to_string(impacted).unwrap_or_else(|_| "[]".to_owned());
     let result = sqlx::query(
         "INSERT INTO incidents \
-            (monitor_id, started_at, error, cause, impacted, snapshot, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (monitor_id, started_at, error, cause, impacted, snapshot, event, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(monitor_id)
     .bind(now)
@@ -752,10 +759,31 @@ pub async fn insert_incident_start(
     .bind(cause)
     .bind(&impacted_json)
     .bind(snapshot)
+    .bind(event)
     .bind(now)
     .execute(pool)
     .await?;
     Ok(result.last_insert_rowid())
+}
+
+/// Record the multi-vantage verdict on an incident, once the peers answered
+/// (the incident row is written *before* the peers are consulted, so the
+/// history never waits on the network).
+///
+/// # Errors
+///
+/// Returns an error if the update fails.
+pub async fn update_incident_vantage(
+    pool: &SqlitePool,
+    incident_id: i64,
+    vantage: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE incidents SET vantage = ? WHERE id = ?")
+        .bind(vantage)
+        .bind(incident_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Record the end of an incident (monitor recovering).
@@ -800,11 +828,27 @@ pub async fn recent_incidents(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec
     // "last" - so `hora annotate last` annotates the incident listed first.
     sqlx::query_as::<_, Incident>(
         "SELECT id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, note, \
-            snapshot, created_at \
+            snapshot, event, vantage, created_at \
          FROM incidents ORDER BY started_at DESC, id DESC LIMIT ?",
     )
     .bind(limit)
     .fetch_all(pool)
+    .await
+}
+
+/// Fetch one incident by id, for the post-mortem page and CLI.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn incident_by_id(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<Incident>> {
+    sqlx::query_as::<_, Incident>(
+        "SELECT id, monitor_id, started_at, ended_at, duration_s, cause, impacted, error, note, \
+            snapshot, event, vantage, created_at \
+         FROM incidents WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
     .await
 }
 
@@ -942,6 +986,90 @@ pub async fn clear_announcements(pool: &SqlitePool, now: i64) -> sqlx::Result<u6
 /// Drop announcements whose expiry passed before `cutoff`.
 async fn prune_announcements(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM announcements WHERE until IS NOT NULL AND until < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// An operator-recorded event marker ("deploy api v2.3"): the "what changed?"
+/// answer, drawn on the latency charts and correlated into incidents.
+#[derive(Debug, sqlx::FromRow)]
+pub struct EventMarker {
+    pub id: i64,
+    pub title: String,
+    pub created_at: i64,
+}
+
+/// Record an event marker.
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn insert_event(pool: &SqlitePool, title: &str) -> sqlx::Result<i64> {
+    let result = sqlx::query("INSERT INTO events (title, created_at) VALUES (?, ?)")
+        .bind(title)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(pool)
+        .await?;
+    Ok(result.last_insert_rowid())
+}
+
+/// Recent event markers, newest first (`hora event list`, /history).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn recent_events(pool: &SqlitePool, limit: i64) -> sqlx::Result<Vec<EventMarker>> {
+    sqlx::query_as::<_, EventMarker>(
+        "SELECT id, title, created_at FROM events ORDER BY created_at DESC, id DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Event markers since `since`, oldest first - the sparkline overlay.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn events_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<EventMarker>> {
+    sqlx::query_as::<_, EventMarker>(
+        "SELECT id, title, created_at FROM events WHERE created_at >= ? \
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+}
+
+/// The most recent event within `window_secs` before `now`, if any - the
+/// incident correlation ("down 3m after deploy api v2.3").
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn latest_event_before(
+    pool: &SqlitePool,
+    now: i64,
+    window_secs: i64,
+) -> sqlx::Result<Option<EventMarker>> {
+    sqlx::query_as::<_, EventMarker>(
+        "SELECT id, title, created_at FROM events \
+         WHERE created_at <= ? AND created_at >= ? \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(now)
+    .bind(now - window_secs.max(0))
+    .fetch_optional(pool)
+    .await
+}
+
+/// Drop event markers older than `cutoff` (they age out with the closed
+/// incidents they may have been correlated into).
+async fn prune_events(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM events WHERE created_at < ?")
         .bind(cutoff)
         .execute(pool)
         .await?;
@@ -1332,6 +1460,10 @@ async fn roll_up_history(pool: &SqlitePool, now: i64) {
     // Pushed alerts age out with the closed incidents (a year of timeline).
     if let Err(err) = prune_pushed_alerts(pool, yearly_cutoff).await {
         tracing::warn!("pushed-alert prune failed: {err}");
+    }
+    // Event markers too: a year covers any incident they could correlate with.
+    if let Err(err) = prune_events(pool, yearly_cutoff).await {
+        tracing::warn!("event prune failed: {err}");
     }
 }
 
@@ -1789,6 +1921,7 @@ mod tests {
             None,
             &["a".to_owned()],
             Some("HTTP/2 503\n\n<html>maintenance</html>"),
+            Some("deploy api v2.3, 3m before"),
         )
         .await
         .unwrap();
@@ -1804,10 +1937,29 @@ mod tests {
             incidents[0].snapshot.as_deref(),
             Some("HTTP/2 503\n\n<html>maintenance</html>")
         );
+        assert_eq!(
+            incidents[0].event.as_deref(),
+            Some("deploy api v2.3, 3m before")
+        );
         assert!(incidents[0].duration_s.is_some());
 
+        // The vantage verdict lands after the peers answered; readable back.
+        update_incident_vantage(&pool, id, "confirmed down from 2/2 vantage points")
+            .await
+            .unwrap();
+        assert_eq!(
+            incident_by_id(&pool, id)
+                .await
+                .unwrap()
+                .expect("incident exists")
+                .vantage
+                .as_deref(),
+            Some("confirmed down from 2/2 vantage points")
+        );
+        assert!(incident_by_id(&pool, 999).await.unwrap().is_none());
+
         // Closed incidents prune by age; open ones never do.
-        let open = insert_incident_start(&pool, "m", None, None, &[], None)
+        let open = insert_incident_start(&pool, "m", None, None, &[], None, None)
             .await
             .unwrap();
         prune_incidents(&pool, chrono::Utc::now().timestamp() + 1000)
@@ -1821,10 +1973,10 @@ mod tests {
     #[tokio::test]
     async fn incident_notes_set_clear_and_resolve_last() {
         let pool = memory_pool().await;
-        let first = insert_incident_start(&pool, "m", None, None, &[], None)
+        let first = insert_incident_start(&pool, "m", None, None, &[], None, None)
             .await
             .unwrap();
-        let second = insert_incident_start(&pool, "m", None, None, &[], None)
+        let second = insert_incident_start(&pool, "m", None, None, &[], None, None)
             .await
             .unwrap();
 
@@ -1841,6 +1993,36 @@ mod tests {
         let incidents = recent_incidents(&pool, 10).await.unwrap();
         assert_eq!(incidents.iter().find(|i| i.id == first).unwrap().note, None);
         assert!(!set_incident_note(&pool, 999, "nope").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn events_record_list_correlate_and_prune() {
+        let pool = memory_pool().await;
+        let now = chrono::Utc::now().timestamp();
+
+        let first = insert_event(&pool, "deploy api v2.3").await.unwrap();
+        let second = insert_event(&pool, "config rollout").await.unwrap();
+
+        // Newest first for the list; oldest first for the chart overlay.
+        let recent = recent_events(&pool, 10).await.unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].id, second);
+        assert_eq!(recent[0].title, "config rollout");
+        let overlay = events_since(&pool, now - 60).await.unwrap();
+        assert_eq!(overlay[0].id, first);
+
+        // Correlation picks the most recent event inside the window only.
+        let correlated = latest_event_before(&pool, now, 3600).await.unwrap();
+        assert_eq!(correlated.expect("in window").id, second);
+        let outside = latest_event_before(&pool, now + 7200, 3600).await.unwrap();
+        assert!(
+            outside.is_none(),
+            "events older than the window never match"
+        );
+
+        // Old markers age out with the pruner.
+        prune_events(&pool, now + 1000).await.unwrap();
+        assert!(recent_events(&pool, 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

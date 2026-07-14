@@ -266,6 +266,21 @@ interval_secs = 60
 timeout_secs = 5
 group = "infra"
 
+# STARTTLS certificate watch: a tcp monitor with `starttls` set gets the same
+# expiry alerts (and optional `cert_pin`) as an https monitor - the watcher
+# negotiates STARTTLS first, then reads the certificate. The mail server's
+# certificate that nobody looks at until it expires. Protocols: smtp, imap.
+[[monitors]]
+id = "smtp"
+name = "Mail (SMTP)"
+kind = "tcp"
+target = "mail.example.com:587"
+interval_secs = 300
+timeout_secs = 10
+group = "infra"
+starttls = "smtp"                # or "imap" for an IMAP server on 143
+# check_cert = false             # opt back out while keeping the tcp probe
+
 # ICMP echo (ping) to a host or IP. No port; up = an echo reply within timeout.
 [[monitors]]
 id = "gateway"

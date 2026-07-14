@@ -87,6 +87,16 @@ async fn run_subcommand() -> anyhow::Result<bool> {
                 }
                 annotate(&args[2], &args[3..].join(" ")).await?;
             }
+            "event" => {
+                event(&args[2..]).await?;
+            }
+            "postmortem" => {
+                let Some(id) = args.get(2) else {
+                    eprintln!("Usage: hora postmortem <incident-id|last>");
+                    std::process::exit(1);
+                };
+                postmortem(id).await?;
+            }
             "silence" => {
                 silence(&args[2..]).await?;
             }
@@ -173,6 +183,7 @@ async fn test_alert(monitor_id: Option<&str>) -> anyhow::Result<()> {
         cause: None,
         impacted: &[],
         vantage: None,
+        event: None,
     };
     let mut failed = dispatcher.dispatch(event, notify.as_deref()).await;
     let failed_recovery = dispatcher
@@ -230,6 +241,11 @@ fn print_help() {
     println!("  incidents [limit]   List recent incidents with their ids");
     println!("  annotate <id> <note>  Attach a note to an incident ('last' targets the");
     println!("                      most recent one; an empty note clears it)");
+    println!("  event <title...>    Record an event marker (\"deploy api v2.3\"): shown on");
+    println!("                      the charts and correlated into incidents");
+    println!("  event list [limit]  List the recent event markers");
+    println!("  postmortem <id|last>  Print an incident's auto-generated markdown");
+    println!("                      post-mortem (the web twin is /incident/{{id}})");
     println!("  backup <dest.db>    Snapshot the database with VACUUM INTO");
     println!("  --version, -V       Show the version");
     println!("  --help, -h          Show this help message");
@@ -938,11 +954,19 @@ async fn print_probe_report(
     // or a response like a 5xx where TLS still answered). A transport failure
     // means the cert handshake would just hit the same timeout twice.
     let reached_server = outcome.up || outcome.status_code.is_some();
-    if reached_server
-        && monitor.kind == hora_core::config::Kind::Http
-        && monitor.target.starts_with("https://")
-    {
-        match hora_core::cert::inspect(&monitor.target, monitor.timeout()).await {
+    let https =
+        monitor.kind == hora_core::config::Kind::Http && monitor.target.starts_with("https://");
+    let starttls = hora_core::cert::Starttls::for_monitor(monitor);
+    if reached_server && (https || starttls.is_some()) {
+        // STARTTLS tcp monitors read their certificate exactly like the
+        // watcher: negotiate in plaintext, then handshake.
+        let cert = match hora_core::cert::monitor_endpoint(monitor) {
+            Some((host, port)) => {
+                hora_core::cert::inspect_endpoint(&host, port, starttls, monitor.timeout()).await
+            }
+            None => Err(anyhow::anyhow!("cannot determine host:port")),
+        };
+        match cert {
             Ok(cert) => println!(
                 "  cert      {} (expires {})",
                 cert_days_phrase(cert.days_left),
@@ -1001,6 +1025,81 @@ fn format_date(timestamp: i64) -> String {
         || timestamp.to_string(),
         |dt| dt.format("%Y-%m-%d").to_string(),
     )
+}
+
+/// `hora event <title...>` / `hora event list [N]`: record (or list) an event
+/// marker - "deploy api v2.3" - the same gesture as a silence, written
+/// straight into the daemon's database. Markers overlay the latency
+/// sparklines, list on /history, and a down confirming within the hour is
+/// annotated "recent change: ...". The HTTP twin is `POST /api/event`.
+async fn event(args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let limit = args
+                .get(1)
+                .map_or(Ok(20), |raw| raw.parse::<i64>())
+                .unwrap_or_else(|_| {
+                    eprintln!("Usage: hora event list [limit]");
+                    std::process::exit(1);
+                });
+            let (_, pool) = open_database().await?;
+            let events = hora_core::db::recent_events(&pool, limit.max(1)).await?;
+            if events.is_empty() {
+                println!("No events recorded.");
+            }
+            for event in events {
+                println!("{}  {}", format_epoch(event.created_at), event.title);
+            }
+        }
+        Some(_) => {
+            let title: String = args.join(" ").trim().chars().take(200).collect();
+            if title.is_empty() {
+                eprintln!("Usage: hora event <title...>");
+                std::process::exit(1);
+            }
+            let (_, pool) = open_database().await?;
+            hora_core::db::insert_event(&pool, &title).await?;
+            println!("Recorded event: {title}");
+        }
+        None => {
+            eprintln!("Usage: hora event <title...>");
+            eprintln!("       hora event list [limit]");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+/// `hora postmortem <id|last>`: print the auto-generated markdown post-mortem
+/// of an incident - everything Hora already recorded about it, ready to paste
+/// into a ticket. The web twin is `/incident/{id}`.
+async fn postmortem(id_arg: &str) -> anyhow::Result<()> {
+    let (config, pool) = open_database().await?;
+    let id = if id_arg == "last" {
+        let Some(id) = hora_core::db::latest_incident_id(&pool).await? else {
+            eprintln!("No incidents recorded yet.");
+            std::process::exit(1);
+        };
+        id
+    } else {
+        id_arg.parse().unwrap_or_else(|_| {
+            eprintln!("Invalid incident id {id_arg:?} (a number, or 'last').");
+            std::process::exit(1);
+        })
+    };
+    let Some(incident) = hora_core::db::incident_by_id(&pool, id).await? else {
+        eprintln!("No incident #{id}. 'hora incidents' lists the recent ones.");
+        std::process::exit(1);
+    };
+    let name = config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == incident.monitor_id)
+        .map_or(incident.monitor_id.as_str(), |monitor| {
+            monitor.name.as_str()
+        });
+    print!("{}", hora_core::postmortem::render(&incident, name));
+    Ok(())
 }
 
 /// List recent incidents with their ids - the lookup companion of `annotate`.

@@ -267,6 +267,15 @@
       font-size: 13px;
     }
 
+    /* Operator event markers: a dashed vertical line, title on hover.
+       Only rendered on the authenticated view. */
+    .spark-event {
+      stroke: var(--info, #3b82f6);
+      stroke-width: 1;
+      stroke-dasharray: 3 3;
+      opacity: 0.8;
+    }
+
     .caption {
       display: flex;
       justify-content: space-between;

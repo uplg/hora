@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::util::{
-    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
-    send_retrying, topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix,
+    latency_suffix, send_retrying, topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -39,12 +39,14 @@ impl FreeMobileNotifier {
                 cause,
                 impacted,
                 vantage,
+                event,
             } => {
                 format!(
-                    "DOWN: {monitor} - {}{}{}",
+                    "DOWN: {monitor} - {}{}{}{}",
                     error.unwrap_or("no response"),
                     topology_suffix(cause, impacted),
-                    vantage_suffix(vantage)
+                    vantage_suffix(vantage),
+                    event_suffix(event)
                 )
             }
             Event::Degraded {
@@ -130,6 +132,7 @@ mod tests {
             cause: None,
             impacted: &[],
             vantage: None,
+            event: None,
         });
         assert!(down.starts_with("DOWN: API") && down.contains("boom"));
 

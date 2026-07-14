@@ -227,6 +227,11 @@ async fn confirm_down(
 ) {
     let (cause, impacted_names) = down_context(config, pool, monitor, threshold).await;
 
+    // "What changed?": the most recent event marker (`hora event`) within the
+    // lookback, phrased relative to now ("deploy api v2.3, 3m before"). Read
+    // errors just drop the annotation - it must never delay the alert.
+    let event = correlated_event(pool, chrono::Utc::now().timestamp()).await;
+
     // Unless one is already open (resumed from a previous run mid-outage).
     // Recorded *before* the peers are consulted, so the incident history
     // never waits on the network.
@@ -237,6 +242,7 @@ async fn confirm_down(
             outcome,
             cause.as_ref().map(|(_, name)| name.as_str()),
             &impacted_names,
+            event.as_deref(),
         )
         .await;
     }
@@ -247,6 +253,13 @@ async fn confirm_down(
     let vantage = crate::confirm::confirm_with_peers(confirm_client, config, monitor).await;
     if let Some(verdict) = &vantage {
         info!(monitor = %monitor.id, %verdict, "multi-vantage verdict");
+        // Recorded on the incident too (best effort), so the post-mortem can
+        // replay what the mesh saw, not just what this node saw.
+        if let Some(incident_id) = *open_incident
+            && let Err(err) = db::update_incident_vantage(pool, incident_id, verdict).await
+        {
+            error!(monitor = %monitor.id, "failed to record vantage verdict: {err:#}");
+        }
     }
 
     // The coalescer groups on the *configured* upstreams: in a cascade this
@@ -264,7 +277,40 @@ async fn confirm_down(
         impacted: impacted_names,
         notify: monitor.notify.clone(),
         vantage,
+        event,
     }));
+}
+
+/// How far back a recorded event still counts as "what changed" for a down
+/// that confirms now. An hour: long enough for a slow rollout to bite, short
+/// enough that yesterday's deploy is not blamed for today's outage.
+const EVENT_LOOKBACK_SECS: i64 = 3600;
+
+/// The correlated-event phrase for a down confirming at `now` ("deploy api
+/// v2.3, 3m before"), or `None` when no event was recorded within the
+/// lookback. A read error drops the annotation (logged), never the alert.
+async fn correlated_event(pool: &SqlitePool, now: i64) -> Option<String> {
+    match db::latest_event_before(pool, now, EVENT_LOOKBACK_SECS).await {
+        Ok(found) => found.map(|event| event_phrase(&event.title, now - event.created_at)),
+        Err(err) => {
+            error!("failed to read event markers: {err:#}");
+            None
+        }
+    }
+}
+
+/// `"deploy api v2.3, 3m before"` - the phrase stored on the incident and
+/// appended to the alert (each channel prefixes its own "recent change:").
+fn event_phrase(title: &str, age_secs: i64) -> String {
+    let age = age_secs.max(0);
+    let ago = if age >= 3600 {
+        format!("{}h{:02}m", age / 3600, (age % 3600) / 60)
+    } else if age >= 60 {
+        format!("{}m", age / 60)
+    } else {
+        format!("{age}s")
+    };
+    format!("{title}, {ago} before")
 }
 
 /// Live alert settings for this tick, read fresh so a maintenance window or a
@@ -350,6 +396,7 @@ async fn open_incident_record(
     outcome: &Outcome,
     cause: Option<&str>,
     impacted: &[String],
+    event: Option<&str>,
 ) -> Option<i64> {
     match db::insert_incident_start(
         pool,
@@ -358,6 +405,7 @@ async fn open_incident_record(
         cause,
         impacted,
         outcome.snapshot.as_deref(),
+        event,
     )
     .await
     {
@@ -605,6 +653,24 @@ fn up_heartbeat() -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_phrase_formats_the_age() {
+        assert_eq!(
+            event_phrase("deploy api v2.3", 45),
+            "deploy api v2.3, 45s before"
+        );
+        assert_eq!(
+            event_phrase("deploy api v2.3", 180),
+            "deploy api v2.3, 3m before"
+        );
+        assert_eq!(
+            event_phrase("deploy api v2.3", 4380),
+            "deploy api v2.3, 1h13m before"
+        );
+        // A clock skew can't produce a negative age.
+        assert_eq!(event_phrase("x", -5), "x, 0s before");
+    }
 
     #[test]
     fn cron_missed_only_after_due_plus_grace() {

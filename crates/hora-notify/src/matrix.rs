@@ -5,8 +5,8 @@ use reqwest::{Client, Url};
 use serde::Serialize;
 
 use crate::util::{
-    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
-    send_retrying, topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix,
+    latency_suffix, send_retrying, topology_suffix, vantage_suffix,
 };
 use crate::{Event, Notifier};
 
@@ -55,11 +55,13 @@ impl MatrixNotifier {
                 cause,
                 impacted,
                 vantage,
+                event,
             } => format!(
-                "\u{1F534} {monitor} is DOWN\n{}{}{}",
+                "\u{1F534} {monitor} is DOWN\n{}{}{}{}",
                 error.unwrap_or("no response"),
                 topology_suffix(cause, impacted),
-                vantage_suffix(vantage)
+                vantage_suffix(vantage),
+                event_suffix(event)
             ),
             Event::Degraded {
                 monitor,
@@ -166,6 +168,7 @@ mod tests {
             cause: None,
             impacted: &[],
             vantage: None,
+            event: None,
         });
         assert!(down.contains("is DOWN") && down.contains("boom"));
 

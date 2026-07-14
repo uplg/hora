@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::util::{
-    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix,
-    send_retrying, topology_suffix, vantage_suffix,
+    alert_phrase, budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix,
+    latency_suffix, send_retrying, topology_suffix, vantage_suffix,
 };
 use crate::{AlertSeverity, Event, Notifier};
 
@@ -35,11 +35,16 @@ impl PushoverNotifier {
                 cause,
                 impacted,
                 vantage,
+                event,
             } => {
                 let suffix = topology_suffix(cause, impacted);
                 let vantage = vantage_suffix(vantage);
+                let event = event_suffix(event);
                 let detail = error.map_or_else(String::new, |e| format!("\n{e}"));
-                (format!("DOWN: {monitor}{detail}{suffix}{vantage}"), 1)
+                (
+                    format!("DOWN: {monitor}{detail}{suffix}{vantage}{event}"),
+                    1,
+                )
             }
             Event::Degraded {
                 monitor,

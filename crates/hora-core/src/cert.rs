@@ -97,17 +97,134 @@ fn client_config() -> anyhow::Result<Arc<ClientConfig>> {
     Ok(Arc::new(config))
 }
 
+/// The STARTTLS negotiation to run before the TLS handshake, for services
+/// that greet in plaintext first (mail servers on 587/143).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Starttls {
+    Smtp,
+    Imap,
+}
+
+impl Starttls {
+    /// Parse a monitor's `starttls` value (validated at config load, so this
+    /// is total over what a loaded config can carry).
+    #[must_use]
+    pub fn parse(mode: &str) -> Option<Self> {
+        match mode {
+            "smtp" => Some(Self::Smtp),
+            "imap" => Some(Self::Imap),
+            _ => None,
+        }
+    }
+
+    /// A monitor's negotiation mode, when it configured one.
+    #[must_use]
+    pub fn for_monitor(monitor: &crate::config::Monitor) -> Option<Self> {
+        monitor.starttls.as_deref().and_then(Self::parse)
+    }
+}
+
+/// Bounds on the plaintext negotiation, so a hostile or broken server can't
+/// feed us an endless reply: per-line bytes and lines per reply.
+const MAX_REPLY_LINE_BYTES: usize = 1024;
+const MAX_REPLY_LINES: usize = 64;
+
+/// Read one CRLF-terminated line (bounded, lossy UTF-8, no trailing CR/LF).
+async fn read_line<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> anyhow::Result<String> {
+    use tokio::io::AsyncReadExt as _;
+    let mut line = Vec::with_capacity(64);
+    loop {
+        let byte = stream.read_u8().await?;
+        if byte == b'\n' {
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(String::from_utf8_lossy(&line).into_owned());
+        }
+        anyhow::ensure!(line.len() < MAX_REPLY_LINE_BYTES, "reply line too long");
+        line.push(byte);
+    }
+}
+
+/// Read one (possibly multi-line) SMTP reply and require the given code:
+/// `250-...` lines continue, `250 ...` ends the reply.
+async fn read_smtp_reply<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+    expected: &str,
+) -> anyhow::Result<()> {
+    for _ in 0..MAX_REPLY_LINES {
+        let line = read_line(stream).await?;
+        let (code, rest) = line.split_at_checked(3).unwrap_or((line.as_str(), ""));
+        anyhow::ensure!(
+            code == expected,
+            "SMTP server answered {line:?}, expected {expected}"
+        );
+        if !rest.starts_with('-') {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("SMTP reply exceeded {MAX_REPLY_LINES} lines")
+}
+
+/// Negotiate STARTTLS on a fresh plaintext connection, leaving the stream
+/// ready for the TLS handshake. Every step is bounded; the caller wraps the
+/// whole negotiation in the monitor's timeout.
+async fn negotiate<S>(stream: &mut S, mode: Starttls) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt as _;
+    match mode {
+        Starttls::Smtp => {
+            read_smtp_reply(stream, "220").await?;
+            stream.write_all(b"EHLO hora\r\n").await?;
+            read_smtp_reply(stream, "250").await?;
+            stream.write_all(b"STARTTLS\r\n").await?;
+            read_smtp_reply(stream, "220").await?;
+        }
+        Starttls::Imap => {
+            let greeting = read_line(stream).await?;
+            anyhow::ensure!(
+                greeting.starts_with("* OK") || greeting.starts_with("* PREAUTH"),
+                "IMAP server greeted with {greeting:?}"
+            );
+            stream.write_all(b"a1 STARTTLS\r\n").await?;
+            // Skip any untagged lines until the tagged completion answers.
+            for _ in 0..MAX_REPLY_LINES {
+                let line = read_line(stream).await?;
+                if let Some(status) = line.strip_prefix("a1 ") {
+                    anyhow::ensure!(
+                        status.starts_with("OK"),
+                        "IMAP server refused STARTTLS: {line:?}"
+                    );
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("IMAP reply exceeded {MAX_REPLY_LINES} lines")
+        }
+    }
+    Ok(())
+}
+
 /// Connect, handshake, and return the leaf certificate's `notAfter` (unix secs)
-/// and the SHA-256 fingerprint of the leaf public key.
+/// and the SHA-256 fingerprint of the leaf public key. With a `starttls` mode,
+/// the plaintext negotiation runs first (bounded by the same timeout).
 async fn fetch(
     config: &Arc<ClientConfig>,
     host: &str,
     port: u16,
+    starttls: Option<Starttls>,
     timeout: Duration,
 ) -> anyhow::Result<(i64, String)> {
-    let tcp = tokio::time::timeout(timeout, TcpStream::connect((host, port)))
+    let mut tcp = tokio::time::timeout(timeout, TcpStream::connect((host, port)))
         .await
         .map_err(|_elapsed| anyhow::anyhow!("tcp connect timed out"))??;
+
+    if let Some(mode) = starttls {
+        tokio::time::timeout(timeout, negotiate(&mut tcp, mode))
+            .await
+            .map_err(|_elapsed| anyhow::anyhow!("starttls negotiation timed out"))??;
+    }
 
     let connector = TlsConnector::from(Arc::clone(config));
     let server_name = ServerName::try_from(host.to_owned())?;
@@ -153,8 +270,25 @@ pub async fn inspect(target: &str, timeout: Duration) -> anyhow::Result<CertInfo
     let (host, port) = host_port(target).ok_or_else(|| {
         anyhow::anyhow!("cannot determine host:port for a cert check from {target:?}")
     })?;
+    inspect_endpoint(&host, port, None, timeout).await
+}
+
+/// Like [`inspect`], but for a bare endpoint - optionally negotiating
+/// STARTTLS first, so `hora probe` can read a mail server's certificate the
+/// same way the watcher does.
+///
+/// # Errors
+///
+/// Returns an error if the TCP connect, the STARTTLS negotiation or the TLS
+/// handshake fails within `timeout`.
+pub async fn inspect_endpoint(
+    host: &str,
+    port: u16,
+    starttls: Option<Starttls>,
+    timeout: Duration,
+) -> anyhow::Result<CertInfo> {
     let tls = client_config()?;
-    let (not_after, fingerprint) = fetch(&tls, &host, port, timeout).await?;
+    let (not_after, fingerprint) = fetch(&tls, host, port, starttls, timeout).await?;
     let now = chrono::Utc::now().timestamp();
     Ok(CertInfo {
         not_after,
@@ -186,6 +320,24 @@ fn host_port(target: &str) -> Option<(String, u16)> {
     let host = url.host_str()?.to_owned();
     let port = url.port_or_known_default()?;
     Some((host, port))
+}
+
+/// The endpoint a monitor's certificate check connects to: the URL's
+/// host/port for HTTP monitors, the `host:port` target itself for tcp ones
+/// (IPv6 brackets stripped - the TLS `ServerName` wants the bare host).
+#[must_use]
+pub fn monitor_endpoint(monitor: &crate::config::Monitor) -> Option<(String, u16)> {
+    use crate::config::Kind;
+    match monitor.kind {
+        Kind::Http => host_port(&monitor.target),
+        Kind::Tcp => {
+            let (host, port) = monitor.target.rsplit_once(':')?;
+            let port: u16 = port.parse().ok()?;
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            (!host.is_empty()).then(|| (host.to_owned(), port))
+        }
+        _ => None,
+    }
 }
 
 /// Spawn the certificate watcher: checks every HTTPS monitor every 12 hours,
@@ -236,12 +388,13 @@ pub fn spawn_watcher(
             .await;
 
             for monitor in snapshot.monitors.iter().filter(|m| m.checks_cert()) {
-                let Some((host, port)) = host_port(&monitor.target) else {
+                let Some((host, port)) = monitor_endpoint(monitor) else {
                     warn!(monitor = %monitor.id, "cannot parse host for cert check");
                     continue;
                 };
 
-                match fetch(&tls, &host, port, monitor.timeout()).await {
+                let starttls = Starttls::for_monitor(monitor);
+                match fetch(&tls, &host, port, starttls, monitor.timeout()).await {
                     Ok((not_after, fingerprint)) => {
                         if let Err(err) = db::upsert_cert(&pool, &monitor.id, not_after, now).await
                         {
@@ -430,5 +583,122 @@ mod tests {
         assert_eq!(digest.len(), 64);
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(digest, sha256_hex(b"hora"));
+    }
+
+    /// Drive [`negotiate`] against a scripted peer over an in-memory duplex
+    /// stream: `replies` are sent in order, one per client command (the
+    /// greeting first, before any command).
+    async fn scripted(mode: Starttls, replies: &'static [&'static str]) -> anyhow::Result<()> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let peer = tokio::spawn(async move {
+            let mut replies = replies.iter();
+            // Greeting flows before the client says anything.
+            if let Some(first) = replies.next() {
+                let _ = server.write_all(first.as_bytes()).await;
+            }
+            let mut buf = [0u8; 256];
+            for reply in replies {
+                // One read per client command line (commands are tiny).
+                if server.read(&mut buf).await.is_err() {
+                    return;
+                }
+                let _ = server.write_all(reply.as_bytes()).await;
+            }
+        });
+        let result = negotiate(&mut client, mode).await;
+        drop(client);
+        let _ = peer.await;
+        result
+    }
+
+    #[tokio::test]
+    async fn smtp_negotiation_walks_ehlo_then_starttls() {
+        // Multi-line EHLO reply, as real servers answer.
+        let ok = scripted(
+            Starttls::Smtp,
+            &[
+                "220 mail.example.org ESMTP\r\n",
+                "250-mail.example.org\r\n250-PIPELINING\r\n250 STARTTLS\r\n",
+                "220 2.0.0 Ready to start TLS\r\n",
+            ],
+        )
+        .await;
+        assert!(ok.is_ok(), "{ok:?}");
+
+        // A server refusing STARTTLS is an error, never a silent plaintext read.
+        let refused = scripted(
+            Starttls::Smtp,
+            &[
+                "220 mail.example.org ESMTP\r\n",
+                "250 mail.example.org\r\n",
+                "454 TLS not available\r\n",
+            ],
+        )
+        .await;
+        assert!(refused.is_err());
+        // A wrong greeting fails immediately.
+        let bad = scripted(Starttls::Smtp, &["554 go away\r\n"]).await;
+        assert!(bad.is_err());
+    }
+
+    #[tokio::test]
+    async fn imap_negotiation_expects_the_tagged_ok() {
+        let ok = scripted(
+            Starttls::Imap,
+            &[
+                "* OK IMAP4rev1 ready\r\n",
+                "a1 OK Begin TLS negotiation now\r\n",
+            ],
+        )
+        .await;
+        assert!(ok.is_ok(), "{ok:?}");
+
+        let refused = scripted(
+            Starttls::Imap,
+            &["* OK ready\r\n", "a1 BAD STARTTLS not supported\r\n"],
+        )
+        .await;
+        assert!(refused.is_err());
+        let bad_greeting = scripted(Starttls::Imap, &["* BYE overloaded\r\n"]).await;
+        assert!(bad_greeting.is_err());
+    }
+
+    #[test]
+    fn starttls_parses_and_endpoints_resolve_per_kind() {
+        assert_eq!(Starttls::parse("smtp"), Some(Starttls::Smtp));
+        assert_eq!(Starttls::parse("imap"), Some(Starttls::Imap));
+        assert_eq!(Starttls::parse("ftp"), None);
+
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "mail"
+            name = "Mail"
+            kind = "tcp"
+            target = "mail.example.org:587"
+            interval_secs = 60
+            starttls = "smtp"
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://example.com:8443/x"
+            interval_secs = 60
+            "#,
+        )
+        .expect("config");
+        let mail = &config.monitors[0];
+        assert!(mail.checks_cert(), "starttls implies the cert check");
+        assert_eq!(Starttls::for_monitor(mail), Some(Starttls::Smtp));
+        assert_eq!(
+            monitor_endpoint(mail),
+            Some(("mail.example.org".to_owned(), 587))
+        );
+        assert_eq!(
+            monitor_endpoint(&config.monitors[1]),
+            Some(("example.com".to_owned(), 8443))
+        );
     }
 }

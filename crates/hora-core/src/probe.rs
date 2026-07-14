@@ -1009,6 +1009,7 @@ mod tests {
             proxy: None,
             push_token: None,
             check_cert: None,
+            starttls: None,
             retention_days: None,
             group: None,
             depends_on: None,

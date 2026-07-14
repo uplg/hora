@@ -5,8 +5,8 @@ use reqwest::Client;
 use serde::Serialize;
 
 use crate::util::{
-    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, latency_suffix, post_json,
-    topology_suffix, vantage_suffix,
+    budget_burn_phrase, cert_expiry_phrase, domain_expiry_phrase, event_suffix, latency_suffix,
+    post_json, topology_suffix, vantage_suffix,
 };
 use crate::{AlertSeverity, Event, Notifier};
 
@@ -40,12 +40,14 @@ impl DiscordNotifier {
                 cause,
                 impacted,
                 vantage,
+                event,
             } => Embed {
                 description: Some(format!(
-                    "```{}```{}{}",
+                    "```{}```{}{}{}",
                     error.unwrap_or("no response").replace('`', "'"),
                     topology_suffix(cause, impacted),
-                    vantage_suffix(vantage)
+                    vantage_suffix(vantage),
+                    event_suffix(event)
                 )),
                 title: format!("\u{1F534} {monitor} is DOWN"),
                 color: COLOR_DOWN,
@@ -200,6 +202,7 @@ mod tests {
             cause: None,
             impacted: &[],
             vantage: None,
+            event: None,
         });
         assert!(down.title.contains("is DOWN"));
         assert!(down.description.expect("down has a body").contains("boom"));
@@ -233,6 +236,7 @@ mod tests {
             cause: None,
             impacted: &[],
             vantage: None,
+            event: None,
         });
         let body = down.description.expect("down has a body");
         assert!(
