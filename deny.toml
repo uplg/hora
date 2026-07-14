@@ -45,7 +45,6 @@ skip = [
     { crate = "cpufeatures" },
     { crate = "core-foundation" },
     { crate = "r-efi" },
-    { crate = "wit-bindgen" },
     # We use sha2 0.11 (cert pinning) for its fixes going forward; sqlx still
     # pins the 0.10 line.
     { crate = "sha2" },

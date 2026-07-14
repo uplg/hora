@@ -8,7 +8,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-arc-swap = "1.9.1"
+arc-swap = "1.9.2"
 askama.workspace = true
 axum.workspace = true
 chrono.workspace = true
