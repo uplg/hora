@@ -4,6 +4,16 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.8.0 → 0.8.1
+
+No schema migration. New optional config keys only - as always, deploy the
+binary before a config that sets them (`deny_unknown_fields`):
+`alerts.channel_fail_threshold` (consecutive delivery failures before the
+channel watchdog alerts the other channels, default 3), and the numeric body
+assertion on http monitors (`number_regex` + `number_min`/`number_max`).
+Existing monitors and channels behave exactly as before until a config opts
+in.
+
 ## 0.7.2 → 0.8.0
 
 One schema migration (the `pushed_alerts` table) applies automatically. One
