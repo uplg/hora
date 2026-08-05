@@ -251,6 +251,10 @@ depends_on = ["database"]
 # keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 # json_query = "$.status"   # JSONPath (RFC 9535) evaluated against a JSON body
 # json_expected = "ok"      # the queried value must equal this (omit = must match a node)
+# number_regex = 'ships">(\d+)<'  # extract a number from the body (first capture group,
+#                                 # or the whole match) - down when nothing matches
+# number_min = 1            # ... or when the number is below this (inclusive bound)
+# number_max = 500          # ... or above this
 # max_body_kb = 256         # cap on the body read for assertions (default 1024 = 1 MiB)
 
 [[monitors]]

@@ -707,6 +707,22 @@ pub struct Monitor {
     /// When unset, the query only has to match at least one node.
     #[serde(default)]
     pub json_expected: Option<String>,
+    /// HTTP body assertion: a regex extracting a number from the response body -
+    /// the first capture group when the pattern has one, the whole match
+    /// otherwise. Fails when nothing matches, the extracted text is not a
+    /// number, or the value falls outside [`number_min`](Self::number_min) /
+    /// [`number_max`](Self::number_max). Made for pages that render a gauge
+    /// inline ("11 unique ships") with no JSON endpoint behind them.
+    #[serde(default)]
+    pub number_regex: Option<String>,
+    /// Lowest value (inclusive) the [`number_regex`](Self::number_regex)
+    /// extraction may report before the monitor goes down.
+    #[serde(default)]
+    pub number_min: Option<i64>,
+    /// Highest value (inclusive) the [`number_regex`](Self::number_regex)
+    /// extraction may report before the monitor goes down.
+    #[serde(default)]
+    pub number_max: Option<i64>,
     /// Cap (KiB) on the response body read for keyword/JSON assertions
     /// (default 1024 = 1 MiB). Raise for large JSON endpoints, with care.
     #[serde(default)]
@@ -834,6 +850,9 @@ impl std::fmt::Debug for Monitor {
             .field("keyword_invert", &self.keyword_invert)
             .field("json_query", &self.json_query)
             .field("json_expected", &self.json_expected)
+            .field("number_regex", &self.number_regex)
+            .field("number_min", &self.number_min)
+            .field("number_max", &self.number_max)
             .field("max_body_kb", &self.max_body_kb)
             .field("probe_retries", &self.probe_retries)
             .field("dual_stack", &self.dual_stack)
@@ -960,6 +979,9 @@ impl Monitor {
             keyword_invert: false,
             json_query: None,
             json_expected: None,
+            number_regex: None,
+            number_min: None,
+            number_max: None,
             max_body_kb: None,
             // A one-shot ad-hoc probe wants the honest first result, not the
             // anti-flap retry (the peer responder does the same for confirm).
@@ -1710,14 +1732,12 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
         monitor.kind == Kind::Http
             || (monitor.keyword.is_none()
                 && monitor.json_query.is_none()
+                && monitor.number_regex.is_none()
                 && monitor.proxy.is_none()),
-        "monitor {}: keyword/json_query/proxy require an http monitor",
+        "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
         monitor.id
     );
-    if let Some(query) = &monitor.json_query {
-        serde_json_path::JsonPath::parse(query)
-            .map_err(|err| anyhow::anyhow!("monitor {}: invalid json_query: {err}", monitor.id))?;
-    }
+    validate_body_assertions(monitor)?;
     if let Some(proxy) = &monitor.proxy {
         reqwest::Proxy::all(proxy)
             .map_err(|err| anyhow::anyhow!("monitor {}: invalid proxy: {err}", monitor.id))?;
@@ -1737,6 +1757,35 @@ fn validate_monitor_io(monitor: &Monitor) -> anyhow::Result<()> {
         validate_dual_stack(monitor)?;
     }
     validate_schedule_and_slo(monitor)?;
+    Ok(())
+}
+
+/// Validate the body assertions: the `JSONPath` and the number regex must
+/// compile, and the number bounds only make sense with a regex to extract the
+/// number and in min <= max order.
+fn validate_body_assertions(monitor: &Monitor) -> anyhow::Result<()> {
+    if let Some(query) = &monitor.json_query {
+        serde_json_path::JsonPath::parse(query)
+            .map_err(|err| anyhow::anyhow!("monitor {}: invalid json_query: {err}", monitor.id))?;
+    }
+    if let Some(pattern) = &monitor.number_regex {
+        regex::Regex::new(pattern).map_err(|err| {
+            anyhow::anyhow!("monitor {}: invalid number_regex: {err}", monitor.id)
+        })?;
+    } else {
+        anyhow::ensure!(
+            monitor.number_min.is_none() && monitor.number_max.is_none(),
+            "monitor {}: number_min/number_max require number_regex",
+            monitor.id
+        );
+    }
+    if let (Some(min), Some(max)) = (monitor.number_min, monitor.number_max) {
+        anyhow::ensure!(
+            min <= max,
+            "monitor {}: number_min {min} exceeds number_max {max}",
+            monitor.id
+        );
+    }
     Ok(())
 }
 
@@ -2104,13 +2153,75 @@ mod tests {
             keyword = "operational"
             json_query = "$.status"
             json_expected = "ok"
+            number_regex = 'ships">(\d+)<'
+            number_min = 1
+            number_max = 500
         "#,
         );
         let monitor = &config.monitors[0];
         assert_eq!(monitor.keyword.as_deref(), Some("operational"));
         assert_eq!(monitor.json_query.as_deref(), Some("$.status"));
         assert_eq!(monitor.json_expected.as_deref(), Some("ok"));
+        assert_eq!(monitor.number_regex.as_deref(), Some(r#"ships">(\d+)<"#));
+        assert_eq!(monitor.number_min, Some(1));
+        assert_eq!(monitor.number_max, Some(500));
         validate(&config).expect("valid assertions");
+    }
+
+    #[test]
+    fn rejects_invalid_number_regex() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://example.com"
+            interval_secs = 60
+            number_regex = "ships (["
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("invalid number_regex"), "got: {error}");
+    }
+
+    #[test]
+    fn rejects_number_bounds_without_regex() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://example.com"
+            interval_secs = 60
+            number_min = 1
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("require number_regex"), "got: {error}");
+    }
+
+    #[test]
+    fn rejects_inverted_number_bounds() {
+        let config = parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://example.com"
+            interval_secs = 60
+            number_regex = '(\d+)'
+            number_min = 10
+            number_max = 5
+        "#,
+        );
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("exceeds number_max"), "got: {error}");
     }
 
     #[test]

@@ -250,7 +250,9 @@ async fn http(client: &Client, monitor: &Monitor) -> Outcome {
         // a keyword/JSON assertion. Assertions get a larger budget. The head
         // (status line + headers) is captured first - reading the body
         // consumes the response - in case this turns into a failure snapshot.
-        let assertions = monitor.keyword.is_some() || monitor.json_query.is_some();
+        let assertions = monitor.keyword.is_some()
+            || monitor.json_query.is_some()
+            || monitor.number_regex.is_some();
         let (head, body) = if !status_ok || assertions {
             let head = snapshot_head(&response);
             let cap = if assertions {
@@ -381,8 +383,48 @@ fn check_assertions(monitor: &Monitor, body: &[u8]) -> Option<String> {
             });
         }
     }
-    if let Some(query) = &monitor.json_query {
-        return check_json(query, monitor.json_expected.as_deref(), &text);
+    if let Some(query) = &monitor.json_query
+        && let Some(failure) = check_json(query, monitor.json_expected.as_deref(), &text)
+    {
+        return Some(failure);
+    }
+    if let Some(pattern) = &monitor.number_regex {
+        return check_number(pattern, monitor.number_min, monitor.number_max, &text);
+    }
+    None
+}
+
+/// Extract a number from the body via the configured regex (first capture
+/// group, or the whole match for a group-less pattern) and check it against
+/// the optional inclusive bounds. Returns a failure reason or `None`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "config bounds are human-scale thresholds, far below 2^52"
+)]
+fn check_number(pattern: &str, min: Option<i64>, max: Option<i64>, body: &str) -> Option<String> {
+    // The pattern is validated at config load, so this should not fail.
+    let Ok(regex) = regex::Regex::new(pattern) else {
+        return Some(format!("invalid number_regex: {pattern}"));
+    };
+    let Some(captures) = regex.captures(body) else {
+        return Some(format!("number_regex matched nothing: {pattern}"));
+    };
+    let matched = captures
+        .get(1)
+        .or_else(|| captures.get(0))
+        .map_or("", |capture| capture.as_str());
+    let Ok(value) = matched.trim().parse::<f64>() else {
+        return Some(format!("number_regex match is not a number: {matched}"));
+    };
+    if let Some(min) = min
+        && value < min as f64
+    {
+        return Some(format!("number {value} below min {min}"));
+    }
+    if let Some(max) = max
+        && value > max as f64
+    {
+        return Some(format!("number {value} above max {max}"));
     }
     None
 }
@@ -781,10 +823,13 @@ pub fn public_reason(reason: &str) -> &str {
     if reason.starts_with("missed scheduled heartbeat") {
         return "missed scheduled heartbeat";
     }
-    // Keyword and JSON assertions embed the configured keyword/query.
+    // Keyword, JSON and number assertions embed the configured keyword/query/
+    // regex - and the number reasons additionally carry the extracted value.
     if reason.starts_with("keyword ")
         || reason.starts_with("JSON query")
         || reason.starts_with("invalid JSON query")
+        || reason.starts_with("number")
+        || reason.starts_with("invalid number_regex")
         || reason == "response is not valid JSON"
     {
         return "content check failed";
@@ -852,6 +897,14 @@ mod tests {
         );
         assert_eq!(
             public_reason("JSON query $.status != ok"),
+            "content check failed"
+        );
+        assert_eq!(
+            public_reason("number 0 below min 1"),
+            "content check failed"
+        );
+        assert_eq!(
+            public_reason("number_regex matched nothing: ships (\\d+)"),
             "content check failed"
         );
         assert_eq!(
@@ -947,6 +1000,9 @@ mod tests {
             keyword_invert: false,
             json_query: None,
             json_expected: None,
+            number_regex: None,
+            number_min: None,
+            number_max: None,
             max_body_kb: None,
             probe_retries: None,
             notify: None,
@@ -983,6 +1039,30 @@ mod tests {
         monitor.keyword_invert = true;
         assert!(check_assertions(&monitor, b"failure").is_none());
         assert!(check_assertions(&monitor, b"all OK").is_some());
+    }
+
+    #[test]
+    fn number_assertion() {
+        let body = r#"<div class="stationRealtimeShipUnique">11</div>"#;
+        let pattern = r#"stationRealtimeShipUnique">(\d+)<"#;
+        // In bounds, at the bound, and out of bounds on both sides.
+        assert!(check_number(pattern, Some(1), None, body).is_none());
+        assert!(check_number(pattern, Some(11), Some(11), body).is_none());
+        assert_eq!(
+            check_number(pattern, Some(12), None, body).as_deref(),
+            Some("number 11 below min 12")
+        );
+        assert_eq!(
+            check_number(pattern, None, Some(10), body).as_deref(),
+            Some("number 11 above max 10")
+        );
+        // No bounds: the extraction itself is the assertion.
+        assert!(check_number(pattern, None, None, body).is_none());
+        assert!(check_number(pattern, None, None, "<html>maintenance</html>").is_some());
+        // A group-less pattern falls back to the whole match; decimals parse.
+        assert!(check_number(r"[0-9.]+", Some(99), None, "uptime 99.5 %").is_none());
+        // A match that is not a number fails rather than passes vacuously.
+        assert!(check_number("<(div)>", Some(1), None, "<div>7</div>").is_some());
     }
 
     #[test]

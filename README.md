@@ -28,8 +28,10 @@ Full guides for everything below live in the
 - **HTTP, TCP, ICMP, DNS & push probes** - per-monitor interval, timeout,
   expected status, "degraded if slower than" threshold. Failures are retried
   before anything is recorded, so a one-off blip never pollutes the history.
-- **Assertions** - keyword or JSONPath (`json_query`) against the body; custom
-  headers and HTTP/SOCKS proxies.
+- **Assertions** - keyword, JSONPath (`json_query`) or numeric extraction
+  (`number_regex` + `number_min`/`number_max`: "this HTML page must show at
+  least 1 receiver online") against the body; custom headers and HTTP/SOCKS
+  proxies.
 - **Dual-stack verification** - probe IPv4 *and* IPv6 and require both: catches
   the service whose IPv6 has been silently dead for weeks behind a healthy IPv4.
 - **Cron-aware heartbeats** - a push monitor with `schedule = "0 3 * * *"` alerts

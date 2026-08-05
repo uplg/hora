@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Numeric body assertion** (`number_regex` + `number_min`/`number_max`): an
+  HTTP monitor can now extract a number from the response body - the first
+  capture group, or the whole match - and go down when nothing matches or the
+  value leaves the configured bounds. The assertion for pages that render a
+  gauge inline with no JSON endpoint behind them: a queue depth, a stock
+  level, an AIS station page whose "unique ships" counter hitting zero means
+  the receiver went silent. Reasons ("number 0 below min 1") collapse to
+  "content check failed" for anonymous viewers like the other body assertions.
+
 - **Notification channel watchdog**: a delivery channel that breaks (a revoked
   Telegram bot token, a dead SMTP relay, a deleted Discord webhook) fails
   silently in the logs — you discover it during the real incident, when the

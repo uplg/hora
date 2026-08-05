@@ -37,8 +37,18 @@ timeout_secs = 10
 keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 json_query = "$.status"   # JSONPath (RFC 9535) against a JSON body
 json_expected = "ok"      # the queried value must equal this (omit = must match a node)
+number_regex = 'in stock: (\d+)'  # extract a number from the body (first capture
+                          # group, or the whole match) - down when nothing matches
+number_min = 1            # ... or when the number is below this (inclusive)
+number_max = 500          # ... or above this (inclusive)
 max_body_kb = 256         # cap on the body read for assertions (default 1 MiB)
 ```
+
+`number_regex` is the assertion for pages that render a gauge inline with no
+JSON endpoint behind them - a queue depth, a stock level, a sensor's "receivers
+online" counter. When the page is HTML, anchor the pattern on the surrounding
+markup: `number_regex = 'class="shipCount">(\d+)<'` with `number_min = 1` goes
+down the moment the counter reads zero (or disappears entirely).
 
 Redirects are followed (up to 10), but configured headers - which may carry
 credentials - are only re-attached while the redirect stays on the original
