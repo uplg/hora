@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-08-16
+
+### Fixed
+
+- **"database is locked" during maintenance and at boot**: the 6h maintenance
+  tick rescanned the whole raw `checks` table inside write transactions - the
+  downsampler re-derived every hourly bucket only to discard them, and the
+  orphan sweep's anti-join full-scanned millions of rows to usually delete
+  nothing - starving the scheduler's inserts and dropping check samples.
+  Downsampling is now incremental (it resumes above the newest bucket), the
+  orphan sweep reads first and only deletes what a config change actually
+  orphaned, and the first maintenance tick waits out the boot burst (5 min).
+- **Lockstep probing**: monitors sharing an interval all probed - and wrote -
+  at the same instant, at boot and on every aligned tick after. Each monitor's
+  cadence is now phase-shifted by a stable hash of its id (capped at one
+  minute), spreading the load without changing any monitor's interval.
+
+### Changed
+
+- A summary rebuild (cache miss) runs its seven batched queries concurrently
+  instead of sequentially; the page pays the slowest query, not the sum.
+
 ## [0.9.0] - 2026-08-15
 
 ### Added
