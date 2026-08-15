@@ -409,14 +409,27 @@ pub async fn availability_all(
         .collect())
 }
 
+/// Days beyond the hourly-downsample horizon are read from the buckets only.
+///
+/// Raw rows older than [`DOWNSAMPLE_HOURLY_AFTER_DAYS`] are already rolled up
+/// into `checks_hourly`, so scanning them again for the daily bars is pure
+/// waste - and with the default 90-day raw retention that waste is months of
+/// checks. The extra slack covers the roll-up cadence ([`PRUNE_INTERVAL`]):
+/// hours are only bucketed once a prune tick has seen them age past the
+/// horizon, so the newest buckets can lag it by up to one interval.
+const DAILY_RAW_WINDOW_DAYS: i64 = DOWNSAMPLE_HOURLY_AFTER_DAYS + 2;
+
 /// Daily up/down/degraded aggregates per monitor since `since`, oldest first.
+/// `now` bounds the raw scan (callers pass their current timestamp).
 ///
 /// Reads the raw checks *and* the downsampled `checks_hourly` / `checks_daily`
-/// buckets, so the daily bars extend beyond the raw retention window. For each
-/// `(monitor, day)` the source with the most samples wins: raw is
-/// authoritative while complete, and the aggregates take over for days whose
-/// raw rows retention has already pruned (a partially pruned boundary day
-/// resolves to whichever source still holds the full count).
+/// buckets, so the daily bars extend beyond the raw retention window. Raw rows
+/// are only scanned over the recent [`DAILY_RAW_WINDOW_DAYS`]; older days come
+/// from the buckets, which are complete there. For each `(monitor, day)` the
+/// source with the most samples wins: raw is authoritative while complete, and
+/// the aggregates take over for days whose raw rows retention has already
+/// pruned (a partially pruned boundary day resolves to whichever source still
+/// holds the full count).
 ///
 /// # Errors
 ///
@@ -424,7 +437,9 @@ pub async fn availability_all(
 pub async fn daily_all(
     pool: &SqlitePool,
     since: i64,
+    now: i64,
 ) -> sqlx::Result<HashMap<String, Vec<DayRow>>> {
+    let raw_since = since.max(now - DAILY_RAW_WINDOW_DAYS * SECONDS_PER_DAY);
     let raw = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
         "SELECT monitor_id, \
             strftime('%Y-%m-%d', time, 'unixepoch') AS day, \
@@ -433,7 +448,7 @@ pub async fn daily_all(
             CAST(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS INTEGER) \
          FROM checks WHERE time >= ? GROUP BY monitor_id, day",
     )
-    .bind(since)
+    .bind(raw_since)
     .fetch_all(pool)
     .await?;
     let hourly = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
@@ -1813,7 +1828,7 @@ mod tests {
         assert_eq!(latency["a"].len(), 1); // the down check has no latency
         assert_eq!(latency["b"][0].latency_ms, 20);
 
-        let daily = daily_all(&pool, 0).await.unwrap();
+        let daily = daily_all(&pool, 0, 300).await.unwrap();
         assert!(daily.contains_key("a") && daily.contains_key("b"));
 
         let certs = cert_all(&pool).await.unwrap();
@@ -1910,7 +1925,7 @@ mod tests {
 
         // Raw still present: counts come from it (and agree with the bucket).
         let day_key = "1970-01-11";
-        let bars = daily_all(&pool, 0).await.unwrap();
+        let bars = daily_all(&pool, 0, hour0 + 3600).await.unwrap();
         assert_eq!(bars["m"][0].day, day_key);
         assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
 
@@ -1919,11 +1934,38 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let bars = daily_all(&pool, 0).await.unwrap();
+        let bars = daily_all(&pool, 0, hour0 + 3600).await.unwrap();
         assert_eq!(bars["m"][0].day, day_key);
         assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
     }
 
+    #[tokio::test]
+    async fn daily_all_reads_old_days_from_buckets_not_raw() {
+        let pool = memory_pool().await;
+        let now = 100 * 86400;
+        let old = now - 30 * SECONDS_PER_DAY; // well past the raw window
+        let recent = now - 3600; // inside the raw window
+
+        // The old day exists as raw rows *and* a (complete) hourly bucket; the
+        // bucket must be the source consulted - raw that old is never scanned.
+        // The doctored bucket disagrees with raw at the *same* sample count, so
+        // if raw were still read it would win the tie (first writer) and the
+        // day would come out down instead.
+        insert(&pool, "m", old, 0, None).await;
+        downsample_hourly(&pool, old + 3600).await.unwrap();
+        sqlx::query("UPDATE checks_hourly SET up_count = 1, down_count = 0")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert(&pool, "m", recent, 1, Some(10)).await;
+
+        let bars = daily_all(&pool, 0, now).await.unwrap();
+        assert_eq!(bars["m"].len(), 2);
+        // Old day: the doctored bucket answers, proving raw was not read.
+        assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 0));
+        // Recent day: raw is still authoritative inside the window.
+        assert_eq!((bars["m"][1].up, bars["m"][1].down), (1, 0));
+    }
 
     #[tokio::test]
     async fn recent_checks_carry_the_failure_reason() {

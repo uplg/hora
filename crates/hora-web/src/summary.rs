@@ -253,7 +253,10 @@ pub(crate) async fn build_summary(
         db::availability_all(pool, ctx.since_24h).await,
         "availability",
     );
-    let daily = or_empty(db::daily_all(pool, ctx.since_history).await, "daily");
+    let daily = or_empty(
+        db::daily_all(pool, ctx.since_history, ctx.timestamp).await,
+        "daily",
+    );
     // Latency is summarised in SQL: exact percentiles, plus a bucket-averaged
     // series for the sparkline. The raw 24h samples never enter memory or the
     // page, so both stay bounded by the monitor count, not the check frequency.

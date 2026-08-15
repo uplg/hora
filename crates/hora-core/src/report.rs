@@ -103,7 +103,7 @@ pub async fn build(pool: &SqlitePool, config: &Config, month: &str) -> anyhow::R
 
     // Daily counts from raw checks and the downsampled buckets, keyed by day
     // string - the month is a prefix match away.
-    let daily = db::daily_all(pool, start).await?;
+    let daily = db::daily_all(pool, start, now).await?;
     let incidents = db::recent_incidents(pool, 1000).await?;
 
     let mut rows = Vec::with_capacity(config.monitors.len());
@@ -288,6 +288,11 @@ mod tests {
         sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, 'm', 1)")
             .bind(start + 35 * SECONDS_PER_DAY)
             .execute(&pool)
+            .await
+            .unwrap();
+        // A live database would long since have rolled 2021 checks into hourly
+        // buckets (daily_all only scans raw over the recent window); mirror it.
+        db::downsample_hourly(&pool, start + 40 * SECONDS_PER_DAY)
             .await
             .unwrap();
         // One resolved incident fully inside the month (10 minutes).

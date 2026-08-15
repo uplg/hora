@@ -76,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependencies refreshed across the workspace (ratatui unpinned to 0.30.2,
   surge-ping 0.9); `tower-http` stays on 0.6 until reqwest moves.
 
+### Fixed
+
+- **Status page slowed to a crawl as raw history accumulated**: the daily-bars
+  aggregate scanned every raw check in the retention window (90 days by
+  default) with a per-row `strftime`, several seconds per page/badge/summary
+  request after a couple of months of data. The raw scan is now bounded to the
+  last ~9 days - older days were already served by the hourly/daily buckets -
+  and a new time-led covering index (migration `0017`) turns the windowed
+  aggregates (daily bars, 24h availability, latency percentiles and
+  sparklines) into range seeks instead of full-table scans.
+
 ## [0.8.1] - 2026-08-05
 
 ### Added
