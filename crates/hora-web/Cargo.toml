@@ -27,4 +27,5 @@ workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+toml = { workspace = true }
 tower = { version = "0.5.3", features = ["util"] }

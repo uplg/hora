@@ -1476,18 +1476,15 @@ pub(crate) async fn status_badge(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     // Badges are embeddable and unauthenticated: a private monitor's badge is
-    // a 404, not a leak.
-    let summary = state_summary(state, false).await;
-    let monitor = summary
-        .monitors
-        .iter()
-        .find(|m| m.id == id)
-        .ok_or_else(|| AppError::NotFound("unknown monitor"))?;
-    Ok(svg_response(badge(
-        "status",
-        monitor.status,
-        status_color(monitor.status),
-    )))
+    // a 404, not a leak. They answer from two indexed single-monitor reads
+    // (milliseconds) rather than the page summary - a badge on a README must
+    // not pay for, or wait on, a full status-page rebuild.
+    let config = state.config.borrow().clone();
+    badge_monitor(&config, &id)?;
+    let threshold = i64::from(config.alerts.fail_threshold.max(1));
+    let recent = db::recent_checks(&state.pool, &id, threshold).await?;
+    let status = db::derive_status(&recent, threshold);
+    Ok(svg_response(badge("status", status, status_color(status))))
 }
 
 #[utoipa::path(
@@ -1503,17 +1500,28 @@ pub(crate) async fn uptime_badge(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let summary = state_summary(state, false).await;
-    let monitor = summary
-        .monitors
-        .iter()
-        .find(|m| m.id == id)
-        .ok_or_else(|| AppError::NotFound("unknown monitor"))?;
-    let (message, color) = match monitor.uptime_permille {
+    // Same single-monitor fast path as `status_badge`; the permille arithmetic
+    // mirrors the summary's card so both always show the same figure.
+    let config = state.config.borrow().clone();
+    badge_monitor(&config, &id)?;
+    let since = Utc::now().timestamp() - hora_core::SECONDS_PER_DAY;
+    let (available, total) = db::availability(&state.pool, &id, since).await?;
+    let permille = (total > 0).then(|| available.saturating_mul(1000) / total);
+    let (message, color) = match permille {
         Some(permille) => (format_permille(permille), uptime_color(permille)),
         None => ("n/a".to_owned(), "#9f9f9f"),
     };
     Ok(svg_response(badge("uptime", &message, color)))
+}
+
+/// The badge-visible monitor with `id`: public monitors only - a private
+/// monitor's badge is indistinguishable from an unknown one.
+fn badge_monitor<'a>(config: &'a Config, id: &str) -> Result<&'a Monitor, AppError> {
+    config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == id && monitor.public)
+        .ok_or(AppError::NotFound("unknown monitor"))
 }
 
 /// Sample a series down to at most `max` points, keeping its overall shape.
@@ -1536,6 +1544,33 @@ pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn badges_expose_public_monitors_only() {
+        let config: Config = toml::from_str(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "pub"
+            name = "Public"
+            target = "https://example.com"
+            interval_secs = 60
+            [[monitors]]
+            id = "priv"
+            name = "Private"
+            target = "https://internal.example.com"
+            interval_secs = 60
+            public = false
+        "#,
+        )
+        .unwrap();
+        assert!(badge_monitor(&config, "pub").is_ok());
+        // Private and unknown are the same 404 - the badge must not leak
+        // which private ids exist.
+        assert!(badge_monitor(&config, "priv").is_err());
+        assert!(badge_monitor(&config, "nope").is_err());
+    }
 
     #[test]
     fn alert_message_folds_tags_in_sorted_order() {
