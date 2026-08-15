@@ -247,37 +247,38 @@ pub(crate) async fn build_summary(
         .filter(|monitor| full || monitor.public)
         .collect();
 
-    // The 24h/90d aggregates batch into one query each. A failed query degrades
-    // to empty data ("no data" cards) rather than blacking out the page.
-    let availability = or_empty(
-        db::availability_all(pool, ctx.since_24h).await,
-        "availability",
-    );
-    let daily = or_empty(
-        db::daily_all(pool, ctx.since_history, ctx.timestamp).await,
-        "daily",
-    );
+    // The 24h/90d aggregates batch into one query each, and the batches are
+    // independent, so they run concurrently: under WAL every read gets its own
+    // pool connection and the rebuild costs the slowest query, not the sum of
+    // all of them. A failed query degrades to empty data ("no data" cards)
+    // rather than blacking out the page.
+    let bucket_secs = (SECONDS_PER_DAY / SPARK_BUCKETS).max(1);
     // Latency is summarised in SQL: exact percentiles, plus a bucket-averaged
     // series for the sparkline. The raw 24h samples never enter memory or the
     // page, so both stay bounded by the monitor count, not the check frequency.
-    let percentiles = percentile_map(or_empty(
-        db::latency_percentiles_all(pool, ctx.since_24h).await,
-        "latency percentiles",
-    ));
-    let bucket_secs = (SECONDS_PER_DAY / SPARK_BUCKETS).max(1);
-    let sparklines = or_empty(
-        db::latency_sparkline_all(pool, ctx.since_24h, bucket_secs).await,
-        "latency sparklines",
+    let (availability, daily, percentiles, sparklines, certs, recent, events) = tokio::join!(
+        db::availability_all(pool, ctx.since_24h),
+        db::daily_all(pool, ctx.since_history, ctx.timestamp),
+        db::latency_percentiles_all(pool, ctx.since_24h),
+        db::latency_sparkline_all(pool, ctx.since_24h, bucket_secs),
+        db::cert_all(pool),
+        recent_checks_map(pool, &visible_monitors, ctx.threshold.max(1)),
+        // Event markers overlay the sparklines - operator info (deploy titles),
+        // so only the authenticated view fetches them; the public one stays bare.
+        async {
+            if full {
+                db::events_since(pool, ctx.since_24h).await
+            } else {
+                Ok(Vec::new())
+            }
+        },
     );
-    let certs = or_empty(db::cert_all(pool).await, "certificates");
-    let recent = recent_checks_map(pool, &visible_monitors, ctx.threshold.max(1)).await;
-    // Event markers overlay the sparklines - operator info (deploy titles),
-    // so only the authenticated view fetches them; the public one stays bare.
-    let events = if full {
-        or_empty(db::events_since(pool, ctx.since_24h).await, "events")
-    } else {
-        Vec::new()
-    };
+    let availability = or_empty(availability, "availability");
+    let daily = or_empty(daily, "daily");
+    let percentiles = percentile_map(or_empty(percentiles, "latency percentiles"));
+    let sparklines = or_empty(sparklines, "latency sparklines");
+    let certs = or_empty(certs, "certificates");
+    let events = or_empty(events, "events");
 
     let data = MonitorData {
         recent: &recent,
