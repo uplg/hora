@@ -15,6 +15,10 @@ use crate::config::{Config, Peer};
 use crate::probe::Outcome;
 
 const PRUNE_INTERVAL: Duration = Duration::from_hours(6);
+/// How long after startup the first prune tick runs. Boot is already the
+/// busiest write window (every monitor's first probe, the cert sweep, possibly
+/// a schema migration); maintenance can wait until the burst has settled.
+const PRUNE_STARTUP_DELAY: Duration = Duration::from_mins(5);
 
 /// Raw checks roll up into hourly buckets once older than this.
 const DOWNSAMPLE_HOURLY_AFTER_DAYS: i64 = 7;
@@ -1331,10 +1335,22 @@ pub async fn backup_into(database_path: &str, dest: &str) -> anyhow::Result<()> 
 /// still-complete raw data is final. Recomputing it later (`OR REPLACE`) could
 /// silently shrink it once retention starts eating the raw rows it came from.
 ///
+/// Incremental: because buckets are write-once, everything at or below the
+/// newest bucket is already rolled up, so only raw rows above it are scanned
+/// (an indexed range of roughly one prune interval). The old full scan held
+/// the write lock for seconds on a months-old database - long enough for the
+/// scheduler's inserts to time out ("database is locked"). Checks are always
+/// recorded at the current time, so no raw row can appear below a bucket that
+/// was complete when written.
+///
 /// # Errors
 ///
 /// Returns an error if the aggregation fails.
 pub async fn downsample_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    let newest: Option<i64> = sqlx::query_scalar("SELECT MAX(hour) FROM checks_hourly")
+        .fetch_one(pool)
+        .await?;
+    let floor = newest.map_or(i64::MIN, |hour| hour + 3600);
     sqlx::query(
         "INSERT OR IGNORE INTO checks_hourly \
             (monitor_id, hour, up_count, down_count, degraded_count, avg_latency_ms) \
@@ -1346,10 +1362,11 @@ pub async fn downsample_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<(
            SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END), \
            CAST(AVG(latency_ms) AS INTEGER) \
          FROM checks \
-         WHERE time < ? \
+         WHERE time >= ? AND time < ? \
          GROUP BY monitor_id, hour \
          HAVING hour + 3600 <= ?",
     )
+    .bind(floor)
     .bind(cutoff)
     .bind(cutoff)
     .execute(pool)
@@ -1359,14 +1376,20 @@ pub async fn downsample_hourly(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<(
 
 /// Aggregate hourly buckets into daily ones for even longer-term storage.
 ///
-/// Same write-once rule as [`downsample_hourly`]: only days entirely below
-/// `cutoff`, inserted once. The latency average is weighted by each hour's
-/// sample count, so a quiet hour does not skew the day.
+/// Same write-once rule (and the same incremental floor) as
+/// [`downsample_hourly`]: only days entirely below `cutoff`, inserted once,
+/// scanning only the hourly buckets above the newest daily one. The latency
+/// average is weighted by each hour's sample count, so a quiet hour does not
+/// skew the day.
 ///
 /// # Errors
 ///
 /// Returns an error if the aggregation fails.
 pub async fn downsample_daily(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
+    let newest: Option<i64> = sqlx::query_scalar("SELECT MAX(day) FROM checks_daily")
+        .fetch_one(pool)
+        .await?;
+    let floor = newest.map_or(i64::MIN, |day| day + 86400);
     sqlx::query(
         "INSERT OR IGNORE INTO checks_daily \
             (monitor_id, day, up_count, down_count, degraded_count, avg_latency_ms) \
@@ -1380,10 +1403,11 @@ pub async fn downsample_daily(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()
                 / NULLIF(SUM(CASE WHEN avg_latency_ms IS NOT NULL \
                               THEN up_count + degraded_count END), 0) AS INTEGER) \
          FROM checks_hourly \
-         WHERE hour < ? \
+         WHERE hour >= ? AND hour < ? \
          GROUP BY monitor_id, day \
          HAVING day + 86400 <= ?",
     )
+    .bind(floor)
     .bind(cutoff)
     .bind(cutoff)
     .execute(pool)
@@ -1449,7 +1473,10 @@ pub fn spawn_pruner(
 ) -> tokio::task::JoinHandle<()> {
     let pool = pool.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(PRUNE_INTERVAL);
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + PRUNE_STARTUP_DELAY,
+            PRUNE_INTERVAL,
+        );
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -1555,13 +1582,32 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drop everything left behind by monitors removed from the config. The ids to
-/// keep travel as a single JSON array, expanded by `SQLite`'s `json_each` and
-/// matched with a `NOT EXISTS` anti-join - one static statement per table, with
-/// no `IN`-list size limit. Both monitor ids and watched peers' listen ids are
-/// kept, so the sweep never deletes a peer's heartbeat history.
+/// The tables swept for rows left behind by removed monitors, all keyed by a
+/// `monitor_id` column.
+const ORPHAN_TABLES: [&str; 8] = [
+    "checks",
+    "certs",
+    "cert_pins",
+    "domain_expiry",
+    "incidents",
+    "pushed_alerts",
+    "checks_hourly",
+    "checks_daily",
+];
+
+/// Drop everything left behind by monitors removed from the config. Both
+/// monitor ids and watched peers' listen ids are kept, so the sweep never
+/// deletes a peer's heartbeat history.
+///
+/// The sweep first *reads* which ids each table actually holds and only then
+/// deletes the orphaned ones, one targeted `DELETE` per id. The previous
+/// `NOT EXISTS` anti-join was one statement per table but a full table scan
+/// inside a write transaction - on `checks` that held the write lock for
+/// seconds every prune tick, timing out the scheduler's inserts, all to
+/// usually delete nothing. Reads don't block writers under WAL, and the
+/// targeted deletes only run on a config change that removed a monitor.
 async fn delete_orphans(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
-    let keep: Vec<&str> = config
+    let keep: std::collections::HashSet<&str> = config
         .monitors
         .iter()
         .map(|m| m.id.as_str())
@@ -1573,63 +1619,30 @@ async fn delete_orphans(pool: &SqlitePool, config: &Config) -> anyhow::Result<()
                 .map(Peer::listen_id),
         )
         .collect();
-    let keep = serde_json::to_string(&keep)?;
-    sqlx::query(
-        "DELETE FROM checks WHERE NOT EXISTS \
-         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = checks.monitor_id)",
-    )
-    .bind(&keep)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "DELETE FROM certs WHERE NOT EXISTS \
-         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = certs.monitor_id)",
-    )
-    .bind(&keep)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "DELETE FROM cert_pins WHERE NOT EXISTS \
-         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = cert_pins.monitor_id)",
-    )
-    .bind(&keep)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "DELETE FROM domain_expiry WHERE NOT EXISTS \
-         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = domain_expiry.monitor_id)",
-    )
-    .bind(&keep)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "DELETE FROM incidents WHERE NOT EXISTS \
-         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = incidents.monitor_id)",
-    )
-    .bind(&keep)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "DELETE FROM pushed_alerts WHERE NOT EXISTS \
-         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = pushed_alerts.monitor_id)",
-    )
-    .bind(&keep)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "DELETE FROM checks_hourly WHERE NOT EXISTS \
-         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = checks_hourly.monitor_id)",
-    )
-    .bind(&keep)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "DELETE FROM checks_daily WHERE NOT EXISTS \
-         (SELECT 1 FROM json_each(?) AS keep WHERE keep.value = checks_daily.monitor_id)",
-    )
-    .bind(&keep)
-    .execute(pool)
-    .await?;
+    for table in ORPHAN_TABLES {
+        // A plain DISTINCT read: on `checks` it walks the covering index
+        // (fractions of a second even at millions of rows) and, being a read,
+        // never holds the write lock. (A recursive-CTE "skip scan" would seek
+        // instead of scanning, but its correlated MIN subquery loops forever
+        // under some query plans - the UNIQUE autoindex triggers it - so the
+        // boring query wins.)
+        // The interpolated name comes from the ORPHAN_TABLES const, not input.
+        let present: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT DISTINCT monitor_id FROM {table}"
+        )))
+        .fetch_all(pool)
+        .await?;
+        for id in present {
+            if !keep.contains(id.as_str()) {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DELETE FROM {table} WHERE monitor_id = ?"
+                )))
+                .bind(&id)
+                .execute(pool)
+                .await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1912,6 +1925,36 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(days, vec![(hour0, 3, 1, 200)]);
+    }
+
+    #[tokio::test]
+    async fn downsampling_only_scans_above_the_newest_bucket() {
+        let pool = memory_pool().await;
+        let hour0 = 10 * 86400;
+        let hour1 = hour0 + 3600;
+
+        // A bucket already exists for hour1: the floor for the next run.
+        insert(&pool, "m", hour1 + 10, 1, Some(100)).await;
+        downsample_hourly(&pool, hour1 + 3600).await.unwrap();
+
+        // Raw rows below the floor - a backdated write, which live recording
+        // never produces - are outside the incremental scan and stay
+        // unbucketed; a second monitor's rows above the floor still roll up
+        // (the floor is global, monotonic time covers every monitor).
+        insert(&pool, "m", hour0 + 10, 1, Some(999)).await;
+        insert(&pool, "other", hour1 + 7200 + 10, 0, None).await;
+        downsample_hourly(&pool, hour1 + 3 * 3600).await.unwrap();
+
+        let buckets = sqlx::query_as::<_, (String, i64)>(
+            "SELECT monitor_id, hour FROM checks_hourly ORDER BY hour",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            buckets,
+            vec![("m".to_owned(), hour1), ("other".to_owned(), hour1 + 7200)]
+        );
     }
 
     #[tokio::test]

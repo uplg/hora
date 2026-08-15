@@ -69,6 +69,17 @@ pub fn spawn_monitor(
     tokio::spawn(run(monitor, config, deps, shutdown))
 }
 
+/// The phase shift for a monitor's first tick: a stable hash of its id spread
+/// over the interval, capped at one minute. Deterministic (`DefaultHasher::new`
+/// uses fixed keys) so a monitor keeps its phase across restarts and reloads.
+fn stagger_offset(id: &str, interval: std::time::Duration) -> std::time::Duration {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    let span = interval.min(std::time::Duration::from_mins(1));
+    span.mul_f64(f64::from(u32::try_from(hasher.finish() % 1000).unwrap_or(0)) / 1000.0)
+}
+
 async fn run(
     monitor: Monitor,
     config: watch::Receiver<Arc<Config>>,
@@ -84,7 +95,14 @@ async fn run(
         last_tick,
     } = deps;
     // Fixed cadence: the tick interval does not drift by the probe duration.
-    let mut ticker = tokio::time::interval(monitor.interval());
+    // The first tick is phase-shifted per monitor so a fleet sharing the same
+    // interval doesn't probe - and insert - in lockstep at boot and then on
+    // every aligned tick forever. The offset is a stable hash of the id (same
+    // phase across restarts), capped so a long-interval monitor still gets its
+    // first check within a minute of starting.
+    let offset = stagger_offset(&monitor.id, monitor.interval());
+    let mut ticker =
+        tokio::time::interval_at(tokio::time::Instant::now() + offset, monitor.interval());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut consecutive_down: u32 = 0;
     let mut consecutive_degraded: u32 = 0;
@@ -653,6 +671,20 @@ fn up_heartbeat() -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stagger_offset_is_stable_and_bounded() {
+        let minute = std::time::Duration::from_mins(1);
+        // Same id, same phase - across restarts and config reloads.
+        assert_eq!(stagger_offset("api", minute), stagger_offset("api", minute));
+        // Different ids should generally land on different phases.
+        assert_ne!(stagger_offset("api", minute), stagger_offset("db", minute));
+        // Never past the interval, and capped at a minute for slow cadences.
+        let five_secs = std::time::Duration::from_secs(5);
+        assert!(stagger_offset("api", five_secs) < five_secs);
+        let daily = std::time::Duration::from_hours(24);
+        assert!(stagger_offset("api", daily) < minute);
+    }
 
     #[test]
     fn event_phrase_formats_the_age() {
