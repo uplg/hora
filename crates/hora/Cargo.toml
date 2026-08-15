@@ -11,7 +11,7 @@ anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
 crossterm = { version = "0.29", features = ["event-stream"] }
-futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 hora-core.workspace = true
 hora-web.workspace = true
 ratatui = "0.30.2"

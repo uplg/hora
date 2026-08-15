@@ -48,6 +48,21 @@ skip = [
     # The wasi shims themselves disagree: getrandom 0.4's wasip3 and 0.3's
     # wasip2 each pin a different pre-1.0 wit-bindgen.
     { crate = "wit-bindgen" },
+    # We ride tower-http 0.7 while reqwest (0.13) still pins 0.6. Drop this
+    # skip once reqwest moves to 0.7.
+    { crate = "tower-http" },
+    # async-trait 0.1.92 jumped to syn 3 while the rest of the proc-macro
+    # ecosystem (serde_derive, askama, darling) is still on syn 2.
+    { crate = "syn" },
+    # lettre's email-encoding moved to base64 0.23; hyper-util, lettre itself
+    # and x509-parser still pull 0.22.
+    { crate = "base64" },
+]
+# Windows-only: the two windows-sys majors each pin their own windows-targets,
+# which fans out into one shim crate per architecture - skip the whole subtree
+# rather than naming every windows_<arch>_<abi> twin.
+skip-tree = [
+    { crate = "windows-targets" },
     # We use sha2 0.11 (cert pinning) for its fixes going forward; sqlx still
     # pins the 0.10 line.
     { crate = "sha2" },

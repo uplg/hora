@@ -11,7 +11,7 @@ anyhow.workspace = true
 arc-swap = "1.9.2"
 chrono.workspace = true
 croner.workspace = true
-futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 hickory-resolver = { workspace = true }
 hora-notify.workspace = true
 notify.workspace = true
