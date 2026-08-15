@@ -93,6 +93,13 @@ pub async fn connect(database_path: &str) -> anyhow::Result<SqlitePool> {
         .await?;
 
     migrator().run(&pool).await?;
+    // Give the planner statistics before the first page builds. Without
+    // `sqlite_stat1` it favors a full scan of the monitor-led index for the
+    // 24h aggregates (seconds on a seasoned database); with stats it skip-scans
+    // (`ANY(monitor_id) AND time>?`), milliseconds. `PRAGMA optimize` only
+    // re-runs ANALYZE when the shape of the data has drifted, so on most boots
+    // this is a no-op; the first one pays a sub-second full ANALYZE.
+    sqlx::query("PRAGMA optimize").execute(&pool).await?;
     Ok(pool)
 }
 
@@ -1579,6 +1586,11 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
     }
 
     delete_orphans(pool, config).await?;
+
+    // Keep the planner statistics current as the tables grow and the prunes
+    // reshape them - same rationale as the call in [`connect`]; cheap unless
+    // the data actually drifted.
+    sqlx::query("PRAGMA optimize").execute(pool).await?;
     Ok(())
 }
 
