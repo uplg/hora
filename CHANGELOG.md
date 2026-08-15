@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-08-16
+
+### Fixed
+
+- **Slow first page build after boot**: without planner statistics `SQLite`
+  favored a full index scan for the 24h aggregates (seconds on a seasoned
+  database, four slow-statement warnings on the first rebuild). `PRAGMA
+  optimize` now runs after migrations and after each maintenance tick; with
+  statistics the same queries skip-scan in milliseconds.
+- **Slow badges**: a badge fetch went through the summary cache, so a cache
+  miss - the common case for a README badge - rebuilt the whole status page to
+  extract one monitor's figure. Badges now answer from two indexed
+  single-monitor queries, milliseconds regardless of the cache. Visibility is
+  unchanged (public monitors only; a private id 404s like an unknown one).
+- `lru` updated to 0.18.2, clearing RUSTSEC-2026-0253 (unsound
+  `LruCache::pop()`, pulled via ratatui for `hora top`).
+
+### Changed
+
+- Dependencies refreshed workspace-wide (tokio 1.53, serde 1.0.229,
+  async-trait 0.1.92); `tower-http` moves to 0.7 ahead of reqwest, which
+  still pins 0.6 (documented cargo-deny skip until reqwest catches up).
+
 ## [0.9.1] - 2026-08-16
 
 ### Fixed
