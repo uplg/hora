@@ -267,6 +267,24 @@
       font-size: 13px;
     }
 
+    /* The peers' view of this target ("Hora B: 220ms"). */
+    .vantages {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 10px;
+    }
+
+    .vantage.down {
+      color: var(--down);
+    }
+
+    .vantage.degraded {
+      color: var(--degraded);
+    }
+
     /* Operator event markers: a dashed vertical line, title on hover.
        Only rendered on the authenticated view. */
     .spark-event {
@@ -518,6 +536,10 @@
           </span>
         </div>
 
+        {% if !monitor.vantages.is_empty() %}
+        <div class="vantages">from elsewhere: {% for vantage in monitor.vantages %}<span
+            class="vantage {{ vantage.status }}">{{ vantage.label }}</span>{% endfor %}</div>
+        {% endif %}
         {% if let Some(cause) = monitor.cause %}
         <div class="topology cause">caused by {{ cause }}</div>
         {% endif %}

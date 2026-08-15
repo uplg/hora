@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unified timeline** (`hora timeline [--days N]` / `GET /timeline`): every
+  kind of recorded moment - down/recovered transitions, operator events,
+  pushed alerts, announcements, silences - merged into one chronology,
+  newest first, with a post-mortem link on each incident entry. Built
+  entirely from data Hora already stores (the merge is a pure, tested
+  function; the CLI and the page feed it different sources). Anonymous
+  viewers of `/timeline` get exactly what they may see elsewhere - sanitized
+  public incidents and announcements - never the operator streams.
+- **`hora peers diff`** and **per-vantage latency on the status page**: a new
+  authenticated mesh exchange (`GET /api/peer/monitors`, same strict
+  `listen_token` model as `/api/peer/probe`) discloses a node's probeable
+  monitors (kind + target, never names or credentials) with its live view of
+  each (status, 24h median). On top of it:
+  - `hora peers diff` compares this node's monitors with each peer's and
+    exits non-zero on drift or an unreachable peer - the alignment
+    `confirm_with_peers` silently relies on, now verifiable in CI.
+  - each monitor card shows how the target looks *from elsewhere*
+    ("Hora B: 220ms", "Hora C: down"), fed by a background poller (60s
+    rounds, bounded reads, strictly fail-open: page builds read the last
+    snapshot and never wait on the network). Also in `/api/summary` as a
+    `vantages` array per monitor.
+
 - **Event markers** (`hora event "deploy api v2.3"` / `POST /api/event`): the
   answer to the first diagnostic question, *"what changed?"*. A marker is one
   bounded title in a new `events` table, recorded from the CLI or a CI/deploy

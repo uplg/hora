@@ -375,6 +375,10 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # Each [[peers]] entry has two independent halves; set either or both:
 #   OUT  (ping_url)            - I heartbeat the peer when I'm healthy.
 #   IN   (expect_every_secs)   - I watch the peer and alert if it stops pinging me.
+# Peers with a ping_url are also polled (60s, fail-open) for their view of the
+# targets both nodes monitor: the status page then shows per-vantage latency
+# ("Hora B: 220ms") on each shared monitor's card, and `hora peers diff`
+# verifies the mesh's configs stayed aligned (non-zero exit on drift, for CI).
 # [[peers]]
 # id = "hora-b"             # the peer's [health].id (must match across the mesh)
 # name = "Hora B (Paris)"

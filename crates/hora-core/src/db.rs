@@ -1066,6 +1066,37 @@ pub async fn latest_event_before(
     .await
 }
 
+/// Announcements created since `since` (expired ones included - the timeline
+/// wants the history, unlike the banner query which wants the active set).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn announcements_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<Announcement>> {
+    sqlx::query_as::<_, Announcement>(
+        "SELECT id, title, body, severity, until, created_at FROM announcements \
+         WHERE created_at >= ? ORDER BY created_at DESC, id DESC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+}
+
+/// Silences created since `since` (expired ones included, for the timeline).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn silences_since(pool: &SqlitePool, since: i64) -> sqlx::Result<Vec<Silence>> {
+    sqlx::query_as::<_, Silence>(
+        "SELECT id, monitor_id, until, reason, created_at FROM silences \
+         WHERE created_at >= ? ORDER BY created_at DESC, id DESC",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+}
+
 /// Drop event markers older than `cutoff` (they age out with the closed
 /// incidents they may have been correlated into).
 async fn prune_events(pool: &SqlitePool, cutoff: i64) -> sqlx::Result<()> {
@@ -1892,6 +1923,7 @@ mod tests {
         assert_eq!(bars["m"][0].day, day_key);
         assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
     }
+
 
     #[tokio::test]
     async fn recent_checks_carry_the_failure_reason() {

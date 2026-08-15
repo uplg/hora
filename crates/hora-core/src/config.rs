@@ -600,6 +600,15 @@ impl Peer {
         self.api_origin().map(|origin| format!("{origin}/healthz"))
     }
 
+    /// The peer's `/api/peer/monitors` URL - the shared-monitor disclosure
+    /// behind `hora peers diff` and the per-vantage latency display - derived
+    /// like [`probe_url`](Self::probe_url).
+    #[must_use]
+    pub fn monitors_url(&self) -> Option<String> {
+        self.api_origin()
+            .map(|origin| format!("{origin}/api/peer/monitors"))
+    }
+
     /// The peer's `/api/peer/probe` URL for multi-vantage confirmation, derived
     /// from the origin of `ping_url`. `None` when there is no `ping_url` (an
     /// IN-only or external peer cannot be asked to probe).

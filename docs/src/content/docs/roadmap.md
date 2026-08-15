@@ -10,41 +10,29 @@ records what actually shipped.
 
 ## Next
 
-- **Event markers** - `hora event "deploy api v2.3"` (or `POST /api/event`
-  from a CI hook): a marker on the latency charts, a line in the history,
-  and automatic correlation in incidents ("down 3 minutes after *deploy api
-  v2.3*"). The first diagnostic question is never "is it slow?" - it is
-  "what changed?".
+- **Quiet hours & severity routing** - `quiet = "22:00-07:00"` per channel
+  (non-critical alerts held and delivered as a morning digest; critical
+  downs still pass), and a simple severity/group-to-channel matrix in the
+  TOML - degraded to a quiet channel, down to a loud one. *Flapping never
+  wakes you up*, taken literally - and the prerequisite for escalation.
 
 ## Exploring
 
-- **Auto-generated post-mortems** - an incident already knows its first
-  failure, the captured response, the multi-vantage verdict, the topology
-  and the correlated event: assemble it into a Markdown report ready to
-  paste in a ticket (`hora postmortem <id>`, `/incident/{id}`).
-- **Per-vantage data on the status page** - the observability residue of a
-  "multi-region mesh" now that [multi-vantage
-  confirmation](../guides/peers/#multi-vantage-confirmation) covers the
-  anti-false-positive side: a region badge and per-vantage latency ("80 ms
-  from EU, 220 ms from US"), aggregated read-only from the peers'
-  `/api/summary`. A display increment, not an architecture project.
 - **Escalation & acknowledgement** - if an alert is not acknowledged within
   N minutes, notify the next channel; ack via a signed link in the
-  notification. The biggest item on the list, and more natural once
-  multi-vantage confirmation exists.
+  notification. The biggest item on the list; more natural once severity
+  routing exists.
 - **`conf.d/` config splitting** - forty monitors in one file doesn't scale
-  to a team; splitting plays well with config-as-code in git.
-- **Quiet hours** - `quiet = "22:00-07:00"` per channel: non-critical alerts
-  held and delivered as a morning digest; critical downs still pass.
-- **Cert expiry over STARTTLS** - extend the certificate machinery to SMTP
-  587 / IMAP 143, the certificate every self-hosted mail operator forgets.
+  to a team; splitting plays well with config-as-code in git, and
+  `hora peers diff` already verifies the mesh stays aligned.
+- **Latency anomaly hints, info-only** - "4x slower than a usual Monday
+  9 a.m." as a card hint computed from the hourly aggregates the heatmap
+  already stores. Never an alert by default (see below).
+- **Response-time breakdown (DNS / TCP / TLS / TTFB)** - likely as a
+  `hora probe --breakdown` diagnostic first (hand-timed resolve, connect,
+  handshake, first byte), keeping the monitoring loop untouched.
 - **`hora import compose` / `caddy`** - generate monitors from a
   `docker-compose.yml` or a Caddyfile, like the Kuma importer.
-- **Severity/group alert routing** - degraded to a quiet channel, down to a
-  loud one, the database group to SMS: a simple matrix in the TOML, not a
-  rule engine.
-- **Response-time breakdown (DNS / TCP / TLS / TTFB)** - know whether the
-  slowness is the resolution, the handshake or the backend.
 - **Towards 1.0** - a config-format freeze, a SemVer commitment, and
   database migrations exercised against real long-lived databases.
 

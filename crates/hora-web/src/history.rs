@@ -108,6 +108,42 @@ pub(crate) struct IncidentTemplate {
     pub(crate) markdown: String,
 }
 
+/// The `/timeline` page: the unified chronology, newest first.
+#[derive(Template)]
+#[template(path = "timeline.html")]
+pub(crate) struct TimelineTemplate {
+    /// The status page title, linked back to from the footer.
+    pub(crate) title: String,
+    pub(crate) entries: Vec<TimelineRow>,
+    /// `?token=...` for the post-mortem links, like the heatmap links.
+    pub(crate) token_query: String,
+}
+
+/// One merged timeline entry, formatted for display.
+pub(crate) struct TimelineRow {
+    at: String,
+    /// The entry kind (`down`, `recovered`, `event`, ...), also a CSS class.
+    kind: &'static str,
+    title: String,
+    detail: Option<String>,
+    /// The incident behind a down/recovered entry, for the post-mortem link.
+    incident: Option<i64>,
+}
+
+/// Build the timeline rows from the merged core entries.
+pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<TimelineRow> {
+    entries
+        .iter()
+        .map(|entry| TimelineRow {
+            at: format_utc(entry.at),
+            kind: entry.kind.as_str(),
+            title: entry.title.clone(),
+            detail: entry.detail.clone(),
+            incident: entry.incident_id,
+        })
+        .collect()
+}
+
 /// One externally-pushed alert, formatted for display.
 pub(crate) struct AlertRow {
     monitor: String,

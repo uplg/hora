@@ -55,6 +55,7 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         announce_clear,
         post_event,
         peer_probe,
+        peer_monitors,
         status_badge,
         uptime_badge,
         heatmap_svg,
@@ -76,7 +77,10 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         AlertResponse,
         EventResponse,
         hora_core::confirm::ProbeRequest,
-        hora_core::confirm::ProbeResponse
+        hora_core::confirm::ProbeResponse,
+        hora_core::confirm::PeerMonitors,
+        hora_core::confirm::PeerMonitor,
+        crate::summary::VantageView
     ))
 )]
 struct ApiDoc;
@@ -137,10 +141,11 @@ pub(crate) async fn state_summary(state: AppState, full: bool) -> Arc<Summary> {
         config,
         cache,
         notifier,
+        vantage,
         ..
     } = state;
     let config = config.borrow().clone();
-    summary_for(&pool, &config, &cache, full, &notifier).await
+    summary_for(&pool, &config, &cache, full, &notifier, &vantage).await
 }
 
 /// Whether the request carries the configured viewer token, as
@@ -750,6 +755,55 @@ pub(crate) async fn history_page(
     Ok(Html(html))
 }
 
+/// How far back the `/timeline` page reaches, and how many entries it shows.
+const TIMELINE_DAYS: i64 = 7;
+const TIMELINE_LIMIT: usize = 200;
+
+/// The unified chronology (`/timeline`): downs/recoveries, operator events,
+/// pushed alerts, announcements and silences merged newest-first. The
+/// authenticated view gets everything; anonymous viewers get the same subset
+/// they may see elsewhere - sanitized public incidents and announcements -
+/// and never the operator streams (events, silences, alert detail).
+pub(crate) async fn timeline_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(auth_query): Query<AuthQuery>,
+) -> Result<Html<String>, AppError> {
+    let config = state.config.borrow().clone();
+    let authenticated = is_authenticated(&headers, auth_query.token.as_deref(), &config);
+    let since = Utc::now().timestamp() - TIMELINE_DAYS * hora_core::SECONDS_PER_DAY;
+
+    let sources = if authenticated {
+        hora_core::timeline::fetch(&state.pool, since, 500).await?
+    } else {
+        let mut incidents = visible_incidents(&state.pool, &config, false, 500).await?;
+        incidents.retain(|incident| {
+            incident.started_at >= since || incident.ended_at.is_some_and(|ended| ended >= since)
+        });
+        hora_core::timeline::Sources {
+            incidents,
+            announcements: db::announcements_since(&state.pool, since).await?,
+            ..Default::default()
+        }
+    };
+    let entries =
+        hora_core::timeline::merge(&sources, &monitor_names(&config), since, TIMELINE_LIMIT);
+
+    let token_query = auth_query
+        .token
+        .as_deref()
+        .filter(|_| authenticated)
+        .map(|token| format!("?token={}", history::url_encode(token)))
+        .unwrap_or_default();
+    let html = history::TimelineTemplate {
+        title: config.page.title.clone(),
+        entries: history::timeline_rows(&entries),
+        token_query,
+    }
+    .render()?;
+    Ok(Html(html))
+}
+
 pub(crate) async fn history_atom(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -913,6 +967,65 @@ pub(crate) async fn peer_probe(
         // Bounded: the reason crosses the wire into another node's logs.
         error: outcome.error.map(|error| error.chars().take(200).collect()),
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PeerMonitorsQuery {
+    /// The requesting node's `[health].id`.
+    from: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/peer/monitors",
+    params(("from" = String, Query, description = "The requesting peer's [health].id")),
+    responses(
+        (status = 200, description = "This node's probeable monitors, with its own view of each (status, 24h median)", body = hora_core::confirm::PeerMonitors),
+        (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token")
+    )
+)]
+pub(crate) async fn peer_monitors(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PeerMonitorsQuery>,
+) -> Result<Json<hora_core::confirm::PeerMonitors>, AppError> {
+    let config = state.config.borrow().clone();
+    // Same strict authentication as /api/peer/probe: the requesting peer must
+    // be configured here with a listen_token, and the header must match.
+    let authorized = config
+        .peers
+        .iter()
+        .find(|peer| peer.id == query.from)
+        .and_then(|peer| peer.listen_token.as_ref())
+        .is_some_and(|expected| {
+            headers
+                .get("x-push-token")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|token| ct_eq(token, expected.as_ref()))
+        });
+    if !authorized {
+        return Err(AppError::Unauthorized("unknown peer or invalid token"));
+    }
+
+    // What a mesh member may know: kind + target (it can probe those anyway
+    // via /api/peer/probe) and this node's live view of each - never names,
+    // notes or credentials. Push/exec monitors have no probeable target.
+    let summary = state_summary(state, true).await;
+    let monitors = config
+        .monitors
+        .iter()
+        .filter(|monitor| !matches!(monitor.kind, Kind::Push | Kind::Exec))
+        .map(|monitor| {
+            let view = summary.monitors.iter().find(|view| view.id == monitor.id);
+            hora_core::confirm::PeerMonitor {
+                kind: monitor.kind,
+                target: monitor.target.clone(),
+                status: view.map_or_else(|| "unknown".to_owned(), |view| view.status.to_owned()),
+                p50_ms: view.and_then(|view| view.p50_ms),
+            }
+        })
+        .collect();
+    Ok(Json(hora_core::confirm::PeerMonitors { monitors }))
 }
 
 #[utoipa::path(

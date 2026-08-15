@@ -16,8 +16,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers::{
     announce, announce_clear, favicon, font, group_page, healthz, heatmap_svg, history_atom,
-    history_page, incident_page, latency_json, metrics_prometheus, openapi, page, peer_probe,
-    post_alert, post_event, push, report_page, silence, status_badge, summary_json, uptime_badge,
+    history_page, incident_page, latency_json, metrics_prometheus, openapi, page, peer_monitors,
+    peer_probe, post_alert, post_event, push, report_page, silence, status_badge, summary_json,
+    timeline_page, uptime_badge,
 };
 use crate::{AppState, CSP, ConfiguredIp};
 
@@ -35,7 +36,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/silence", post(silence))
         .route("/api/announce", post(announce).delete(announce_clear))
         .route("/api/event", post(post_event))
-        .route("/api/peer/probe", post(peer_probe));
+        .route("/api/peer/probe", post(peer_probe))
+        .route("/api/peer/monitors", get(peer_monitors));
 
     // Parameters are clamped to >= 1, so `finish` always succeeds; if it ever
     // did not, the API simply runs without a rate limit rather than panicking.
@@ -75,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         .route("/history", get(history_page))
         .route("/history.atom", get(history_atom))
         .route("/incident/{id}", get(incident_page))
+        .route("/timeline", get(timeline_page))
         .route("/status/{group}", get(group_page))
         .route("/report/{month}", get(report_page))
         .merge(api)
@@ -681,6 +684,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn timeline_merges_and_keeps_operator_streams_private() {
+        let (app, pool) = test_app_with_pool().await;
+        hora_core::db::insert_event(&pool, "deploy api v2.3")
+            .await
+            .unwrap();
+        hora_core::db::insert_silence(
+            &pool,
+            "web",
+            chrono::Utc::now().timestamp() + 600,
+            Some("deploying"),
+        )
+        .await
+        .unwrap();
+        let incident_id = hora_core::db::insert_incident_start(
+            &pool,
+            "web",
+            Some("HTTP 503: secret detail"),
+            None,
+            &[],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        hora_core::db::insert_announcement(&pool, "Fiber cut", "ETA 6pm", "warning", None)
+            .await
+            .unwrap();
+
+        // Anonymous: the public incident (sanitized) and the announcement -
+        // never the operator streams (events, silences) or the raw reason.
+        let anon = body_text(app.clone().oneshot(get("/timeline")).await.unwrap()).await;
+        assert!(anon.contains("Web down"), "{anon}");
+        assert!(anon.contains("HTTP 503") && !anon.contains("secret detail"));
+        assert!(anon.contains("Fiber cut"));
+        for hidden in ["deploy api v2.3", "silenced", "deploying"] {
+            assert!(!anon.contains(hidden), "{hidden} leaked:\n{anon}");
+        }
+
+        // Authenticated: everything, with the post-mortem link.
+        let full = body_text(
+            app.oneshot(get("/timeline?token=0123456789abcdef"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        for shown in [
+            "deploy api v2.3",
+            "silenced Web for 10m",
+            "deploying",
+            "secret detail",
+            "Fiber cut",
+        ] {
+            assert!(full.contains(shown), "{shown} missing:\n{full}");
+        }
+        assert!(
+            full.contains(&format!("/incident/{incident_id}?token=")),
+            "{full}"
+        );
+    }
+
+    #[tokio::test]
     async fn report_renders_and_rejects_bad_months() {
         let res = test_app()
             .await
@@ -860,6 +924,94 @@ mod tests {
             serde_json::from_str(&body_text(res).await).unwrap();
         assert!(!verdict.up);
         assert!(verdict.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn peer_monitors_authenticates_and_discloses_probeable_targets() {
+        // Same strict auth as the probe endpoint: wrong token, missing token
+        // or unknown peer all answer 401.
+        for (from, token) in [
+            ("peer-x", Some("wrong")),
+            ("peer-x", None),
+            ("nobody", Some("peertok")),
+        ] {
+            let mut builder = Request::builder()
+                .uri(format!("/api/peer/monitors?from={from}"))
+                .extension(fake_peer());
+            if let Some(token) = token {
+                builder = builder.header("x-push-token", token);
+            }
+            let res = test_app()
+                .await
+                .oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{from} {token:?}");
+        }
+
+        // Authenticated: every probeable monitor (private ones included - a
+        // mesh member is operator infrastructure), never the push targets.
+        let res = test_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/api/peer/monitors?from=peer-x")
+                    .header("x-push-token", "peertok")
+                    .extension(fake_peer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let answer: hora_core::confirm::PeerMonitors =
+            serde_json::from_str(&body_text(res).await).unwrap();
+        let targets: Vec<&str> = answer
+            .monitors
+            .iter()
+            .map(|monitor| monitor.target.as_str())
+            .collect();
+        assert!(targets.contains(&"https://example.com"));
+        assert!(targets.contains(&"https://intra.example.com"));
+        assert_eq!(answer.monitors.len(), 2, "push monitors are not targets");
+    }
+
+    /// The vantage exchange end to end: the poller-side fetch against a peer
+    /// served over real HTTP, exactly as `hora peers diff` and the display
+    /// poller consume it.
+    #[tokio::test]
+    async fn vantage_fetch_reads_a_real_peer() {
+        let service = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = service.local_addr().unwrap().port();
+        let app_b = app_from(&vantage_config(port)).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app_b.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let client = hora_core::http::client(None).expect("client");
+        let url = format!("http://{addr_b}/api/peer/monitors");
+        let answer = hora_core::vantage::fetch_peer_monitors(
+            &client,
+            &url,
+            "hora-a",
+            Some("tok-a-to-b-16char"),
+        )
+        .await
+        .expect("peer answered");
+        assert_eq!(answer.monitors.len(), 1);
+        assert_eq!(answer.monitors[0].target, format!("127.0.0.1:{port}"));
+
+        // A wrong token fails closed into None, never a panic or a partial read.
+        let refused =
+            hora_core::vantage::fetch_peer_monitors(&client, &url, "hora-a", Some("wrong")).await;
+        assert!(refused.is_none());
     }
 
     /// The full two-node round trip: node A confirms a down with node B over

@@ -95,6 +95,15 @@ Full guides for everything below live in the
   service answered, multi-vantage verdict, cause/impacted, correlated change,
   operator note, timeline - into **markdown ready to paste into a ticket**.
   The chore nobody writes, written by the tool that saw everything.
+- **Unified timeline** - `hora timeline` (or `/timeline`): downs and
+  recoveries, operator events, pushed alerts, announcements and silences
+  merged into one chronology, newest first. "What happened this week?" in
+  one command.
+- **Per-vantage latency** - with peers configured, each card shows how the
+  target looks *from elsewhere* ("Hora B: 220ms"), aggregated read-only from
+  the mesh over an authenticated exchange; and **`hora peers diff`** verifies
+  the mesh's configs are aligned (the alignment multi-vantage confirmation
+  silently relies on), exiting non-zero on drift for CI.
 - **Latency heatmaps** - a smokeping-style hours-by-days SVG per monitor on
   `/history`, colour relative to the monitor's own median: "slow every Monday
   at 9am" at a glance.
@@ -186,6 +195,8 @@ hora annotate last "fiber cut"         # attach a note to an incident (shown on 
 hora event "deploy api v2.3"           # record an event marker ("what changed?"), correlated into incidents
 hora event list                        # list the recent event markers
 hora postmortem last                   # print an incident's auto-generated markdown post-mortem
+hora timeline --days 7                 # unified chronology: downs, events, alerts, banners, silences
+hora peers diff                        # verify the mesh's configs are aligned (non-zero exit on drift)
 hora backup /mnt/nas/hora-backup.db    # consistent snapshot of the database (VACUUM INTO)
 hora import kuma backup.json > out.toml  # convert an Uptime Kuma backup to Hora monitors
 hora --version
@@ -280,6 +291,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `GET /history.atom` | Incident history as an Atom feed. |
 | `GET /status/{group}` | Status page restricted to one display group. A `server.group_tokens` entry reveals that group's full view (and nothing else). |
 | `GET /incident/{id}` | Auto-generated post-mortem page for one incident, with the raw markdown ready to copy. Anonymous viewers get the sanitized view (private monitors answer 404). |
+| `GET /timeline` | The unified chronology (7 days): downs/recoveries, events, pushed alerts, announcements, silences. Anonymous viewers get sanitized public incidents and announcements only. |
 | `GET /report/{YYYY-MM}` | Printable monthly SLA report: uptime per monitor/group, incidents, MTTR, error budget. `?group=` scopes it (group token accepted). |
 | `GET /api/summary` | All monitors: status, 24h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
@@ -289,6 +301,7 @@ rate-limit settings are read once at startup and still require a restart.
 | `POST /api/announce?title=...&severity=warning&until=4h` | Pin a public banner on the status page (`DELETE` clears them all). **Requires `server.auth_token`.** |
 | `POST /api/event?title=deploy+api+v2.3` | Record an event marker from a CI/deploy hook ("what changed?"): overlaid on the latency charts, listed on `/history` (authenticated view), correlated into incidents confirming within the hour. **Requires `server.auth_token`.** |
 | `POST /api/peer/probe` | Multi-vantage confirmation between Hora nodes: probe a target *present in this node's own config* and answer with the verdict. Requires the requesting peer's `listen_token` (`X-Push-Token`). Never probes arbitrary targets. |
+| `GET /api/peer/monitors?from=<peer-id>` | Mesh exchange behind `hora peers diff` and the per-vantage display: this node's probeable monitors (kind + target) with its own view of each (status, 24h median). Same strict peer authentication as `/api/peer/probe`. |
 | `GET /api/monitors/{id}/heatmap.svg` | 28-day hours-by-days latency heatmap (SVG), colour relative to the monitor's median. |
 | `GET /api/badge/{id}/status` | Embeddable SVG status badge for a monitor. |
 | `GET /api/badge/{id}/uptime` | Embeddable SVG 24h-uptime badge for a monitor. |

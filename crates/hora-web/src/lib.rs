@@ -99,6 +99,10 @@ pub struct AppState {
     notifier: Notifiers,
     /// Per-process anti-flood state for pushed alerts carrying a `dedup_key`.
     flood: Arc<flood::Flood>,
+    /// The peers' view of shared targets (per-vantage latency), written by the
+    /// daemon's poller and read by the summary builder. Empty when the node
+    /// has no askable peers.
+    vantage: hora_core::vantage::VantageMap,
 }
 
 impl AppState {
@@ -116,7 +120,16 @@ impl AppState {
             last_tick,
             notifier,
             flood: Arc::new(flood::Flood::default()),
+            vantage: hora_core::vantage::new_map(),
         }
+    }
+
+    /// Attach the daemon's vantage snapshot (the poller's output). Without it
+    /// the cards simply render no per-vantage line.
+    #[must_use]
+    pub fn with_vantage(mut self, vantage: hora_core::vantage::VantageMap) -> Self {
+        self.vantage = vantage;
+        self
     }
 }
 
@@ -180,6 +193,7 @@ pub(crate) async fn summary_for(
     cache: &Cache,
     full: bool,
     notifier: &Notifiers,
+    vantage: &hora_core::vantage::VantageMap,
 ) -> Arc<Summary> {
     let slot = if full { &cache.full } else { &cache.public };
     if let Some(fresh) = fresh_summary(slot, config) {
@@ -197,7 +211,9 @@ pub(crate) async fn summary_for(
     } else {
         Vec::new()
     };
-    let summary = Arc::new(build_summary(pool, config, full, &health).await);
+    // The poller's last snapshot: a lock-free read, never the network.
+    let vantage = vantage.load_full();
+    let summary = Arc::new(build_summary(pool, config, full, &health, &vantage).await);
     slot.store(Some(Arc::new(Cached {
         at: Instant::now(),
         config: Arc::clone(config),

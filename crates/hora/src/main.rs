@@ -33,29 +33,8 @@ async fn run_subcommand() -> anyhow::Result<bool> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         match args[1].as_str() {
-            "import" => {
-                if args.len() < 4 || args[2] != "kuma" {
-                    eprintln!("Usage: hora import kuma <backup.json>");
-                    std::process::exit(1);
-                }
-                let json_path = &args[3];
-                let json_str = std::fs::read_to_string(json_path)
-                    .with_context(|| format!("reading {json_path}"))?;
-                let toml_out = hora_core::import::convert_kuma_to_hora(&json_str)?;
-                println!("{toml_out}");
-            }
-            "check" => {
-                // Validate the config and exit non-zero on error: meant for CI
-                // and pre-deploy hooks.
-                let config_path = config::path();
-                match config::load_from(&config_path) {
-                    Ok(_) => println!("{} is valid.", config_path.display()),
-                    Err(err) => {
-                        eprintln!("Configuration error: {err:#}");
-                        std::process::exit(1);
-                    }
-                }
-            }
+            "import" => import_kuma(&args)?,
+            "check" => check_config(),
             "test-alert" => {
                 // Tracing first: delivery failures surface as per-channel
                 // warnings from the notifiers, and that is the whole point.
@@ -89,6 +68,12 @@ async fn run_subcommand() -> anyhow::Result<bool> {
             }
             "event" => {
                 event(&args[2..]).await?;
+            }
+            "timeline" => {
+                timeline(&args[2..]).await?;
+            }
+            "peers" => {
+                peers(&args[2..]).await?;
             }
             "postmortem" => {
                 let Some(id) = args.get(2) else {
@@ -132,6 +117,34 @@ async fn run_subcommand() -> anyhow::Result<bool> {
         return Ok(true);
     }
     Ok(false)
+}
+
+/// `hora import kuma <backup.json>`: convert an Uptime Kuma backup to Hora
+/// TOML on stdout.
+fn import_kuma(args: &[String]) -> anyhow::Result<()> {
+    if args.len() < 4 || args[2] != "kuma" {
+        eprintln!("Usage: hora import kuma <backup.json>");
+        std::process::exit(1);
+    }
+    let json_path = &args[3];
+    let json_str =
+        std::fs::read_to_string(json_path).with_context(|| format!("reading {json_path}"))?;
+    let toml_out = hora_core::import::convert_kuma_to_hora(&json_str)?;
+    println!("{toml_out}");
+    Ok(())
+}
+
+/// `hora check`: validate the config and exit non-zero on error - meant for
+/// CI and pre-deploy hooks.
+fn check_config() {
+    let config_path = config::path();
+    match config::load_from(&config_path) {
+        Ok(_) => println!("{} is valid.", config_path.display()),
+        Err(err) => {
+            eprintln!("Configuration error: {err:#}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Send a test `Down` then `Recovered` through the real notification chain, so
@@ -246,6 +259,10 @@ fn print_help() {
     println!("  event list [limit]  List the recent event markers");
     println!("  postmortem <id|last>  Print an incident's auto-generated markdown");
     println!("                      post-mortem (the web twin is /incident/{{id}})");
+    println!("  timeline [--days N] Unified chronology: downs/recoveries, events,");
+    println!("                      pushed alerts, announcements, silences (default 7d)");
+    println!("  peers diff          Compare this node's monitors with each peer's (the");
+    println!("                      alignment multi-vantage confirmation relies on)");
     println!("  backup <dest.db>    Snapshot the database with VACUUM INTO");
     println!("  --version, -V       Show the version");
     println!("  --help, -h          Show this help message");
@@ -1070,6 +1087,159 @@ async fn event(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `hora peers diff`: compare this node's probeable monitors (kind + target)
+/// with each peer's, over the authenticated `/api/peer/monitors` exchange.
+/// `confirm_with_peers` only works on monitors both nodes know, and nothing
+/// else verifies that alignment - this does, and exits non-zero on any drift
+/// or unreachable peer so it can gate a config deploy.
+async fn peers(args: &[String]) -> anyhow::Result<()> {
+    if args.first().map(String::as_str) != Some("diff") {
+        eprintln!("Usage: hora peers diff");
+        std::process::exit(1);
+    }
+    let config = config::load_from(&config::path()).context("loading configuration")?;
+    let Some(from) = config.health.as_ref().map(|health| health.id.clone()) else {
+        eprintln!("hora peers diff needs [health].id (the identity the peers authenticate).");
+        std::process::exit(1);
+    };
+    let askable: Vec<&hora_core::config::Peer> = config
+        .peers
+        .iter()
+        .filter(|peer| peer.monitors_url().is_some())
+        .collect();
+    if askable.is_empty() {
+        eprintln!("No askable peers: [[peers]] entries need a ping_url to derive the API origin.");
+        std::process::exit(1);
+    }
+
+    let local: std::collections::BTreeSet<(String, String)> = config
+        .monitors
+        .iter()
+        .filter(|monitor| {
+            !matches!(
+                monitor.kind,
+                hora_core::config::Kind::Push | hora_core::config::Kind::Exec
+            )
+        })
+        .map(|monitor| (monitor.kind.as_str().to_owned(), monitor.target.clone()))
+        .collect();
+
+    let client = hora_core::http::client(None).context("building HTTP client")?;
+    let mut drift = false;
+    println!("hora peers diff - {} local probeable monitors", local.len());
+    for peer in askable {
+        let url = peer.monitors_url().expect("filtered on monitors_url");
+        let answer = hora_core::vantage::fetch_peer_monitors(
+            &client,
+            &url,
+            &from,
+            peer.ping_token.as_ref().map(AsRef::as_ref),
+        )
+        .await;
+        println!();
+        drift |= print_peer_diff(&peer.name, &local, answer.as_ref());
+    }
+    if drift {
+        println!();
+        println!("Configs have drifted - multi-vantage confirmation only covers shared monitors.");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Print one peer's diff against the local monitor set; `true` means drift
+/// (or an unreachable peer - a mesh you cannot ask is a mesh out of sync).
+fn print_peer_diff(
+    peer_name: &str,
+    local: &std::collections::BTreeSet<(String, String)>,
+    answer: Option<&hora_core::confirm::PeerMonitors>,
+) -> bool {
+    let Some(answer) = answer else {
+        println!("{peer_name}: UNREACHABLE (or refused the exchange)");
+        return true;
+    };
+    let remote: std::collections::BTreeSet<(String, String)> = answer
+        .monitors
+        .iter()
+        .map(|monitor| (monitor.kind.as_str().to_owned(), monitor.target.clone()))
+        .collect();
+    let missing: Vec<_> = local.difference(&remote).collect();
+    let extra: Vec<_> = remote.difference(local).collect();
+    if missing.is_empty() && extra.is_empty() {
+        println!("{peer_name}: in sync ({} monitors)", remote.len());
+        return false;
+    }
+    println!("{peer_name}: DRIFT");
+    for (kind, target) in missing {
+        println!("  missing there: {kind} {target}");
+    }
+    for (kind, target) in extra {
+        println!("  only there:    {kind} {target}");
+    }
+    true
+}
+
+/// `hora timeline [--days N]`: the unified chronology - down/recovered
+/// transitions, operator events, pushed alerts, announcements, silences -
+/// merged newest-first. "What happened this week?" in one command.
+async fn timeline(args: &[String]) -> anyhow::Result<()> {
+    let mut days: i64 = 7;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--days" => {
+                let parsed = iter
+                    .next()
+                    .and_then(|raw| raw.parse::<i64>().ok())
+                    .filter(|&d| d > 0);
+                let Some(parsed) = parsed else {
+                    eprintln!("--days must be a positive number of days");
+                    std::process::exit(1);
+                };
+                days = parsed;
+            }
+            other => {
+                eprintln!("Unexpected argument {other:?} (usage: hora timeline [--days N])");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let (config, pool) = open_database().await?;
+    let since = chrono::Utc::now().timestamp() - days * hora_core::SECONDS_PER_DAY;
+    let sources = hora_core::timeline::fetch(&pool, since, 500).await?;
+    let names: std::collections::HashMap<String, String> = config
+        .monitors
+        .iter()
+        .map(|monitor| (monitor.id.clone(), monitor.name.clone()))
+        .collect();
+    let entries = hora_core::timeline::merge(&sources, &names, since, 200);
+
+    println!("hora timeline - last {}", days_label(days));
+    if entries.is_empty() {
+        println!();
+        println!("Nothing recorded in the window.");
+        return Ok(());
+    }
+    for entry in entries {
+        let link = entry
+            .incident_id
+            .map(|id| format!("  (#{id})"))
+            .unwrap_or_default();
+        println!(
+            "{}  {:<9}  {}{link}",
+            format_epoch(entry.at),
+            entry.kind.as_str(),
+            entry.title
+        );
+        if let Some(detail) = entry.detail {
+            // Aligned under the title column (timestamp + gap + kind + gap).
+            println!("{:>36}{detail}", "");
+        }
+    }
+    Ok(())
+}
+
 /// `hora postmortem <id|last>`: print the auto-generated markdown post-mortem
 /// of an incident - everything Hora already recorded about it, ready to paste
 /// into a ticket. The web twin is `/incident/{id}`.
@@ -1322,8 +1492,19 @@ async fn serve() -> anyhow::Result<()> {
     let heartbeat_task = hora_core::peer::spawn_heartbeat(
         handle.config.clone(),
         pool.clone(),
-        client,
+        client.clone(),
         Arc::clone(&last_tick),
+        shutdown_rx.clone(),
+    );
+
+    // Per-vantage latency: poll the peers' /api/peer/monitors in the
+    // background and share the snapshot with the web layer. Self-gating like
+    // the heartbeat (no peers = a no-op per round).
+    let vantage_map = hora_core::vantage::new_map();
+    let vantage_task = hora_core::vantage::spawn_poller(
+        handle.config.clone(),
+        client,
+        Arc::clone(&vantage_map),
         shutdown_rx.clone(),
     );
 
@@ -1350,7 +1531,8 @@ async fn serve() -> anyhow::Result<()> {
         handle.config.clone(),
         Arc::clone(&last_tick),
         handle.notifier.clone(),
-    );
+    )
+    .with_vantage(vantage_map);
     // Connect-info gives the rate limiter a peer IP to fall back on when there
     // is no `X-Forwarded-For` (i.e. direct access, not behind a proxy).
     let app = hora_web::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
@@ -1368,7 +1550,8 @@ async fn serve() -> anyhow::Result<()> {
             cert_task,
             prune_task,
             heartbeat_task,
-            digest_task
+            digest_task,
+            vantage_task
         );
     })
     .await;

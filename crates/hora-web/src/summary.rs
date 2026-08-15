@@ -156,6 +156,25 @@ pub(crate) struct MonitorView {
     /// Downstream monitor names impacted by this root-cause failure.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) impacted: Vec<String>,
+    /// The peers' view of this target ("80 ms from EU"), when the mesh
+    /// monitors it too. Empty without peers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) vantages: Vec<VantageView>,
+}
+
+/// One peer's view of a monitor's target, for the card and the API.
+#[derive(Clone, Serialize, ToSchema)]
+pub(crate) struct VantageView {
+    /// The peer's display name.
+    pub(crate) peer: String,
+    /// `up` | `degraded` | `down` | `unknown` from that vantage.
+    pub(crate) status: String,
+    /// That vantage's 24h median latency, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) p50_ms: Option<i64>,
+    /// The pre-formatted card label ("Hora B: 220ms" / "Hora B: down").
+    #[serde(skip)]
+    pub(crate) label: String,
 }
 
 #[derive(Clone, Serialize, ToSchema)]
@@ -197,6 +216,7 @@ pub(crate) async fn build_summary(
     config: &Config,
     full: bool,
     channel_health: &[ChannelHealthEntry],
+    vantage: &HashMap<String, Vec<hora_core::vantage::PeerVantage>>,
 ) -> Summary {
     let now = Utc::now();
     let timestamp = now.timestamp();
@@ -264,6 +284,7 @@ pub(crate) async fn build_summary(
         sparklines: &sparklines,
         certs: &certs,
         events: &events,
+        vantage,
     };
 
     let monitors: Vec<MonitorView> = visible_monitors
@@ -536,6 +557,8 @@ pub(crate) struct MonitorData<'a> {
     certs: &'a HashMap<String, i64>,
     /// Event markers overlaying every sparkline (empty in the public view).
     events: &'a [db::EventMarker],
+    /// The peers' view of shared targets, from the daemon's vantage poller.
+    vantage: &'a HashMap<String, Vec<hora_core::vantage::PeerVantage>>,
 }
 
 /// Build a monitor's view from the pre-fetched batch maps. Pure: a monitor with
@@ -626,7 +649,31 @@ pub(crate) fn build_monitor_view(
         group: monitor.group.clone(),
         cause,
         impacted,
+        vantages: vantage_views(data.vantage, monitor),
     }
+}
+
+/// The per-vantage line of a card: each peer's view of this target, with a
+/// pre-formatted label ("Hora B: 220ms", "Hora C: down").
+fn vantage_views(
+    map: &HashMap<String, Vec<hora_core::vantage::PeerVantage>>,
+    monitor: &Monitor,
+) -> Vec<VantageView> {
+    hora_core::vantage::for_monitor(map, monitor)
+        .into_iter()
+        .map(|view| {
+            let label = match (view.status.as_str(), view.p50_ms) {
+                ("up" | "degraded", Some(ms)) => format!("{}: {ms}ms", view.peer),
+                (status, _) => format!("{}: {status}", view.peer),
+            };
+            VantageView {
+                peer: view.peer,
+                status: view.status,
+                p50_ms: view.p50_ms,
+                label,
+            }
+        })
+        .collect()
 }
 
 /// Compute topology annotation for a down monitor: the nearest down upstream

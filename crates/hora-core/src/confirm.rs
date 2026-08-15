@@ -56,6 +56,27 @@ pub struct ProbeResponse {
     pub error: Option<String>,
 }
 
+/// What a node discloses to an authenticated peer on `GET /api/peer/monitors`:
+/// its probeable monitors with their live view - enough for `hora peers diff`
+/// (are our configs aligned?) and the per-vantage latency display, and
+/// nothing else (no names, notes or credentials).
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PeerMonitors {
+    pub monitors: Vec<PeerMonitor>,
+}
+
+/// One probeable monitor as seen from a peer's vantage.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PeerMonitor {
+    pub kind: Kind,
+    pub target: String,
+    /// `up` | `degraded` | `down` | `unknown`, from that node's view.
+    pub status: String,
+    /// That node's 24h median latency to the target, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50_ms: Option<i64>,
+}
+
 /// One peer's view of the target, from the requester's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
