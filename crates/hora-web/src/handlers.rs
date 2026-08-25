@@ -7,6 +7,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
+use badgelib::Style;
 use chrono::Utc;
 use serde::Deserialize;
 use utoipa::OpenApi;
@@ -1462,10 +1463,24 @@ pub(crate) async fn silence(
     Ok(Json(SilenceResponse { monitors, until }))
 }
 
+#[derive(Deserialize)]
+pub(crate) struct BadgeParams {
+    style: Option<Style>,
+}
+
+impl BadgeParams {
+    fn style(self) -> Style {
+        self.style.unwrap_or(Style::Flat)
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/badge/{id}/status",
-    params(("id" = String, Path, description = "Monitor id")),
+    params(
+        ("id" = String, Path, description = "Monitor id"),
+        ("style" = Option<String>, Query, description = "Badge style: flat, flat-square, or for-the-badge")
+    ),
     responses(
         (status = 200, description = "Status badge (SVG)"),
         (status = 404, description = "Unknown monitor")
@@ -1474,6 +1489,7 @@ pub(crate) async fn silence(
 pub(crate) async fn status_badge(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<BadgeParams>,
 ) -> Result<impl IntoResponse, AppError> {
     // Badges are embeddable and unauthenticated: a private monitor's badge is
     // a 404, not a leak. They answer from two indexed single-monitor reads
@@ -1484,13 +1500,21 @@ pub(crate) async fn status_badge(
     let threshold = i64::from(config.alerts.fail_threshold.max(1));
     let recent = db::recent_checks(&state.pool, &id, threshold).await?;
     let status = db::derive_status(&recent, threshold);
-    Ok(svg_response(badge("status", status, status_color(status))))
+    Ok(svg_response(badge(
+        "status",
+        status,
+        status_color(status),
+        params.style(),
+    )))
 }
 
 #[utoipa::path(
     get,
     path = "/api/badge/{id}/uptime",
-    params(("id" = String, Path, description = "Monitor id")),
+    params(
+        ("id" = String, Path, description = "Monitor id"),
+        ("style" = Option<String>, Query, description = "Badge style: flat, flat-square, or for-the-badge")
+    ),
     responses(
         (status = 200, description = "24h uptime badge (SVG)"),
         (status = 404, description = "Unknown monitor")
@@ -1499,6 +1523,7 @@ pub(crate) async fn status_badge(
 pub(crate) async fn uptime_badge(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<BadgeParams>,
 ) -> Result<impl IntoResponse, AppError> {
     // Same single-monitor fast path as `status_badge`; the permille arithmetic
     // mirrors the summary's card so both always show the same figure.
@@ -1511,7 +1536,12 @@ pub(crate) async fn uptime_badge(
         Some(permille) => (format_permille(permille), uptime_color(permille)),
         None => ("n/a".to_owned(), "#9f9f9f"),
     };
-    Ok(svg_response(badge("uptime", &message, color)))
+    Ok(svg_response(badge(
+        "uptime",
+        &message,
+        color,
+        params.style(),
+    )))
 }
 
 /// The badge-visible monitor with `id`: public monitors only - a private

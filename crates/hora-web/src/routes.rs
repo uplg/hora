@@ -1379,13 +1379,30 @@ mod tests {
     }
     #[tokio::test]
     async fn status_badge_is_svg() {
-        let res = test_app()
-            .await
+        let app = test_app().await;
+        let res = app
+            .clone()
             .oneshot(get("/api/badge/web/status"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(res.headers().get("content-type").unwrap(), "image/svg+xml");
+        assert!(body_text(res).await.contains(r#"id="s""#));
+
+        let res = app
+            .clone()
+            .oneshot(get("/api/badge/web/status?style=flat-square"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(!body_text(res).await.contains(r#"id="s""#));
+
+        let res = app
+            .oneshot(get("/api/badge/web/status?style=for-the-badge"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(body_text(res).await.contains(r#"height="28""#));
     }
 
     #[tokio::test]
