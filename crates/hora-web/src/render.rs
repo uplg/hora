@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use axum::http::header;
 use axum::response::IntoResponse;
-use badgelib::{Badge, Color};
+use badgelib::{Badge, Color, Style};
 
 use hora_core::db::{EventMarker, Point};
 
@@ -95,7 +95,7 @@ fn event_markers(points: &[Point], events: &[EventMarker]) -> String {
     out
 }
 
-// --- SVG status / uptime badges (flat shields style) --------------------
+// --- SVG status / uptime badges -----------------------------------------
 
 pub(crate) fn status_color(status: &str) -> &'static str {
     match status {
@@ -139,13 +139,14 @@ pub(crate) fn svg_response(svg: String) -> impl IntoResponse {
     )
 }
 
-/// Render a flat shields-style badge: a grey label and a coloured message.
-pub(crate) fn badge(label: &str, message: &str, color: &str) -> String {
+/// Render a shields-style badge: a grey label and a coloured message.
+pub(crate) fn badge(label: &str, message: &str, color: &str, style: Style) -> String {
     Badge::new()
         .label(label)
         .label_color(Color::Hex("555".into()))
         .value(message)
         .value_color(Color::Hex(color.trim_start_matches('#').into()))
+        .style(style)
         .to_svg()
 }
 
@@ -206,10 +207,21 @@ mod tests {
 
     #[test]
     fn badge_has_label_message_and_color() {
-        let svg = badge("status", "up", status_color("up"));
+        let svg = badge("status", "up", status_color("up"), Style::Flat);
         assert!(svg.starts_with("<svg"));
         assert!(svg.contains(">status<") && svg.contains(">up<"));
         assert!(svg.contains(&Color::Hex(status_color("up").into()).to_css()));
+    }
+
+    #[test]
+    fn badge_supports_styles() {
+        let flat = badge("status", "up", status_color("up"), Style::Flat);
+        let flat_square = badge("status", "up", status_color("up"), Style::FlatSquare);
+        let for_the_badge = badge("status", "up", status_color("up"), Style::ForTheBadge);
+
+        assert!(flat.contains(r#"id="s""#));
+        assert!(!flat_square.contains(r#"id="s""#));
+        assert!(for_the_badge.contains(r#"height="28""#));
     }
     #[test]
     fn uptime_color_tiers() {
