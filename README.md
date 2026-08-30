@@ -335,7 +335,9 @@ Embed a monitor's live status and 24h uptime in a README, by its config `id`:
 ![uptime](https://status.example.com/api/badge/web/uptime)
 ```
 
-Badges use `flat` by default and accept `?style=flat-square` or `?style=for-the-badge`. They are green when up / uptime is high, amber for minor incidents, and red for an outage. A 404 is returned for an unknown id.
+Badges use `flat` by default and accept `?style=flat-square` or
+`?style=for-the-badge`. They are green when up / uptime is high, amber for
+minor incidents, and red for an outage. A 404 is returned for an unknown id.
 
 ## Architecture
 
