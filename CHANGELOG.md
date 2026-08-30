@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-08-31
+
+### Added
+
+- **Badge styles**: the status and uptime badges accept `?style=flat-square`
+  and `?style=for-the-badge` (the default stays `flat`). Contributed by
+  [@vladkens](https://github.com/vladkens).
+
+### Changed
+
+- **Badge rendering** is delegated to
+  [`badgelib`](https://github.com/vladkens/badgelib) instead of the built-in
+  renderer; badges are slightly more compact thanks to accurate text-width
+  measurement. Behaviour is otherwise unchanged - same colors, same 404 for
+  an unknown or private monitor.
+
+### Security
+
+- **Dependency refresh**: `h2` 0.4.19 clears RUSTSEC-2026-0258 (unbounded
+  queueing of empty DATA frames, low severity) and the yanked `chacha20`
+  0.10.1 moves to 0.10.2.
+
 ## [0.9.2] - 2026-08-16
 
 ### Fixed
