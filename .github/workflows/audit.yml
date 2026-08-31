@@ -31,7 +31,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Pre-install cargo-audit as a prebuilt release binary (~5s): without it,
       # audit-check falls back to `cargo install` and recompiles the scanner
       # from source (~3min) on every run - 98% of the daily job for a 3s scan.
