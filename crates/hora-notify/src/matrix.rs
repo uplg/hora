@@ -1,5 +1,8 @@
 //! Matrix notifier (client-server API).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde::Serialize;
@@ -30,10 +33,15 @@ impl MatrixNotifier {
         }
     }
 
-    /// `…/_matrix/client/v3/rooms/{roomId}/send/m.room.message`, with the room id
-    /// percent-encoded as a path segment (it contains `!` and `:`). `None` only if
-    /// the homeserver is not a usable base URL (validated at config load).
-    fn message_url(&self) -> Option<Url> {
+    /// `…/_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}`, with the
+    /// room id appended as one path segment (`!` and `:` need no escaping there).
+    /// `None` only if the homeserver is not a usable base URL (validated at
+    /// config load).
+    ///
+    /// The spec endpoint is a `PUT` with a client-chosen transaction id; the
+    /// `POST …/send/m.room.message` form without one is a Synapse leniency that
+    /// Tuwunel / Conduit answer with `404 M_UNRECOGNIZED`.
+    fn message_url(&self, txn_id: &str) -> Option<Url> {
         let mut url = Url::parse(&self.homeserver).ok()?;
         url.path_segments_mut().ok()?.pop_if_empty().extend([
             "_matrix",
@@ -43,8 +51,22 @@ impl MatrixNotifier {
             self.room_id.as_str(),
             "send",
             "m.room.message",
+            txn_id,
         ]);
         Some(url)
+    }
+
+    /// Transaction id unique per notification (per access token, per the spec):
+    /// wall-clock nanoseconds plus a process-wide counter, so two events rendered
+    /// in the same instant never collide. Retries of one notification reuse it
+    /// on purpose: the homeserver then deduplicates a message it already stored
+    /// when only the response was lost.
+    fn txn_id() -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        format!("hora-{nanos}-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
     fn render(event: Event<'_>) -> String {
@@ -130,7 +152,7 @@ impl Notifier for MatrixNotifier {
     }
 
     async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
-        let Some(url) = self.message_url() else {
+        let Some(url) = self.message_url(&Self::txn_id()) else {
             tracing::warn!("matrix: homeserver is not a valid URL, skipping");
             anyhow::bail!("homeserver is not a valid URL");
         };
@@ -145,7 +167,7 @@ impl Notifier for MatrixNotifier {
         send_retrying(
             || {
                 self.client
-                    .post(&url)
+                    .put(&url)
                     .bearer_auth(&self.access_token)
                     .json(&body)
             },
@@ -190,16 +212,30 @@ mod tests {
             "tok".to_owned(),
             "!abc:matrix.example.org".to_owned(),
         );
-        let url = notifier.message_url().expect("valid url").to_string();
+        let url = notifier
+            .message_url("hora-1-0")
+            .expect("valid url")
+            .to_string();
         assert!(
             url.starts_with("https://matrix.example.org/_matrix/client/v3/rooms/"),
             "unexpected base: {url}"
         );
+        // Spec shape: PUT …/send/{eventType}/{txnId}; `!` and `:` are legal path
+        // characters, so the room id travels as one unescaped segment.
         assert!(
-            url.ends_with("/send/m.room.message"),
+            url.ends_with("/rooms/!abc:matrix.example.org/send/m.room.message/hora-1-0"),
             "unexpected tail: {url}"
         );
         // Trailing slash on the homeserver must not produce an empty `rooms//`.
         assert!(!url.contains("rooms//"), "empty segment: {url}");
+    }
+
+    #[test]
+    fn txn_ids_are_unique_and_path_safe() {
+        let a = MatrixNotifier::txn_id();
+        let b = MatrixNotifier::txn_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("hora-"));
+        assert!(a.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
     }
 }
