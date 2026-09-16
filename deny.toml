@@ -45,9 +45,6 @@ skip = [
     { crate = "cpufeatures" },
     { crate = "core-foundation" },
     { crate = "r-efi" },
-    # The wasi shims themselves disagree: getrandom 0.4's wasip3 and 0.3's
-    # wasip2 each pin a different pre-1.0 wit-bindgen.
-    { crate = "wit-bindgen" },
     # We ride tower-http 0.7 while reqwest (0.13) still pins 0.6. Drop this
     # skip once reqwest moves to 0.7.
     { crate = "tower-http" },

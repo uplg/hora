@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-09-16
+
+### Fixed
+
+- **Matrix notifications on spec-strict homeservers** (Tuwunel, Conduit,
+  conduwuit): messages went out as `POST …/rooms/{id}/send/m.room.message`
+  without a transaction id, a Synapse leniency that those servers answer
+  with `404 M_UNRECOGNIZED`, so every Matrix delivery failed. The notifier
+  now uses the spec endpoint, `PUT …/send/m.room.message/{txnId}`, with an
+  id unique per notification and reused across retries: a homeserver that
+  stored the message but lost the response deduplicates instead of posting
+  it twice.
+
+### Changed
+
+- **Dependency refresh**, TLS stack first: `rustls` 0.23.45, `tokio-rustls`
+  0.26.5, `aws-lc-rs` 1.18.1 (`aws-lc-sys` 0.45), `reqwest` 0.13.5, plus
+  `hickory` 0.26.3, `askama` 0.16.1, `toml` 1.1.6, `tower-http` 0.7.1 and
+  the rest of the lockfile. `yoke-derive` and `zerofrom-derive` stay on
+  0.8.2 / 0.1.7: their newer patches pull a second `synstructure`, which the
+  duplicate-version ban rejects. The `wit-bindgen` cargo-deny skip is gone
+  (one version left). `cargo audit` and `cargo deny` are clean.
+
 ## [0.9.3] - 2026-08-31
 
 ### Added
