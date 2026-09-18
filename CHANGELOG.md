@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2026-09-18
+
+### Fixed
+
+- **Peer polls no longer rebuild the status page.** `GET /api/peer/monitors`,
+  which every mesh peer's vantage poller calls once a minute, built the whole
+  authenticated summary (90 days of daily bars, percentiles, sparklines) to
+  read two fields per monitor. The summary cache lives 5 seconds, so every
+  poll paid for a full rebuild: on a node with months of history on 2 vCPU,
+  about one second of CPU a minute, and a steady stream of sqlx
+  `slow statement` warnings once the host was busy. The endpoint now reads
+  only what it answers with (the recent checks behind `status`, the 24h
+  percentiles behind `p50_ms`), with the same values the summary reports.
+
+### Changed
+
+- **Hourly roll-up follows the clock.** Raw checks used to be rolled up
+  into `checks_hourly` only once 7 days old, so the status page's daily bars
+  re-aggregated the last 9 days of raw checks on every rebuild (0.72 s over
+  270k checks). Every ended hour is now rolled up (5-minute margin, on the
+  existing maintenance tick), and `daily_all` reads the hourly buckets plus
+  only the raw checks above the newest bucket, a few hours at most: about
+  0.08 s on the same data. Both reads share one frontier, so they add up
+  without overlap even when a roll-up commits between them. Days are also
+  grouped as integer UTC day numbers instead of a per-row `strftime`
+  string. Monitors whose `retention_days` is under 7 now keep hourly
+  history too, since their raw checks roll up before retention prunes them.
+
 ## [0.9.5] - 2026-09-18
 
 ### Fixed
