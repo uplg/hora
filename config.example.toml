@@ -279,6 +279,9 @@ interval_secs = 300
 timeout_secs = 10
 group = "infra"
 starttls = "smtp"                # or "imap" for an IMAP server on 143
+# ehlo_name = "status.example.com"  # EHLO identity (smtp); default: the local
+#                                   # address literal, e.g. [192.0.2.10]. MX
+#                                   # servers on port 25 reject a bare name.
 # check_cert = false             # opt back out while keeping the tcp probe
 
 # ICMP echo (ping) to a host or IP. No port; up = an echo reply within timeout.

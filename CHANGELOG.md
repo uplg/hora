@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-09-18
+
+### Fixed
+
+- **STARTTLS certificate checks on port 25**: the SMTP negotiation announced
+  `EHLO hora`, a bare label that RFC 5321 does not allow. MX servers enforce
+  the rule on port 25 (Stalwart answers `550 5.5.0 Invalid EHLO domain`), so
+  the certificate of a `starttls = "smtp"` monitor on an MX was never read,
+  and no expiry or pin alert could fire for it. Hora now announces the
+  address literal of its end of the connection (`[192.0.2.10]`,
+  `[IPv6:2001:db8::a]`), which is valid everywhere, including in a
+  container whose hostname is a bare id.
+
+### Added
+
+- **`ehlo_name`** on `starttls = "smtp"` monitors: the identity to announce
+  in `EHLO` instead of the address literal. Validated at load as a fully
+  qualified domain or an RFC 5321 address literal.
+
+### Changed
+
+- **`croner` 4.0** (push `schedule` and `[digest]` crons). croner 4 rejects
+  the shorthand steps 3.x accepted (`5/5`, `/10`); Hora parses with
+  `sloppy_ranges` on, so existing schedules keep loading unchanged. Also
+  `syn` 3.0.6, `rustix` 1.1.5, `cfg-if` 1.0.5 and `unicode-ident` 1.0.26.
+  `yoke-derive` and `zerofrom-derive` stay on 0.8.2 / 0.1.7 (second
+  `synstructure`, as in 0.9.4).
+- **Alpine 3.24** runtime image (was 3.23).
+- **Docs site**: `astro` 7.3.3, `@astrojs/starlight` 0.42.1.
+
 ## [0.9.4] - 2026-09-16
 
 ### Fixed

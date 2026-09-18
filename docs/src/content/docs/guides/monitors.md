@@ -253,6 +253,24 @@ An unexpected key change - MITM, botched renewal - alerts once per change,
 with the old and new fingerprints. Disable expiry checking per monitor with
 `check_cert = false`.
 
+Mail servers get the same watch: set `starttls = "smtp"` (or `"imap"`) on a
+tcp monitor and the watcher negotiates STARTTLS before reading the
+certificate.
+
+```toml
+kind = "tcp"
+target = "mail.example.com:25"
+starttls = "smtp"
+ehlo_name = "status.example.com"   # optional
+```
+
+SMTP needs a client identity in `EHLO`. RFC 5321 requires a fully qualified
+domain or an address literal, and MX servers enforce it on port 25
+(`550 Invalid EHLO domain`). By default Hora announces the address literal
+of its end of the connection (`[192.0.2.10]`), which is valid even in a
+container whose hostname is a bare id. Set `ehlo_name` to announce a real
+name instead.
+
 ## Domain expiry (RDAP)
 
 The natural sibling of the TLS warnings: *"your domain expires in 14 days"*.

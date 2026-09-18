@@ -4,6 +4,15 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.9.4 → 0.9.5
+
+No schema migration. One new optional key, `ehlo_name` on `starttls = "smtp"`
+monitors; deploy the binary before a config that sets it
+(`deny_unknown_fields`). Without it, the SMTP certificate check now announces
+the local address literal (`[192.0.2.10]`) instead of `hora`, so a monitor on
+an MX's port 25 that logged `550 Invalid EHLO domain` starts recording its
+certificate with no config change.
+
 ## 0.8.0 → 0.8.1
 
 No schema migration. New optional config keys only - as always, deploy the

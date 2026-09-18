@@ -180,6 +180,7 @@ mod tests {
             push_token: None,
             check_cert: None,
             starttls: None,
+            ehlo_name: None,
             retention_days: None,
             group: None,
             depends_on: depends_on.map(|v| v.into_iter().map(String::from).collect()),

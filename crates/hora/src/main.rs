@@ -979,7 +979,14 @@ async fn print_probe_report(
         // watcher: negotiate in plaintext, then handshake.
         let cert = match hora_core::cert::monitor_endpoint(monitor) {
             Some((host, port)) => {
-                hora_core::cert::inspect_endpoint(&host, port, starttls, monitor.timeout()).await
+                hora_core::cert::inspect_endpoint(
+                    &host,
+                    port,
+                    starttls,
+                    monitor.ehlo_name.as_deref(),
+                    monitor.timeout(),
+                )
+                .await
             }
             None => Err(anyhow::anyhow!("cannot determine host:port")),
         };

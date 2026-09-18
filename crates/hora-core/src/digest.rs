@@ -66,7 +66,7 @@ async fn tick(
     notifier: &Notifiers,
 ) -> u64 {
     // Validated at config load; a parse failure here is defensive only.
-    let Ok(cron) = digest.schedule.parse::<croner::Cron>() else {
+    let Ok(cron) = crate::config::parse_cron(&digest.schedule) else {
         warn!("invalid digest schedule {:?}", digest.schedule);
         return 3600;
     };
