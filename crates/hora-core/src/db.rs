@@ -20,8 +20,11 @@ const PRUNE_INTERVAL: Duration = Duration::from_hours(6);
 /// a schema migration); maintenance can wait until the burst has settled.
 const PRUNE_STARTUP_DELAY: Duration = Duration::from_mins(5);
 
-/// Raw checks roll up into hourly buckets once older than this.
-const DOWNSAMPLE_HOURLY_AFTER_DAYS: i64 = 7;
+/// Raw checks roll up into hourly buckets once the hour ended this long ago.
+/// Checks are stamped with the time they are recorded, so an ended hour only
+/// needs a margin for an insert whose timestamp was taken just before the
+/// boundary and committed just after it.
+const HOURLY_ROLLUP_LAG_SECS: i64 = 300;
 /// Hourly buckets roll up into daily ones (and are pruned) once older than this.
 const DOWNSAMPLE_DAILY_AFTER_DAYS: i64 = 90;
 /// Daily buckets and closed incidents are kept this long.
@@ -420,27 +423,18 @@ pub async fn availability_all(
         .collect())
 }
 
-/// Days beyond the hourly-downsample horizon are read from the buckets only.
-///
-/// Raw rows older than [`DOWNSAMPLE_HOURLY_AFTER_DAYS`] are already rolled up
-/// into `checks_hourly`, so scanning them again for the daily bars is pure
-/// waste - and with the default 90-day raw retention that waste is months of
-/// checks. The extra slack covers the roll-up cadence ([`PRUNE_INTERVAL`]):
-/// hours are only bucketed once a prune tick has seen them age past the
-/// horizon, so the newest buckets can lag it by up to one interval.
-const DAILY_RAW_WINDOW_DAYS: i64 = DOWNSAMPLE_HOURLY_AFTER_DAYS + 2;
-
 /// Daily up/down/degraded aggregates per monitor since `since`, oldest first.
 /// `now` bounds the raw scan (callers pass their current timestamp).
 ///
-/// Reads the raw checks *and* the downsampled `checks_hourly` / `checks_daily`
-/// buckets, so the daily bars extend beyond the raw retention window. Raw rows
-/// are only scanned over the recent [`DAILY_RAW_WINDOW_DAYS`]; older days come
-/// from the buckets, which are complete there. For each `(monitor, day)` the
-/// source with the most samples wins: raw is authoritative while complete, and
-/// the aggregates take over for days whose raw rows retention has already
-/// pruned (a partially pruned boundary day resolves to whichever source still
-/// holds the full count).
+/// Every ended hour is rolled up into `checks_hourly` (see
+/// [`HOURLY_ROLLUP_LAG_SECS`]), so the hourly buckets cover everything below
+/// the newest bucket and the raw checks are only read above it: a few hours
+/// (one [`PRUNE_INTERVAL`] at most) instead of re-aggregating days of raw rows
+/// on every status-page rebuild. Both reads are bounded by the same frontier,
+/// so they stay disjoint (and add up) even if a roll-up commits in between.
+/// `checks_daily` takes over once the hourly buckets age out; for each
+/// `(monitor, day)` the source with the most samples wins, which resolves the
+/// boundary day whose hours were partly pruned after their daily roll-up.
 ///
 /// # Errors
 ///
@@ -450,30 +444,33 @@ pub async fn daily_all(
     since: i64,
     now: i64,
 ) -> sqlx::Result<HashMap<String, Vec<DayRow>>> {
-    let raw_since = since.max(now - DAILY_RAW_WINDOW_DAYS * SECONDS_PER_DAY);
-    let raw = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
-        "SELECT monitor_id, \
-            strftime('%Y-%m-%d', time, 'unixepoch') AS day, \
-            CAST(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS INTEGER), \
-            CAST(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) AS INTEGER), \
-            CAST(SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) AS INTEGER) \
-         FROM checks WHERE time >= ? GROUP BY monitor_id, day",
+    let newest_hour: Option<i64> = sqlx::query_scalar("SELECT MAX(hour) FROM checks_hourly")
+        .fetch_one(pool)
+        .await?;
+    let frontier = newest_hour.map_or(since, |hour| since.max(hour + 3600));
+    // Days are grouped as integer UTC day numbers (`time / 86400`) and only
+    // formatted once per bucket below: a per-row `strftime` string, and the
+    // string-keyed GROUP BY it forces, was half of this scan's cost.
+    let raw = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+        "SELECT monitor_id, time / 86400 AS day, \
+            SUM(status = 1), SUM(status = 0), SUM(status = 2) \
+         FROM checks WHERE time >= ? AND time <= ? GROUP BY monitor_id, day",
     )
-    .bind(raw_since)
+    .bind(frontier)
+    .bind(now)
     .fetch_all(pool)
     .await?;
-    let hourly = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
-        "SELECT monitor_id, \
-            strftime('%Y-%m-%d', hour, 'unixepoch') AS day, \
+    let hourly = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+        "SELECT monitor_id, hour / 86400 AS day, \
             SUM(up_count), SUM(down_count), SUM(degraded_count) \
-         FROM checks_hourly WHERE hour >= ? GROUP BY monitor_id, day",
+         FROM checks_hourly WHERE hour >= ? AND hour < ? GROUP BY monitor_id, day",
     )
     .bind(since)
+    .bind(frontier)
     .fetch_all(pool)
     .await?;
-    let daily = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
-        "SELECT monitor_id, \
-            strftime('%Y-%m-%d', day, 'unixepoch') AS day, \
+    let daily = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+        "SELECT monitor_id, day / 86400 AS day, \
             up_count, down_count, degraded_count \
          FROM checks_daily WHERE day >= ?",
     )
@@ -481,21 +478,26 @@ pub async fn daily_all(
     .fetch_all(pool)
     .await?;
 
-    let mut best: HashMap<String, BTreeMap<String, (i64, i64, i64)>> = HashMap::new();
-    for (id, day, up, down, degraded) in raw.into_iter().chain(hourly).chain(daily) {
+    // Hourly buckets and raw rows cover disjoint ranges of the same day: sum.
+    let mut best: HashMap<String, BTreeMap<i64, (i64, i64, i64)>> = HashMap::new();
+    for (id, day, up, down, degraded) in raw.into_iter().chain(hourly) {
+        let slot = best.entry(id).or_default().entry(day).or_insert((0, 0, 0));
+        *slot = (slot.0 + up, slot.1 + down, slot.2 + degraded);
+    }
+    for (id, day, up, down, degraded) in daily {
         let slot = best.entry(id).or_default().entry(day).or_insert((0, 0, 0));
         if up + down + degraded > slot.0 + slot.1 + slot.2 {
             *slot = (up, down, degraded);
         }
     }
-    // BTreeMap keys are ISO dates, so iteration order is oldest-first already.
+    // BTreeMap keys are day numbers, so iteration order is oldest-first already.
     Ok(best
         .into_iter()
         .map(|(id, days)| {
             let rows = days
                 .into_iter()
                 .map(|(day, (up, down, degraded))| DayRow {
-                    day,
+                    day: iso_day(day),
                     up,
                     down,
                     degraded,
@@ -504,6 +506,13 @@ pub async fn daily_all(
             (id, rows)
         })
         .collect())
+}
+
+/// A UTC day number (`unix_secs / 86400`) as `YYYY-MM-DD`, the format SQLite's
+/// `strftime('%Y-%m-%d', …, 'unixepoch')` produced.
+fn iso_day(day: i64) -> String {
+    chrono::DateTime::from_timestamp(day * SECONDS_PER_DAY, 0)
+        .map_or_else(String::new, |at| at.format("%Y-%m-%d").to_string())
 }
 
 /// Latency samples per monitor since `since`, oldest first (NULLs skipped).
@@ -1500,11 +1509,11 @@ pub fn spawn_pruner(
 /// Downsample old history and age the aggregates out. Failures are logged and
 /// non-fatal: the retention pruning in [`prune`] still runs.
 async fn roll_up_history(pool: &SqlitePool, now: i64) {
-    // Downsample before any deletion: raw checks older than 7 days roll up
-    // into hourly buckets, hourly buckets older than 90 days into daily ones.
-    // Each bucket is written exactly once (see `downsample_hourly`), so the
-    // aggregates survive after retention prunes the raw rows they came from.
-    let hourly_cutoff = now - DOWNSAMPLE_HOURLY_AFTER_DAYS * SECONDS_PER_DAY;
+    // Downsample before any deletion: every ended hour rolls up into an hourly
+    // bucket, hourly buckets older than 90 days into daily ones. Each bucket is
+    // written exactly once (see `downsample_hourly`), so the aggregates survive
+    // after retention prunes the raw rows they came from.
+    let hourly_cutoff = now - HOURLY_ROLLUP_LAG_SECS;
     if let Err(err) = downsample_hourly(pool, hourly_cutoff).await {
         tracing::warn!("hourly downsampling failed: {err}");
     }
@@ -1781,6 +1790,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn iso_day_matches_sqlite_strftime() {
+        let pool = memory_pool().await;
+        for secs in [0_i64, 86_399, 86_400, 951_782_400, 1_789_695_050] {
+            let sqlite: String = sqlx::query_scalar("SELECT strftime('%Y-%m-%d', ?, 'unixepoch')")
+                .bind(secs)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(iso_day(secs / SECONDS_PER_DAY), sqlite, "{secs}");
+        }
+    }
+
+    #[tokio::test]
     async fn daily_aggregates_by_utc_day() {
         let pool = memory_pool().await;
         let day0 = 1_609_459_200; // 2021-01-01 00:00:00 UTC
@@ -1991,6 +2013,26 @@ mod tests {
             .unwrap();
         let bars = daily_all(&pool, 0, hour0 + 3600).await.unwrap();
         assert_eq!(bars["m"][0].day, day_key);
+        assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn daily_all_adds_the_raw_tail_to_the_rolled_up_hours() {
+        let pool = memory_pool().await;
+        let day0 = 10 * 86400;
+
+        // 01:00 is rolled up, 05:00 is still raw: the same day is split across
+        // both sources, and the bar must count both halves.
+        insert(&pool, "m", day0 + 3600 + 10, 1, Some(100)).await;
+        downsample_hourly(&pool, day0 + 2 * 3600).await.unwrap();
+        insert(&pool, "m", day0 + 5 * 3600 + 10, 0, None).await;
+        let now = day0 + 6 * 3600;
+        let bars = daily_all(&pool, 0, now).await.unwrap();
+        assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
+
+        // Rolling the tail up moves it to the buckets without double counting.
+        downsample_hourly(&pool, now).await.unwrap();
+        let bars = daily_all(&pool, 0, now).await.unwrap();
         assert_eq!((bars["m"][0].up, bars["m"][0].down), (1, 1));
     }
 

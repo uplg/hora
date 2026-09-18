@@ -120,9 +120,9 @@ Full guides for everything below live in the
 
 - **Live config reload** (file watch or `SIGHUP`) with no blind window; `${VAR}`
   interpolation keeps secrets in the environment.
-- **Retention with downsampling** - hourly buckets after 7 days, daily after 90,
-  kept a year; the database never grows forever. `hora backup` snapshots it in
-  one statement.
+- **Retention with downsampling** - hourly buckets as each hour ends, daily
+  after 90 days, kept a year; the database never grows forever. `hora backup`
+  snapshots it in one statement.
 - **Uptime Kuma import** (`hora import kuma backup.json`), `hora check` for CI,
   `hora test-alert` to verify the notification chain before the first incident,
   and **`hora doctor`** to diagnose the runtime environment (IPv6 route, ICMP

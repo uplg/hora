@@ -4,6 +4,14 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.9.5 → 0.9.6
+
+No schema migration, no config change. The first maintenance tick after the
+upgrade (5 minutes after start) rolls the last 7 days of raw checks up into
+hourly buckets in one pass (about 0.3 s on 270k checks); after that each tick
+only rolls up the hours since the previous one. Raw checks are kept exactly
+as before (`retention_days`).
+
 ## 0.9.4 → 0.9.5
 
 No schema migration. One new optional key, `ehlo_name` on `starttls = "smtp"`

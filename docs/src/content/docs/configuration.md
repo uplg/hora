@@ -69,8 +69,9 @@ at 3 a.m.
 ## Retention and downsampling
 
 Raw checks are kept per monitor (`retention_days`, default
-`alerts.default_retention_days = 90`), then automatically downsampled: hourly
-buckets after 7 days, daily buckets after 90, kept for a year. The daily
+`alerts.default_retention_days = 90`). Alongside them, every ended hour is
+rolled up into an hourly bucket; hourly buckets become daily ones after 90
+days, kept for a year. The daily
 uptime bars keep working beyond the raw retention window, and the database
 never grows forever. Closed incidents age out after a year; expired silences
 are swept too.

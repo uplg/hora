@@ -1011,19 +1011,30 @@ pub(crate) async fn peer_monitors(
     // What a mesh member may know: kind + target (it can probe those anyway
     // via /api/peer/probe) and this node's live view of each - never names,
     // notes or credentials. Push/exec monitors have no probeable target.
-    let summary = state_summary(state, true).await;
-    let monitors = config
+    // Peers poll every minute, so this reads only the two inputs it answers
+    // with (the summary's status and p50), never the full page rebuild.
+    let shared: Vec<&Monitor> = config
         .monitors
         .iter()
         .filter(|monitor| !matches!(monitor.kind, Kind::Push | Kind::Exec))
-        .map(|monitor| {
-            let view = summary.monitors.iter().find(|view| view.id == monitor.id);
-            hora_core::confirm::PeerMonitor {
-                kind: monitor.kind,
-                target: monitor.target.clone(),
-                status: view.map_or_else(|| "unknown".to_owned(), |view| view.status.to_owned()),
-                p50_ms: view.and_then(|view| view.p50_ms),
-            }
+        .collect();
+    let threshold = i64::from(config.alerts.fail_threshold.max(1));
+    let since_24h = Utc::now().timestamp() - hora_core::SECONDS_PER_DAY;
+    let (recent, percentiles) = tokio::join!(
+        crate::summary::recent_checks_map(&state.pool, &shared, threshold),
+        db::latency_percentiles_all(&state.pool, since_24h),
+    );
+    let percentiles = crate::summary::or_empty(percentiles, "latency percentiles");
+    let monitors = shared
+        .iter()
+        .map(|monitor| hora_core::confirm::PeerMonitor {
+            kind: monitor.kind,
+            target: monitor.target.clone(),
+            status: recent.get(&monitor.id).map_or_else(
+                || "unknown".to_owned(),
+                |checks| db::derive_status(checks, threshold).to_owned(),
+            ),
+            p50_ms: percentiles.get(&monitor.id).map(|(p50, _, _)| *p50),
         })
         .collect();
     Ok(Json(hora_core::confirm::PeerMonitors { monitors }))

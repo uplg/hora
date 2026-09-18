@@ -976,6 +976,78 @@ mod tests {
         assert_eq!(answer.monitors.len(), 2, "push monitors are not targets");
     }
 
+    #[tokio::test]
+    async fn peer_monitors_match_the_full_summary() {
+        // The peer answer skips the page rebuild; it must still report exactly
+        // the status and p50 the authenticated summary shows.
+        let (app, pool) = test_app_with_pool().await;
+        let now = chrono::Utc::now().timestamp();
+        for (offset, latency) in [(60, 40), (120, 10), (180, 30), (240, 20), (300, 50)] {
+            sqlx::query(
+                "INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, 'web', 1, ?)",
+            )
+            .bind(now - offset)
+            .bind(latency)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for offset in [60, 120, 180, 240] {
+            sqlx::query("INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, 'intra', 0, NULL)")
+                .bind(now - offset)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/peer/monitors?from=peer-x")
+                    .header("x-push-token", "peertok")
+                    .extension(fake_peer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let peer: hora_core::confirm::PeerMonitors =
+            serde_json::from_str(&body_text(res).await).unwrap();
+        let res = app
+            .oneshot(get("/api/summary?token=0123456789abcdef"))
+            .await
+            .unwrap();
+        let summary: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+
+        for (id, target) in [
+            ("web", "https://example.com"),
+            ("intra", "https://intra.example.com"),
+        ] {
+            let view = summary["monitors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|view| view["id"] == id)
+                .unwrap();
+            let answer = peer.monitors.iter().find(|m| m.target == target).unwrap();
+            assert_eq!(answer.status, view["status"].as_str().unwrap(), "{id}");
+            assert_eq!(answer.p50_ms, view["latency_p50_ms"].as_i64(), "{id}");
+        }
+        let web = peer
+            .monitors
+            .iter()
+            .find(|m| m.target == "https://example.com")
+            .unwrap();
+        assert_eq!((web.status.as_str(), web.p50_ms), ("up", Some(30)));
+        let intra = peer
+            .monitors
+            .iter()
+            .find(|m| m.target == "https://intra.example.com")
+            .unwrap();
+        assert_eq!((intra.status.as_str(), intra.p50_ms), ("down", None));
+    }
+
     /// The vantage exchange end to end: the poller-side fetch against a peer
     /// served over real HTTP, exactly as `hora peers diff` and the display
     /// poller consume it.
