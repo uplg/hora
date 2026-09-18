@@ -542,7 +542,7 @@ async fn heartbeat_outcome(pool: &SqlitePool, monitor: &Monitor) -> Option<Outco
         return heartbeat_outcome_for(pool, &monitor.id, monitor.interval_secs).await;
     };
     // Validated at config load; a parse failure here is defensive only.
-    let Ok(cron) = schedule.parse::<croner::Cron>() else {
+    let Ok(cron) = crate::config::parse_cron(schedule) else {
         error!(monitor = %monitor.id, "invalid cron schedule {schedule:?}");
         return None;
     };

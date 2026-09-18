@@ -785,6 +785,13 @@ pub struct Monitor {
     /// only the certificate watcher upgrades the connection.
     #[serde(default)]
     pub starttls: Option<String>,
+    /// `starttls = "smtp"`: the name announced in `EHLO`. RFC 5321 wants a
+    /// fully qualified domain or an address literal, and MX servers enforce it
+    /// on port 25 (`550 Invalid EHLO domain`). Default: the address literal of
+    /// the connection's local end (`[192.0.2.10]`), valid everywhere,
+    /// including inside a container whose hostname is a bare id.
+    #[serde(default)]
+    pub ehlo_name: Option<String>,
     /// Override how long this monitor's checks are kept before pruning.
     #[serde(default)]
     pub retention_days: Option<u16>,
@@ -880,6 +887,7 @@ impl std::fmt::Debug for Monitor {
             .field("grace_secs", &self.grace_secs)
             .field("check_cert", &self.check_cert)
             .field("starttls", &self.starttls)
+            .field("ehlo_name", &self.ehlo_name)
             .field("retention_days", &self.retention_days)
             .field("group", &self.group)
             .field("depends_on", &self.depends_on)
@@ -1016,6 +1024,7 @@ impl Monitor {
             grace_secs: None,
             check_cert: None,
             starttls: None,
+            ehlo_name: None,
             retention_days: None,
             group: None,
             depends_on: None,
@@ -1493,6 +1502,20 @@ fn validate_exec(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse a cron schedule (`schedule`, `[digest]`). croner 4 rejects the
+/// shorthand steps (`5/5`, `/10`) that 3.x accepted; `sloppy_ranges` keeps
+/// configs written for earlier releases loading.
+///
+/// # Errors
+///
+/// Returns croner's parse error for an invalid pattern.
+pub fn parse_cron(schedule: &str) -> Result<croner::Cron, croner::errors::CronError> {
+    croner::parser::CronParser::builder()
+        .sloppy_ranges(true)
+        .build()
+        .parse(schedule)
+}
+
 /// Digest: the cron must parse at load (not at the first missed send), and
 /// routes must name real channels, like a monitor's `notify`.
 fn validate_digest(
@@ -1500,7 +1523,7 @@ fn validate_digest(
     channel_names: &std::collections::HashSet<&str>,
 ) -> anyhow::Result<()> {
     if let Some(digest) = &config.digest {
-        digest.schedule.parse::<croner::Cron>().map_err(|err| {
+        parse_cron(&digest.schedule).map_err(|err| {
             anyhow::anyhow!("digest: invalid schedule {:?}: {err}", digest.schedule)
         })?;
         if let Some(routes) = &digest.notify {
@@ -1817,6 +1840,18 @@ fn validate_body_assertions(monitor: &Monitor) -> anyhow::Result<()> {
 /// tcp monitor (the protocols it speaks live on host:port targets), and only
 /// for the protocols the negotiation implements.
 fn validate_starttls(monitor: &Monitor) -> anyhow::Result<()> {
+    if let Some(name) = &monitor.ehlo_name {
+        anyhow::ensure!(
+            monitor.starttls.as_deref() == Some("smtp"),
+            "monitor {}: ehlo_name requires starttls = \"smtp\"",
+            monitor.id
+        );
+        anyhow::ensure!(
+            valid_ehlo_name(name),
+            "monitor {}: ehlo_name must be a fully qualified domain or an address literal like [192.0.2.1]",
+            monitor.id
+        );
+    }
     let Some(mode) = &monitor.starttls else {
         return Ok(());
     };
@@ -1831,6 +1866,28 @@ fn validate_starttls(monitor: &Monitor) -> anyhow::Result<()> {
         monitor.id
     );
     Ok(())
+}
+
+/// RFC 5321 `Domain` (at least two LDH labels) or `address-literal`
+/// (`[IPv4]` / `[IPv6:…]`). A bare single label is what MX servers reject.
+fn valid_ehlo_name(name: &str) -> bool {
+    if let Some(literal) = name.strip_prefix('[').and_then(|n| n.strip_suffix(']')) {
+        return match literal.strip_prefix("IPv6:") {
+            Some(v6) => v6.parse::<std::net::Ipv6Addr>().is_ok(),
+            None => literal.parse::<std::net::Ipv4Addr>().is_ok(),
+        };
+    }
+    let labels: Vec<&str> = name.trim_end_matches('.').split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 /// Validate the identity assertions: the certificate pin and the RDAP domain.
@@ -1903,7 +1960,7 @@ fn validate_schedule_and_slo(monitor: &Monitor) -> anyhow::Result<()> {
             "monitor {}: schedule requires a push monitor",
             monitor.id
         );
-        schedule.parse::<croner::Cron>().map_err(|err| {
+        parse_cron(schedule).map_err(|err| {
             anyhow::anyhow!(
                 "monitor {}: invalid schedule {schedule:?}: {err}",
                 monitor.id
@@ -2902,6 +2959,22 @@ mod tests {
     }
 
     #[test]
+    fn cron_keeps_the_3x_shorthand_steps() {
+        // croner 4 rejects these by default; configs written for earlier
+        // releases must keep loading.
+        for pattern in ["5/5 * * * *", "/10 * * * *", "0 8 * * 1", "*/15 * * * *"] {
+            assert!(super::parse_cron(pattern).is_ok(), "{pattern}");
+        }
+        assert!(super::parse_cron("61 * * * *").is_err());
+        let from = chrono::DateTime::from_timestamp(0, 0).expect("epoch");
+        let next = super::parse_cron("5/5 * * * *")
+            .expect("valid")
+            .find_next_occurrence(&from, false)
+            .expect("next");
+        assert_eq!(next.timestamp(), 300);
+    }
+
+    #[test]
     fn digest_validates_schedule_and_routes() {
         let base = r#"
             [page]
@@ -3396,6 +3469,65 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("\"smtp\" or \"imap\""), "{err}");
+    }
+
+    #[test]
+    fn ehlo_name_is_smtp_only_and_rfc_shaped() {
+        let cfg = |extra: &str| {
+            format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "mx"
+                name = "MX"
+                kind = "tcp"
+                target = "mail.example.org:25"
+                interval_secs = 60
+                {extra}
+            "#
+            )
+        };
+
+        for name in [
+            "status.example.org",
+            "status.example.org.",
+            "[192.0.2.1]",
+            "[IPv6:2001:db8::1]",
+        ] {
+            let config = super::parse(&cfg(&format!(
+                "starttls = \"smtp\"\nehlo_name = \"{name}\""
+            )))
+            .unwrap_or_else(|err| panic!("{name}: {err}"));
+            assert_eq!(config.monitors[0].ehlo_name.as_deref(), Some(name));
+        }
+
+        // A bare label is exactly what port-25 servers refuse; bad literals too.
+        for name in [
+            "hora",
+            "",
+            "a..b",
+            "-a.b",
+            "[hora]",
+            "[2001:db8::1]",
+            "[IPv6:1.2.3.4]",
+        ] {
+            let err = super::parse(&cfg(&format!(
+                "starttls = \"smtp\"\nehlo_name = \"{name}\""
+            )))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("fully qualified"), "{name}: {err}");
+        }
+
+        // Meaningless without an SMTP negotiation.
+        for extra in [
+            "ehlo_name = \"a.example\"",
+            "starttls = \"imap\"\nehlo_name = \"a.example\"",
+        ] {
+            let err = super::parse(&cfg(extra)).unwrap_err().to_string();
+            assert!(err.contains("requires starttls"), "{err}");
+        }
     }
 
     #[test]

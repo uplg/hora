@@ -18,7 +18,7 @@ RUN cargo build --release --locked -p hora \
     && cp "target/${CARGO_BUILD_TARGET}/release/hora" /hora
 
 # --- Runtime stage: Alpine + CA certs (a few MB) --------------------------
-FROM alpine:3.23 AS runtime
+FROM alpine:3.24 AS runtime
 
 # A non-root user owns /data (a fresh named volume inherits this ownership).
 RUN apk add --no-cache ca-certificates \

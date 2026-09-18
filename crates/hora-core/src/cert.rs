@@ -124,6 +124,15 @@ impl Starttls {
     }
 }
 
+/// The RFC 5321 address literal for a local socket address: `[192.0.2.10]`
+/// or `[IPv6:2001:db8::a]`. The `EHLO` fallback when no `ehlo_name` is set.
+fn address_literal(addr: std::net::SocketAddr) -> String {
+    match addr.ip().to_canonical() {
+        std::net::IpAddr::V4(v4) => format!("[{v4}]"),
+        std::net::IpAddr::V6(v6) => format!("[IPv6:{v6}]"),
+    }
+}
+
 /// Bounds on the plaintext negotiation, so a hostile or broken server can't
 /// feed us an endless reply: per-line bytes and lines per reply.
 const MAX_REPLY_LINE_BYTES: usize = 1024;
@@ -169,7 +178,7 @@ async fn read_smtp_reply<S: tokio::io::AsyncRead + Unpin>(
 /// Negotiate STARTTLS on a fresh plaintext connection, leaving the stream
 /// ready for the TLS handshake. Every step is bounded; the caller wraps the
 /// whole negotiation in the monitor's timeout.
-async fn negotiate<S>(stream: &mut S, mode: Starttls) -> anyhow::Result<()>
+async fn negotiate<S>(stream: &mut S, mode: Starttls, ehlo_name: &str) -> anyhow::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -177,7 +186,9 @@ where
     match mode {
         Starttls::Smtp => {
             read_smtp_reply(stream, "220").await?;
-            stream.write_all(b"EHLO hora\r\n").await?;
+            stream
+                .write_all(format!("EHLO {ehlo_name}\r\n").as_bytes())
+                .await?;
             read_smtp_reply(stream, "250").await?;
             stream.write_all(b"STARTTLS\r\n").await?;
             read_smtp_reply(stream, "220").await?;
@@ -214,6 +225,7 @@ async fn fetch(
     host: &str,
     port: u16,
     starttls: Option<Starttls>,
+    ehlo_name: Option<&str>,
     timeout: Duration,
 ) -> anyhow::Result<(i64, String)> {
     let mut tcp = tokio::time::timeout(timeout, TcpStream::connect((host, port)))
@@ -221,7 +233,11 @@ async fn fetch(
         .map_err(|_elapsed| anyhow::anyhow!("tcp connect timed out"))??;
 
     if let Some(mode) = starttls {
-        tokio::time::timeout(timeout, negotiate(&mut tcp, mode))
+        let ehlo_name = match ehlo_name {
+            Some(name) => name.to_owned(),
+            None => address_literal(tcp.local_addr()?),
+        };
+        tokio::time::timeout(timeout, negotiate(&mut tcp, mode, &ehlo_name))
             .await
             .map_err(|_elapsed| anyhow::anyhow!("starttls negotiation timed out"))??;
     }
@@ -270,12 +286,13 @@ pub async fn inspect(target: &str, timeout: Duration) -> anyhow::Result<CertInfo
     let (host, port) = host_port(target).ok_or_else(|| {
         anyhow::anyhow!("cannot determine host:port for a cert check from {target:?}")
     })?;
-    inspect_endpoint(&host, port, None, timeout).await
+    inspect_endpoint(&host, port, None, None, timeout).await
 }
 
 /// Like [`inspect`], but for a bare endpoint - optionally negotiating
-/// STARTTLS first, so `hora probe` can read a mail server's certificate the
-/// same way the watcher does.
+/// STARTTLS first (announcing `ehlo_name`, or the local address literal), so
+/// `hora probe` can read a mail server's certificate the same way the watcher
+/// does.
 ///
 /// # Errors
 ///
@@ -285,10 +302,11 @@ pub async fn inspect_endpoint(
     host: &str,
     port: u16,
     starttls: Option<Starttls>,
+    ehlo_name: Option<&str>,
     timeout: Duration,
 ) -> anyhow::Result<CertInfo> {
     let tls = client_config()?;
-    let (not_after, fingerprint) = fetch(&tls, host, port, starttls, timeout).await?;
+    let (not_after, fingerprint) = fetch(&tls, host, port, starttls, ehlo_name, timeout).await?;
     let now = chrono::Utc::now().timestamp();
     Ok(CertInfo {
         not_after,
@@ -394,7 +412,16 @@ pub fn spawn_watcher(
                 };
 
                 let starttls = Starttls::for_monitor(monitor);
-                match fetch(&tls, &host, port, starttls, monitor.timeout()).await {
+                match fetch(
+                    &tls,
+                    &host,
+                    port,
+                    starttls,
+                    monitor.ehlo_name.as_deref(),
+                    monitor.timeout(),
+                )
+                .await
+                {
                     Ok((not_after, fingerprint)) => {
                         if let Err(err) = db::upsert_cert(&pool, &monitor.id, not_after, now).await
                         {
@@ -424,42 +451,17 @@ pub fn spawn_watcher(
                             warned.insert(monitor.id.clone(), expiring);
                         }
 
-                        // Certificate pinning: compare BEFORE storing, alert,
-                        // then remember the observed fingerprint so the same
-                        // mismatch alerts once, not every check. A change during
-                        // maintenance is muted like any other alert (a renewal
-                        // mid-window is the deploy, not an attack) but still
-                        // recorded.
                         if let Some(expected_pin) = &monitor.cert_pin {
-                            let stored = match db::cert_pin_fingerprint(&pool, &monitor.id).await {
-                                Ok(stored) => stored,
-                                Err(err) => {
-                                    warn!(monitor = %monitor.id, "failed to read cert pin: {err:#}");
-                                    continue;
-                                }
-                            };
-                            if !muted
-                                && let Some(old) =
-                                    pin_alert(expected_pin, stored.as_deref(), &fingerprint)
-                            {
-                                notifier
-                                    .load_full()
-                                    .dispatch(
-                                        Event::CertChanged {
-                                            monitor: &monitor.name,
-                                            old_fingerprint: old,
-                                            new_fingerprint: &fingerprint,
-                                        },
-                                        monitor.notify.as_deref(),
-                                    )
-                                    .await;
-                            }
-                            if stored.as_deref() != Some(fingerprint.as_str())
-                                && let Err(err) =
-                                    db::upsert_cert_pin(&pool, &monitor.id, &fingerprint, now).await
-                            {
-                                warn!(monitor = %monitor.id, "failed to store cert pin: {err:#}");
-                            }
+                            check_pin(
+                                &pool,
+                                &notifier,
+                                monitor,
+                                expected_pin,
+                                &fingerprint,
+                                muted,
+                                now,
+                            )
+                            .await;
                         }
                     }
                     Err(err) => warn!(monitor = %monitor.id, "cert check failed: {err:#}"),
@@ -467,6 +469,46 @@ pub fn spawn_watcher(
             }
         }
     })
+}
+
+/// Certificate pinning: compare BEFORE storing, alert, then remember the
+/// observed fingerprint so the same mismatch alerts once, not every check. A
+/// change during maintenance is muted like any other alert (a renewal
+/// mid-window is the deploy, not an attack) but still recorded.
+async fn check_pin(
+    pool: &SqlitePool,
+    notifier: &Notifiers,
+    monitor: &crate::config::Monitor,
+    expected_pin: &str,
+    fingerprint: &str,
+    muted: bool,
+    now: i64,
+) {
+    let stored = match db::cert_pin_fingerprint(pool, &monitor.id).await {
+        Ok(stored) => stored,
+        Err(err) => {
+            warn!(monitor = %monitor.id, "failed to read cert pin: {err:#}");
+            return;
+        }
+    };
+    if !muted && let Some(old) = pin_alert(expected_pin, stored.as_deref(), fingerprint) {
+        notifier
+            .load_full()
+            .dispatch(
+                Event::CertChanged {
+                    monitor: &monitor.name,
+                    old_fingerprint: old,
+                    new_fingerprint: fingerprint,
+                },
+                monitor.notify.as_deref(),
+            )
+            .await;
+    }
+    if stored.as_deref() != Some(fingerprint)
+        && let Err(err) = db::upsert_cert_pin(pool, &monitor.id, fingerprint, now).await
+    {
+        warn!(monitor = %monitor.id, "failed to store cert pin: {err:#}");
+    }
 }
 
 /// One pass of the RDAP domain-expiry checks: for each monitor with a
@@ -589,9 +631,22 @@ mod tests {
     /// stream: `replies` are sent in order, one per client command (the
     /// greeting first, before any command).
     async fn scripted(mode: Starttls, replies: &'static [&'static str]) -> anyhow::Result<()> {
+        scripted_commands(mode, "client.example.org", replies)
+            .await
+            .0
+    }
+
+    /// [`scripted`] with an explicit `EHLO` name, also returning the command
+    /// lines the client sent.
+    async fn scripted_commands(
+        mode: Starttls,
+        ehlo_name: &str,
+        replies: &'static [&'static str],
+    ) -> (anyhow::Result<()>, Vec<String>) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let (mut client, mut server) = tokio::io::duplex(4096);
         let peer = tokio::spawn(async move {
+            let mut commands = Vec::new();
             let mut replies = replies.iter();
             // Greeting flows before the client says anything.
             if let Some(first) = replies.next() {
@@ -600,16 +655,18 @@ mod tests {
             let mut buf = [0u8; 256];
             for reply in replies {
                 // One read per client command line (commands are tiny).
-                if server.read(&mut buf).await.is_err() {
-                    return;
-                }
+                let Ok(read) = server.read(&mut buf).await else {
+                    break;
+                };
+                commands.push(String::from_utf8_lossy(&buf[..read]).into_owned());
                 let _ = server.write_all(reply.as_bytes()).await;
             }
+            commands
         });
-        let result = negotiate(&mut client, mode).await;
+        let result = negotiate(&mut client, mode, ehlo_name).await;
         drop(client);
-        let _ = peer.await;
-        result
+        let commands = peer.await.unwrap_or_default();
+        (result, commands)
     }
 
     #[tokio::test]
@@ -640,6 +697,33 @@ mod tests {
         // A wrong greeting fails immediately.
         let bad = scripted(Starttls::Smtp, &["554 go away\r\n"]).await;
         assert!(bad.is_err());
+    }
+
+    #[tokio::test]
+    async fn smtp_negotiation_announces_the_ehlo_name() {
+        let (ok, commands) = scripted_commands(
+            Starttls::Smtp,
+            "status.example.org",
+            &[
+                "220 mail.example.org ESMTP\r\n",
+                "250 mail.example.org\r\n",
+                "220 2.0.0 Ready to start TLS\r\n",
+            ],
+        )
+        .await;
+        assert!(ok.is_ok(), "{ok:?}");
+        assert_eq!(commands, ["EHLO status.example.org\r\n", "STARTTLS\r\n"]);
+    }
+
+    #[test]
+    fn address_literal_follows_rfc_5321() {
+        let v4: std::net::SocketAddr = "192.0.2.10:40000".parse().unwrap();
+        assert_eq!(address_literal(v4), "[192.0.2.10]");
+        let v6: std::net::SocketAddr = "[2001:db8::a]:40000".parse().unwrap();
+        assert_eq!(address_literal(v6), "[IPv6:2001:db8::a]");
+        // A dual-stack socket reports IPv4 peers as mapped: announce the v4 form.
+        let mapped: std::net::SocketAddr = "[::ffff:192.0.2.10]:40000".parse().unwrap();
+        assert_eq!(address_literal(mapped), "[192.0.2.10]");
     }
 
     #[tokio::test]
