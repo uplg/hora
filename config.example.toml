@@ -229,6 +229,14 @@ depends_on = ["api"]
 # domain_expiry = "example.com"  # optional; the *registered* domain (not the
 #                         # subdomain), checked daily via RDAP - alerts
 #                         # `alerts.domain_expiry_days` before it expires
+# release = { github = "matrix-construct/tuwunel", current = "v1.9.1" }
+#                         # optional; alert once when the project publishes a release
+#                         # newer than the version that runs (GitHub's latest release:
+#                         # no draft, no prerelease; asked twice a day). Instead of
+#                         # `current`, ask the service itself so the line never drifts:
+#                         #   current_url = "https://chat.example.com/version"   (text)
+#                         #   current_url = "https://chat.example.com/_matrix/client/versions",
+#                         #   current_query = "$['net.zemos.msc4383.server'].version"  (JSON)
 # dual_stack = true       # optional; probe IPv4 AND IPv6 and require both - catches
 #                         # the service whose IPv6 has been dead for weeks behind a
 #                         # healthy IPv4 ("IPv6 failing: connection timed out (IPv4

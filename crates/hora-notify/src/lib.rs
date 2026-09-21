@@ -110,6 +110,22 @@ pub struct ChannelHealthEntry {
     pub health: ChannelHealth,
 }
 
+/// What an [`Event::ReleaseAvailable`] carries. A struct rather than the
+/// variant's own fields: five of them in each channel's `match` would push
+/// those functions past what one reads at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Release<'a> {
+    pub monitor: &'a str,
+    /// The watched project, `owner/repo`.
+    pub project: &'a str,
+    /// The version that runs (configured, or read from the service).
+    pub current: &'a str,
+    /// The latest published release.
+    pub latest: &'a str,
+    /// The release's page: its notes.
+    pub url: &'a str,
+}
+
 /// An alertable event. Borrows its data so emitting one is allocation-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event<'a> {
@@ -144,6 +160,10 @@ pub enum Event<'a> {
         domain: &'a str,
         days_left: i64,
     },
+    /// A newer upstream release of the software behind a monitor is out
+    /// (`release = { github = "owner/repo", ... }`). Nothing is failing: the
+    /// service is behind, and whoever runs it wants to know the same day.
+    ReleaseAvailable(Release<'a>),
     /// A peer is unreachable from here, but a third-party witness still sees it
     /// up: likely a network partition on the local-to-peer link, not a peer
     /// outage. Lower severity than [`Event::Down`].

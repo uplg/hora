@@ -61,6 +61,13 @@ impl WebhookNotifier {
                 days_left: Some(days_left),
                 ..Payload::new("domain_expiring", monitor)
             },
+            Event::ReleaseAvailable(release) => Payload {
+                project: Some(release.project),
+                current: Some(release.current),
+                latest: Some(release.latest),
+                url: Some(release.url),
+                ..Payload::new("release_available", release.monitor)
+            },
             Event::Digest { period, summary } => Payload {
                 message: Some(summary),
                 period: Some(period),
@@ -133,6 +140,18 @@ struct Payload<'a> {
     /// The registered domain, on domain-expiry events.
     #[serde(skip_serializing_if = "Option::is_none")]
     domain: Option<&'a str>,
+    /// The watched project (`owner/repo`), on release events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<&'a str>,
+    /// The version that runs, on release events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current: Option<&'a str>,
+    /// The latest published release, on release events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest: Option<&'a str>,
+    /// The release's page, on release events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
     /// The covered period, on digest events.
     #[serde(skip_serializing_if = "Option::is_none")]
     period: Option<&'a str>,
@@ -168,6 +187,10 @@ impl<'a> Payload<'a> {
             change: None,
             witness: None,
             domain: None,
+            project: None,
+            current: None,
+            latest: None,
+            url: None,
             period: None,
             days_left: None,
             latency_ms: None,
@@ -203,6 +226,28 @@ impl Notifier for WebhookNotifier {
 mod tests {
     use super::*;
     use crate::AlertSeverity;
+
+    #[test]
+    fn a_release_payload_names_what_is_out_and_what_runs() {
+        let payload = WebhookNotifier::payload(Event::ReleaseAvailable(crate::Release {
+            monitor: "Chat",
+            project: "matrix-construct/tuwunel",
+            current: "1.9.1",
+            latest: "v1.9.2",
+            url: "https://github.com/matrix-construct/tuwunel/releases/tag/v1.9.2",
+        }));
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            serde_json::json!({
+                "event": "release_available",
+                "monitor": "Chat",
+                "project": "matrix-construct/tuwunel",
+                "current": "1.9.1",
+                "latest": "v1.9.2",
+                "url": "https://github.com/matrix-construct/tuwunel/releases/tag/v1.9.2",
+            })
+        );
+    }
 
     #[test]
     fn payload_per_event() {

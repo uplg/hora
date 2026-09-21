@@ -1022,6 +1022,7 @@ mod tests {
             dns_resolver: None,
             cert_pin: None,
             domain_expiry: None,
+            release: None,
             confirm_with_peers: None,
             command: Vec::new(),
             slo_uptime: None,

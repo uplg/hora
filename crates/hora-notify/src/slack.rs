@@ -67,6 +67,12 @@ impl SlackNotifier {
                 escape(monitor),
                 escape(&domain_expiry_phrase(domain, days_left))
             ),
+            Event::ReleaseAvailable(release) => format!(
+                ":package: *{}*: {}\n{}",
+                escape(release.monitor),
+                escape(&crate::util::release_phrase(&release)),
+                escape(release.url)
+            ),
             Event::Digest { period, summary } => format!(
                 ":bar_chart: *Hora digest* ({})\n{}",
                 escape(period),

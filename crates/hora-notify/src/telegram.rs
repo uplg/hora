@@ -69,6 +69,12 @@ impl TelegramNotifier {
                 escape(monitor),
                 escape(&domain_expiry_phrase(domain, days_left)),
             ),
+            Event::ReleaseAvailable(release) => format!(
+                "\u{1F4E6} <b>{}</b>: {}\n{}",
+                escape(release.monitor),
+                escape(&crate::util::release_phrase(&release)),
+                escape(release.url),
+            ),
             Event::Digest { period, summary } => format!(
                 "\u{1F4CA} <b>Hora digest</b> ({})\n{}",
                 escape(period),

@@ -703,6 +703,81 @@ pub async fn domain_expiry(
     .await
 }
 
+/// A monitor's release watch as stored: the latest upstream release seen, when
+/// it was looked up, and the release an alert was last sent for.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct StoredRelease {
+    pub project: String,
+    pub latest: String,
+    pub url: String,
+    pub checked_at: i64,
+    pub notified: Option<String>,
+}
+
+/// Store (or refresh) the latest upstream release of a monitor's project. The
+/// `notified` mark is kept while the project stays the same, and dropped with
+/// it: another project's tags mean nothing to this one.
+///
+/// # Errors
+///
+/// Returns an error if the upsert fails.
+pub async fn upsert_release_watch(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    project: &str,
+    latest: &str,
+    url: &str,
+    checked_at: i64,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO release_watch (monitor_id, project, latest, url, checked_at)          VALUES (?, ?, ?, ?, ?)          ON CONFLICT(monitor_id) DO UPDATE SET             notified = CASE WHEN project = excluded.project THEN notified END,             project = excluded.project, latest = excluded.latest,             url = excluded.url, checked_at = excluded.checked_at",
+    )
+    .bind(monitor_id)
+    .bind(project)
+    .bind(latest)
+    .bind(url)
+    .bind(checked_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The stored release watch of a monitor, if any.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn release_watch(
+    pool: &SqlitePool,
+    monitor_id: &str,
+) -> sqlx::Result<Option<StoredRelease>> {
+    sqlx::query_as::<_, StoredRelease>(
+        "SELECT project, latest, url, checked_at, notified FROM release_watch WHERE monitor_id = ?",
+    )
+    .bind(monitor_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Record that an alert went out for `tag`, so the release alerts once - and
+/// not again after a restart.
+///
+/// # Errors
+///
+/// Returns an error if the update fails.
+pub async fn mark_release_notified(
+    pool: &SqlitePool,
+    monitor_id: &str,
+    tag: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE release_watch SET notified = ? WHERE monitor_id = ?")
+        .bind(tag)
+        .bind(monitor_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Store (or refresh) the certificate pin (SHA-256 fingerprint of the leaf public key).
 ///
 /// # Errors
@@ -1605,11 +1680,12 @@ async fn prune(pool: &SqlitePool, config: &Config) -> anyhow::Result<()> {
 
 /// The tables swept for rows left behind by removed monitors, all keyed by a
 /// `monitor_id` column.
-const ORPHAN_TABLES: [&str; 8] = [
+const ORPHAN_TABLES: [&str; 9] = [
     "checks",
     "certs",
     "cert_pins",
     "domain_expiry",
+    "release_watch",
     "incidents",
     "pushed_alerts",
     "checks_hourly",
@@ -1692,6 +1768,35 @@ mod tests {
             .expect("connect in-memory");
         migrator().run(&pool).await.expect("run migrations");
         pool
+    }
+
+    #[tokio::test]
+    async fn a_release_alerts_once_and_a_new_project_starts_afresh() {
+        let pool = memory_pool().await;
+        assert_eq!(release_watch(&pool, "chat").await.unwrap(), None);
+
+        upsert_release_watch(&pool, "chat", "a/b", "v1.9.2", "https://x/v1.9.2", 100)
+            .await
+            .unwrap();
+        mark_release_notified(&pool, "chat", "v1.9.2")
+            .await
+            .unwrap();
+
+        // The same project looked up again: the alert already sent is remembered.
+        upsert_release_watch(&pool, "chat", "a/b", "v1.9.2", "https://x/v1.9.2", 200)
+            .await
+            .unwrap();
+        let stored = release_watch(&pool, "chat").await.unwrap().expect("stored");
+        assert_eq!(stored.checked_at, 200);
+        assert_eq!(stored.notified.as_deref(), Some("v1.9.2"));
+
+        // Another project's tags mean nothing to this one.
+        upsert_release_watch(&pool, "chat", "c/d", "v1.9.2", "https://y/v1.9.2", 300)
+            .await
+            .unwrap();
+        let stored = release_watch(&pool, "chat").await.unwrap().expect("stored");
+        assert_eq!(stored.project, "c/d");
+        assert_eq!(stored.notified, None);
     }
 
     async fn insert(pool: &SqlitePool, id: &str, time: i64, status: i64, latency: Option<i64>) {

@@ -44,6 +44,11 @@ const CHECK_INTERVAL: Duration = Duration::from_hours(12);
 /// re-queries early.
 const DOMAIN_CHECK_SECS: i64 = 20 * 3600;
 
+/// Ask GitHub for a project's latest release at most this often. Under the
+/// watcher's 12-hour tick, so every tick asks; over a restart loop, so a
+/// crashing daemon does not spend the anonymous API's 60 requests an hour.
+const RELEASE_CHECK_SECS: i64 = 6 * 3600;
+
 /// A verifier that accepts any certificate: we want to read the dates, not
 /// establish trust.
 #[derive(Debug)]
@@ -404,6 +409,7 @@ pub fn spawn_watcher(
                 now,
             )
             .await;
+            check_releases(&pool, &snapshot, &notifier, &client, now).await;
 
             for monitor in snapshot.monitors.iter().filter(|m| m.checks_cert()) {
                 let Some((host, port)) = monitor_endpoint(monitor) else {
@@ -583,6 +589,90 @@ async fn check_domains(
                 .await;
         }
         domain_warned.insert(monitor.id.clone(), expiring);
+    }
+}
+
+/// One pass of the release watches: for each monitor with a `release`, refresh
+/// the project's latest release (gated on the stored `checked_at`), learn the
+/// version that runs, and alert when the first is newer - once per release,
+/// the release alerted for being stored, so a restart does not repeat it.
+/// Muted during maintenance without being recorded, like the expiries above.
+async fn check_releases(
+    pool: &SqlitePool,
+    snapshot: &Config,
+    notifier: &Notifiers,
+    client: &reqwest::Client,
+    now: i64,
+) {
+    for monitor in &snapshot.monitors {
+        let Some(watch) = &monitor.release else {
+            continue;
+        };
+        let stored = match db::release_watch(pool, &monitor.id).await {
+            Ok(stored) => stored,
+            Err(err) => {
+                warn!(monitor = %monitor.id, "failed to read release watch: {err:#}");
+                continue;
+            }
+        };
+        // A changed `release.github` in the config asks again immediately.
+        let stored = stored.filter(|stored| stored.project == watch.github);
+        let (latest, url, alerted) = match stored {
+            Some(stored) if now - stored.checked_at < RELEASE_CHECK_SECS => {
+                (stored.latest, stored.url, stored.notified)
+            }
+            stored => match crate::release::latest(client, &watch.github).await {
+                Ok(release) => {
+                    if let Err(err) = db::upsert_release_watch(
+                        pool,
+                        &monitor.id,
+                        &watch.github,
+                        &release.tag,
+                        &release.url,
+                        now,
+                    )
+                    .await
+                    {
+                        warn!(monitor = %monitor.id, "failed to store release watch: {err:#}");
+                    }
+                    info!(monitor = %monitor.id, project = %watch.github, latest = %release.tag, "checked latest release");
+                    (release.tag, release.url, stored.and_then(|s| s.notified))
+                }
+                Err(err) => {
+                    warn!(monitor = %monitor.id, project = %watch.github, "release check failed: {err:#}");
+                    continue;
+                }
+            },
+        };
+        let current = match crate::release::running(client, watch).await {
+            Ok(current) => current,
+            Err(err) => {
+                warn!(monitor = %monitor.id, "could not learn the running version: {err:#}");
+                continue;
+            }
+        };
+        if !crate::release::is_newer(&latest, &current)
+            || alerted.as_deref() == Some(latest.as_str())
+            || snapshot.in_maintenance(&monitor.id, chrono::Utc::now())
+        {
+            continue;
+        }
+        notifier
+            .load_full()
+            .dispatch(
+                Event::ReleaseAvailable(hora_notify::Release {
+                    monitor: &monitor.name,
+                    project: &watch.github,
+                    current: &current,
+                    latest: &latest,
+                    url: &url,
+                }),
+                monitor.notify.as_deref(),
+            )
+            .await;
+        if let Err(err) = db::mark_release_notified(pool, &monitor.id, &latest).await {
+            warn!(monitor = %monitor.id, "failed to record the release alert: {err:#}");
+        }
     }
 }
 

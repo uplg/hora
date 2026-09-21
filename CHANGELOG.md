@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-21
+
+### Added
+
+- **Upstream release watch** (`release = { github = "owner/repo", ... }` per
+  monitor): twice a day Hora asks GitHub for the project's latest release
+  (no draft, no prerelease) and alerts, once per release and across restarts,
+  when it is newer than the version that runs - *"matrix-construct/tuwunel
+  v1.9.2 is out (running v1.9.1)"*, with the link to the notes, through the
+  monitor's `notify` routing and muted during its maintenance. The running
+  version is a literal (`current`) or, so it cannot drift from what is
+  deployed, asked of the service itself (`current_url`, plus `current_query`,
+  a JSONPath, when the answer is JSON). New `release_available` webhook event
+  (`project`, `current`, `latest`, `url`); schema migration `0018`
+  (`release_watch`) applies automatically. As with every new key, a config
+  that uses `release` is rejected by an older binary (`deny_unknown_fields`).
+
 ## [0.9.6] - 2026-09-18
 
 ### Fixed

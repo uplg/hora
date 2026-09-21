@@ -16,6 +16,16 @@ pub struct GotifyNotifier {
     token: String,
 }
 
+/// A release event as one text: what is out, what runs, where the notes are.
+fn release_text(release: &crate::Release<'_>) -> String {
+    format!(
+        "RELEASE: {}: {}\n{}",
+        release.monitor,
+        crate::util::release_phrase(release),
+        release.url
+    )
+}
+
 impl GotifyNotifier {
     #[must_use]
     pub fn new(client: Client, url: String, token: String) -> Self {
@@ -64,6 +74,7 @@ impl GotifyNotifier {
                 ),
                 5,
             ),
+            Event::ReleaseAvailable(release) => (release_text(&release), 3),
             Event::Digest { period, summary } => (format!("DIGEST ({period}):\n{summary}"), 2),
             Event::PeerLinkDegraded { peer, witness } => (
                 format!("PEER: {peer} unreachable, but {witness} sees it up (partition)"),

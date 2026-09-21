@@ -29,6 +29,18 @@ pub struct EmailConfig {
     pub implicit_tls: bool,
 }
 
+/// A release event's subject and body.
+fn release_mail(release: &crate::Release<'_>) -> (String, String) {
+    let what = crate::util::release_phrase(release);
+    (
+        format!("[RELEASE] {}: {what}", release.monitor),
+        format!(
+            "{what} (monitor {}).\n\nRelease notes: {}",
+            release.monitor, release.url
+        ),
+    )
+}
+
 impl EmailNotifier {
     /// Build the transport and resolve the addresses.
     ///
@@ -124,6 +136,7 @@ impl EmailNotifier {
                     format!("The registered {when} (monitor {monitor}, via RDAP)."),
                 )
             }
+            Event::ReleaseAvailable(release) => release_mail(&release),
             Event::Digest { period, summary } => (
                 format!("[DIGEST] Hora digest ({period})"),
                 summary.to_owned(),
