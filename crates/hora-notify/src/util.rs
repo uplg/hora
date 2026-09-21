@@ -116,6 +116,15 @@ pub(crate) fn domain_expiry_phrase(domain: &str, days_left: i64) -> String {
     format!("domain {domain} {}", cert_expiry_phrase(days_left))
 }
 
+/// Human phrasing for a release event, shared so every channel words it the
+/// same way: `"owner/repo v1.9.2 is out (running v1.9.1)"`.
+pub(crate) fn release_phrase(release: &crate::Release<'_>) -> String {
+    format!(
+        "{} {} is out (running {})",
+        release.project, release.latest, release.current
+    )
+}
+
 /// Delivery attempts: the initial send plus two retries. The caller marks the
 /// alert as sent regardless of the outcome, so a transient blip here would
 /// otherwise silently drop the notification.

@@ -4,6 +4,17 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [README](README.md#upgrade).
 
+## 0.9.6 → 0.10.0
+
+One schema migration, applied automatically at start (`0018`: the
+`release_watch` table, empty until a monitor opts in). One new optional key,
+`release` on a monitor (the upstream release watch); deploy the binary before
+a config that sets it (`deny_unknown_fields`). The `release_available` event
+is new on every channel and in the webhook payload (`project`, `current`,
+`latest`, `url`): a webhook consumer that rejects unknown events has to learn
+it before a monitor opts in. Monitors without `release` behave exactly as
+before, and Hora makes no request to GitHub.
+
 ## 0.9.5 → 0.9.6
 
 No schema migration, no config change. The first maintenance tick after the

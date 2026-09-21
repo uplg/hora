@@ -15,6 +15,7 @@ pub mod peer;
 pub mod postmortem;
 pub mod probe;
 mod rdap;
+mod release;
 pub mod report;
 pub mod scheduler;
 pub mod slo;

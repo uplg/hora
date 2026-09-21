@@ -45,6 +45,9 @@ Full guides for everything below live in the
   the unexpected key change (MITM, botched renewal).
 - **Domain expiry via RDAP** (`domain_expiry = "example.com"`) - "your domain
   expires in 14 days", checked once a day against the registry. No whois parsing.
+- **Upstream release watch** (`release = { github = "owner/repo", ... }`) - "v1.9.2
+  is out (running v1.9.1)", once per release, with the link to its notes. The
+  running version is written down or, better, asked of the service itself.
 - Unprivileged **ICMP** (no `CAP_NET_RAW`), rootless-Docker friendly; **DNS**
   answer pinning for hijack detection.
 

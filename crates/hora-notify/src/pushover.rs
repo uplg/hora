@@ -17,6 +17,16 @@ pub struct PushoverNotifier {
     user: String,
 }
 
+/// A release event as one text: what is out, what runs, where the notes are.
+fn release_text(release: &crate::Release<'_>) -> String {
+    format!(
+        "RELEASE: {}: {}\n{}",
+        release.monitor,
+        crate::util::release_phrase(release),
+        release.url
+    )
+}
+
 impl PushoverNotifier {
     #[must_use]
     pub fn new(client: Client, token: String, user: String) -> Self {
@@ -69,6 +79,7 @@ impl PushoverNotifier {
                 ),
                 0,
             ),
+            Event::ReleaseAvailable(release) => (release_text(&release), 0),
             Event::Digest { period, summary } => (format!("DIGEST ({period}):\n{summary}"), -1),
             Event::PeerLinkDegraded { peer, witness } => (
                 format!("PEER: {peer} unreachable, but {witness} sees it up (partition)"),

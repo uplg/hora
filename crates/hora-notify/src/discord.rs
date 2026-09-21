@@ -23,6 +23,19 @@ pub struct DiscordNotifier {
     webhook_url: String,
 }
 
+/// A release event's embed: what is out and what runs, the notes one click away.
+fn release_embed(release: &crate::Release<'_>) -> Embed {
+    Embed {
+        title: format!(
+            "\u{1F4E6} {}: {}",
+            release.monitor,
+            crate::util::release_phrase(release)
+        ),
+        description: Some(release.url.to_owned()),
+        color: COLOR_CERT,
+    }
+}
+
 impl DiscordNotifier {
     #[must_use]
     pub fn new(client: Client, webhook_url: String) -> Self {
@@ -85,6 +98,7 @@ impl DiscordNotifier {
                 description: None,
                 color: COLOR_CERT,
             },
+            Event::ReleaseAvailable(release) => release_embed(&release),
             Event::Digest { period, summary } => Embed {
                 title: format!("\u{1F4CA} Hora digest ({period})"),
                 description: Some(summary.to_owned()),

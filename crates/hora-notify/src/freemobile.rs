@@ -65,6 +65,11 @@ impl FreeMobileNotifier {
                 "DOMAIN: {monitor} {}",
                 domain_expiry_phrase(domain, days_left)
             ),
+            Event::ReleaseAvailable(release) => format!(
+                "RELEASE: {}: {}",
+                release.monitor,
+                crate::util::release_phrase(&release)
+            ),
             Event::Digest { period, summary } => format!("DIGEST {period}: {summary}"),
             Event::PeerLinkDegraded { peer, witness } => {
                 format!("LINK: {peer} unreachable here, seen up by {witness}")

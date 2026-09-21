@@ -285,6 +285,43 @@ over RDAP - JSON over HTTP, no whois parsing - and an alert fires
 `alerts.domain_expiry_days` (default 14) before it expires, with the same
 edge-triggered, maintenance-muted policy as certificates.
 
+## Upstream releases
+
+The update you hear about three weeks late is a security fix you ran without
+for three weeks. A monitor can name the project it runs:
+
+```toml
+release = { github = "matrix-construct/tuwunel", current = "v1.9.1" }
+```
+
+Twice a day Hora asks GitHub for the project's **latest release** (drafts and
+prereleases are not) and alerts, **once per release**, when it is newer than
+the version that runs: *"matrix-construct/tuwunel v1.9.2 is out (running
+v1.9.1)"*, with the link to the release notes. Nothing is down, so the
+monitor's status does not change; the alert follows the monitor's `notify`
+routing and is muted during its maintenance windows.
+
+`current` is a line to edit on each upgrade. Better, let the service say what
+it runs, and the watch can never drift from what is deployed:
+
+```toml
+# a bare version as text (Element Web serves one at /version)
+release = { github = "element-hq/element-web", current_url = "https://chat.example.com/version" }
+
+# a version inside JSON (a Matrix homeserver, MSC4383)
+[monitors.release]
+github = "matrix-construct/tuwunel"
+current_url = "https://chat.example.com/_matrix/client/versions"
+current_query = "$['net.zemos.msc4383.server'].version"
+```
+
+Versions are compared by their leading numbers: `v1.9.2`, `1.9.2` and
+`1.9.2 (a1b2c3)` are one version, `1.9` is `1.9.0`, and a build that runs ahead
+of the latest release says nothing. When a tag or a version carries no leading
+number (`release-42`), any difference alerts. GitHub's anonymous API allows 60
+requests an hour per address, far above what a few dozen monitors ask; a
+project that only pushes tags, without publishing releases, cannot be watched.
+
 ## Visibility
 
 ```toml

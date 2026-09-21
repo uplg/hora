@@ -669,6 +669,31 @@ impl Kind {
     }
 }
 
+/// `release = { github = "owner/repo", current = "v1.2.3" }` on a monitor:
+/// which project is watched, and how Hora knows the version that runs.
+///
+/// The running version is either written down (`current`, the line to edit
+/// on each upgrade) or read from the service itself (`current_url`, with
+/// `current_query` when the answer is JSON): the second form cannot drift from
+/// what is deployed, and clears the alert by itself once the upgrade is done.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseWatch {
+    /// The project on GitHub, `owner/repo`. Its latest published release is
+    /// what counts: drafts and prereleases are not.
+    pub github: String,
+    /// The version that runs, as a literal ("v1.9.1", "1.9.1").
+    #[serde(default)]
+    pub current: Option<String>,
+    /// An address of the service that answers its own version: a JSON document
+    /// (give `current_query`) or a bare version as text.
+    #[serde(default)]
+    pub current_url: Option<String>,
+    /// `JSONPath` to the version inside the JSON answered by `current_url`.
+    #[serde(default)]
+    pub current_query: Option<String>,
+}
+
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Monitor {
@@ -840,6 +865,11 @@ pub struct Monitor {
     /// public-suffix list, and the operator already knows the answer.
     #[serde(default)]
     pub domain_expiry: Option<String>,
+    /// Watch the upstream releases of the software behind this monitor: an
+    /// alert fires, once per release, when one newer than the version that
+    /// runs is published. See [`ReleaseWatch`].
+    #[serde(default)]
+    pub release: Option<ReleaseWatch>,
     /// Multi-vantage confirmation override for this monitor; unset = the
     /// `[health].confirm_with_peers` default. See that field for semantics.
     #[serde(default)]
@@ -898,6 +928,7 @@ impl std::fmt::Debug for Monitor {
             .field("dns_resolver", &self.dns_resolver)
             .field("cert_pin", &self.cert_pin)
             .field("domain_expiry", &self.domain_expiry)
+            .field("release", &self.release)
             .field("confirm_with_peers", &self.confirm_with_peers)
             // Arguments may carry credentials (a plugin's API key): name only.
             .field("command", &self.command.first())
@@ -1035,6 +1066,7 @@ impl Monitor {
             dns_resolver: None,
             cert_pin: None,
             domain_expiry: None,
+            release: None,
             confirm_with_peers: None,
             command: Vec::new(),
         }
@@ -1910,6 +1942,52 @@ fn validate_pins(monitor: &Monitor) -> anyhow::Result<()> {
             "monitor {}: domain_expiry must be a bare domain name like \"example.com\"",
             monitor.id
         );
+    }
+    if let Some(release) = &monitor.release {
+        validate_release(&monitor.id, release)?;
+    }
+    Ok(())
+}
+
+/// A release watch names a GitHub project as `owner/repo`, and says where the
+/// running version comes from in exactly one way.
+fn validate_release(id: &str, release: &ReleaseWatch) -> anyhow::Result<()> {
+    let name = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    anyhow::ensure!(
+        release
+            .github
+            .split_once('/')
+            .is_some_and(|(owner, repo)| name(owner) && name(repo)),
+        "monitor {id}: release.github must be \"owner/repo\""
+    );
+    anyhow::ensure!(
+        release.current.is_some() != release.current_url.is_some(),
+        "monitor {id}: release needs exactly one of `current` and `current_url`"
+    );
+    if let Some(current) = &release.current {
+        anyhow::ensure!(
+            !current.trim().is_empty(),
+            "monitor {id}: release.current is empty"
+        );
+    }
+    if let Some(url) = &release.current_url {
+        anyhow::ensure!(
+            url.starts_with("http://") || url.starts_with("https://"),
+            "monitor {id}: release.current_url must be an http(s) URL"
+        );
+    }
+    if let Some(query) = &release.current_query {
+        anyhow::ensure!(
+            release.current_url.is_some(),
+            "monitor {id}: release.current_query needs release.current_url"
+        );
+        serde_json_path::JsonPath::parse(query)
+            .map_err(|err| anyhow::anyhow!("monitor {id}: invalid release.current_query: {err}"))?;
     }
     Ok(())
 }
@@ -3567,6 +3645,70 @@ mod tests {
 
         // The default warning window parallels the certificate one.
         assert_eq!(config.alerts.domain_expiry_days, 14);
+    }
+
+    #[test]
+    fn release_names_a_project_and_one_source_for_the_running_version() {
+        let cfg = |release: &str| {
+            format!(
+                r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "chat"
+                name = "Chat"
+                target = "https://chat.example.com"
+                interval_secs = 60
+                release = {release}
+            "#
+            )
+        };
+
+        // Written down, or asked of the service (as text, or inside JSON).
+        let config = super::parse(&cfg(
+            r#"{ github = "matrix-construct/tuwunel", current = "v1.9.1" }"#,
+        ))
+        .expect("a literal version");
+        let release = config.monitors[0].release.as_ref().expect("release");
+        assert_eq!(release.github, "matrix-construct/tuwunel");
+        assert_eq!(release.current.as_deref(), Some("v1.9.1"));
+        super::parse(&cfg(
+            r#"{ github = "element-hq/element-web", current_url = "https://chat.example.com/version" }"#,
+        ))
+        .expect("a version read as text");
+        super::parse(&cfg(
+            r#"{ github = "a/b", current_url = "https://x.example/v", current_query = "$.server.version" }"#,
+        ))
+        .expect("a version read inside JSON");
+
+        for (bad, reason) in [
+            (r#"{ github = "tuwunel", current = "1" }"#, "owner/repo"),
+            (
+                r#"{ github = "https://github.com/a/b", current = "1" }"#,
+                "owner/repo",
+            ),
+            (r#"{ github = "a/b" }"#, "exactly one of"),
+            (
+                r#"{ github = "a/b", current = "1", current_url = "https://x.example" }"#,
+                "exactly one of",
+            ),
+            (r#"{ github = "a/b", current = " " }"#, "is empty"),
+            (
+                r#"{ github = "a/b", current_url = "x.example/version" }"#,
+                "http(s) URL",
+            ),
+            (
+                r#"{ github = "a/b", current = "1", current_query = "$.v" }"#,
+                "needs release.current_url",
+            ),
+            (
+                r#"{ github = "a/b", current_url = "https://x.example", current_query = "$[" }"#,
+                "invalid release.current_query",
+            ),
+        ] {
+            let err = super::parse(&cfg(bad)).unwrap_err().to_string();
+            assert!(err.contains(reason), "{bad}: {err}");
+        }
     }
 
     #[test]
