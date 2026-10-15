@@ -4,6 +4,11 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.11.1 → 0.11.2
+
+No migration, no new key: a dependency update (rustls 0.23.46) for four
+TLS advisories. Pull the new image and recreate the container.
+
 ## 0.11.0 → 0.11.1
 
 No migration. Two new optional keys, `[page] logo` / `logo_dark` and the
