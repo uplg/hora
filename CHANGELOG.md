@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-10-15
+
+A security release: rustls moves to 0.23.46, which fixes four advisories
+published on 2026-10-14. Hora uses rustls for its outbound TLS (HTTPS and
+TLS probes, notification channels, the release check). No other change.
+
+### Security
+
+- **rustls 0.23.46.** Fixes RUSTSEC-2026-0346 (`Debug` output of client
+  session values could expose TLS secrets), RUSTSEC-2026-0347 (buffered
+  data sent to the outer server after an ECH rejection), RUSTSEC-2026-0348
+  (Brotli certificate decompression could allocate up to 1 GiB before
+  authentication) and RUSTSEC-2026-0349 (an unauthenticated ServerHello
+  could downgrade later connections to classical key exchange). The other
+  dependencies take their compatible patch releases (tokio 1.53.3, hyper
+  1.12, aws-lc-rs 1.18.2, among others).
+
 ## [0.11.1] - 2026-10-04
 
 Your logo on your status page, and word of new releases. The header can
@@ -1319,7 +1336,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/uplg/hora/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/uplg/hora/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/uplg/hora/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/uplg/hora/compare/v0.9.6...v0.10.0
