@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-10-21
+
+A security release for three certificate advisories published on
+2026-10-19 and 2026-10-20, plus an unmaintained crate gone. Hora checks
+certificates with rustls-webpki on its outbound TLS (HTTPS and TLS probes,
+notification channels, the release check). No other change.
+
+### Security
+
+- **rustls-webpki 0.103.16, webpki-roots and webpki-root-certs 1.0.10.**
+  Fixes RUSTSEC-2026-0382 (certificate paths through the distrusted emSign
+  intermediates, whose private keys are now well known, could be accepted),
+  RUSTSEC-2026-0381 and RUSTSEC-2026-0383 (the bundled roots still trusted
+  `emSign ECC Root CA - G3`, the anchor of those intermediates). The other
+  dependencies take their compatible patch releases (tokio 1.54.0, among
+  others).
+- **basic-toml is gone** (RUSTSEC-2026-0374, unmaintained). Askama pulled it
+  in only to read an `askama.toml`, which Hora does not have: its `config`
+  feature is off, the templates render the same.
+
 ## [0.11.2] - 2026-10-15
 
 A security release: rustls moves to 0.23.46, which fixes four advisories
@@ -1336,7 +1356,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.11.3...HEAD
+[0.11.3]: https://github.com/uplg/hora/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/uplg/hora/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/uplg/hora/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/uplg/hora/compare/v0.10.0...v0.11.0

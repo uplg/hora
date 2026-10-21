@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.11.2"
+version = "0.11.3"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -23,7 +23,7 @@ pedantic = { level = "warn", priority = -1 }
 [workspace.dependencies]
 anyhow = "1.0.104"
 arc-swap = "1.9.2"
-askama = "0.16.1"
+askama = { version = "0.16.1", default-features = false, features = ["derive", "std", "urlencode"] }
 async-trait = "0.1.92"
 axum = "0.8.9"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
