@@ -4,6 +4,12 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.11.2 → 0.11.3
+
+No migration, no new key: a dependency update (rustls-webpki 0.103.16,
+webpki-roots 1.0.10) for three certificate advisories, and askama without
+its `config` feature. Pull the new image and recreate the container.
+
 ## 0.11.1 → 0.11.2
 
 No migration, no new key: a dependency update (rustls 0.23.46) for four
