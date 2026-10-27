@@ -65,9 +65,9 @@ $ cargo run -p hora                     # the daemon, http://127.0.0.1:8787
 $ cargo run -p hora -- top              # the terminal dashboard
 ```
 
-Needs Rust, a C toolchain and `cmake` (for aws-lc-rs). `just gate` runs what
-CI runs: fmt, clippy, cargo-deny, cargo-audit and the tests; `just deps`
-reports what is behind. The docs build with `cd docs && bun install && bun run build`.
+Needs Rust 1.99.1 or later, a C toolchain and `cmake` (for aws-lc-rs).
+`just gate` runs what CI runs: fmt, clippy, cargo-deny, cargo-audit and the
+tests; `just deps` reports what is behind. The docs build with `cd docs && bun install && bun run build`.
 
 ## Architecture
 

@@ -4,6 +4,12 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.11.3 → 0.11.4
+
+No migration, no new key: a dependency update (tokio 1.54.1, ctutils 0.4.6)
+for two advisories. Pull the new image and recreate the container. Building
+from source now needs Rust 1.99.1 or later.
+
 ## 0.11.2 → 0.11.3
 
 No migration, no new key: a dependency update (rustls-webpki 0.103.16,
