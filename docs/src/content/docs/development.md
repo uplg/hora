@@ -26,8 +26,8 @@ cp config.example.toml config.toml   # then edit
 cargo run -p hora
 ```
 
-Building needs a C toolchain and `cmake`, for `aws-lc-rs` (the rustls
-crypto provider).
+Building needs Rust 1.99.1 or later, a C toolchain and `cmake`, for
+`aws-lc-rs` (the rustls crypto provider).
 
 ## Quality gate
 

@@ -3,6 +3,7 @@ name = "hora-web"
 description = "Web layer for Hora: the server-rendered status page and JSON API."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 

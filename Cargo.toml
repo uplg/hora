@@ -8,8 +8,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.11.3"
+version = "0.11.4"
 edition = "2024"
+rust-version = "1.99.1"
 license = "MIT"
 publish = false
 

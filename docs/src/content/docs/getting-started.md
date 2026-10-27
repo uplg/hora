@@ -100,9 +100,9 @@ cp config.example.toml config.toml   # then edit
 cargo run -p hora
 ```
 
-Building requires a C toolchain and `cmake` (for `aws-lc-rs`, the rustls
-crypto provider). The quality gate is `just gate` (fmt, clippy, cargo-deny,
-cargo-audit, tests) - the exact checks CI runs.
+Building requires Rust 1.99.1 or later, a C toolchain and `cmake` (for
+`aws-lc-rs`, the rustls crypto provider). The quality gate is `just gate`
+(fmt, clippy, cargo-deny, cargo-audit, tests) - the exact checks CI runs.
 
 ## Environment variables
 

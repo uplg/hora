@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-10-27
+
+A security release for two advisories published on 2026-10-21 and
+2026-10-23. Hora's scheduler, supervisor, maintenance and certificate tasks
+all tick on `tokio::time::Interval`, so the Tokio one applies directly. The
+minimum Rust version is now declared. No other change.
+
+### Security
+
+- **tokio 1.54.1.** Fixes RUSTSEC-2026-0384: on the multi-threaded runtime,
+  a race between `Interval::poll_tick` and the time driver could drop a timer
+  entry the driver was firing, a use-after-free that showed up as assertion
+  panics, corrupted task reference counts or heap corruption.
+- **ctutils 0.4.6.** Fixes RUSTSEC-2026-0385: its mask generation and `u128`
+  comparisons, meant to be constant-time, could compile to branches. The other
+  dependencies take their compatible patch releases (webpki-roots 1.0.11,
+  among others).
+
+### Changed
+
+- **Minimum supported Rust version: 1.99.1**, declared as `rust-version` in
+  the workspace manifest. Building from source with an older toolchain now
+  fails up front instead of somewhere in the dependency tree. The Docker image
+  is unaffected.
+
 ## [0.11.3] - 2026-10-21
 
 A security release for three certificate advisories published on
@@ -1356,7 +1381,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/uplg/hora/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/uplg/hora/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/uplg/hora/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/uplg/hora/compare/v0.11.0...v0.11.1
