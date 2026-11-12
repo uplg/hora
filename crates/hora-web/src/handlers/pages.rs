@@ -266,7 +266,7 @@ pub(crate) async fn watchers_page(
         chrome: chrome.at("watchers").operator(true),
         page: crate::watchers::build(config, &health, &summary, &incidents),
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 
@@ -534,7 +534,7 @@ pub(crate) async fn incident_page(
         ),
         operator,
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 
@@ -570,7 +570,7 @@ pub(crate) async fn history_page(
         pushed_alerts: history::alert_rows(&pushed_alerts, &names),
         events: history::event_rows(&events),
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 
@@ -620,7 +620,7 @@ pub(crate) async fn timeline_page(
         chrome: chrome.at("timeline").operator(viewer.is_operator()),
         entries: history::timeline_rows(&entries),
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 

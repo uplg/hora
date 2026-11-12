@@ -11,6 +11,7 @@ mod history;
 mod layout;
 mod metrics;
 mod monitor_page;
+mod page;
 mod render;
 mod report;
 mod routes;

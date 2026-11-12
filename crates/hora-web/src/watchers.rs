@@ -6,7 +6,6 @@
 
 use std::fmt::Write as _;
 
-use askama::Template;
 use hora_core::config::Config;
 use hora_core::db::Incident;
 use hora_core::fmt::xml_escape;
@@ -14,17 +13,144 @@ use hora_core::mesh::wire::{HealthReport, HealthStatus, PeerState};
 
 use crate::display::DisplayState;
 use crate::layout::{Chrome, ms};
+use crate::page::{Document, glyph, raw, state};
 use crate::render::{OWL_PARTS as OWL, coord, owl};
 use crate::summary::Summary;
+use maud::{Markup, html};
 
 /// Services listed in the per-place table, disagreements first.
 const MATRIX_ROWS: usize = 60;
 
-#[derive(Template)]
-#[template(path = "watchers.html")]
 pub(crate) struct WatchersTemplate {
     pub(crate) chrome: Chrome,
     pub(crate) page: WatchersPage,
+}
+
+impl WatchersTemplate {
+    /// The mesh as a picture, and the nodes one by one.
+    fn mesh(&self) -> Markup {
+        let page = &self.page;
+        html! {
+            div.meshgrid {
+                section.panel aria-labelledby="mp" {
+                    div.panel-head {
+                        h2 id="mp" { "The mesh" }
+                        span.aside { "As this node sees it" }
+                    }
+                    (raw(&page.map))
+                    div.key {
+                        span { i {} "Heartbeats flowing" }
+                        span { i.t {} "No heartbeat lately" }
+                        span { i.e {} "Heartbeats sent, not watched back" }
+                    }
+                }
+                section aria-labelledby="nd" {
+                    div.section-head { h2 id="nd" { "Nodes" } }
+                    ul.nodes {
+                        @for node in &page.nodes {
+                            li class={ "node " (node.state) } {
+                                (raw(&node.owl))
+                                span.n { (node.name) small { (node.id) } }
+                                span.s { (state(node.state, node.word)) }
+                                span.d { (node.detail) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Each shared service as each place sees it.
+    fn matrix(&self) -> Markup {
+        let page = &self.page;
+        html! {
+            div.tw.panel.table tabindex="0" role="region" aria-labelledby="lx" {
+                table.mx {
+                    thead { tr {
+                        th scope="col" { "Service" }
+                        @for column in &page.columns { th scope="col" { (column) } }
+                    } }
+                    tbody {
+                        @for row in &page.rows {
+                            tr class=[row.disagree.then_some("disagree")] {
+                                td { (row.name) }
+                                @for (state, text) in &row.cells {
+                                    td {
+                                        (glyph(state))
+                                        @if *state == "up" { (text) }
+                                        @else { span class={ "word " (state) } { (text) } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            @if page.rows_more > 0 {
+                p.more { "And " (page.rows_more) " more services watched from several places." }
+            }
+        }
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let (chrome, page) = (&self.chrome, &self.page);
+        let tile = |key: &str, value: usize, note: Markup| {
+            html! {
+                div.tile { span.k { (key) } span.v { (value) } span.n { (note) } }
+            }
+        };
+        let main = html! {
+            main id="main" class="page" {
+                nav.crumbs aria-label="Breadcrumb" {
+                    a href={ "/" (raw(chrome.q())) } { "Status" }
+                    span.sep aria-hidden="true" { "/" }
+                    span aria-current="page" { "Watchers" }
+                }
+                div.title {
+                    h1 { "Watchers" }
+                    span class={ "state-big " (page.state) } { (state(page.state, &page.state_word)) }
+                }
+                p.lede { (page.lede) }
+                (self.mesh())
+                section.section aria-labelledby="cf" {
+                    div.section-head {
+                        h2 id="cf" { "Confirmations, last 30 days" }
+                        span.fact { "When this node sees a service down, it asks the others first" }
+                    }
+                    div.stats {
+                        (tile("Asked", page.asked, html! { "times this node saw a service down" }))
+                        (tile("Confirmed", page.confirmed, state("down", "Real outages")))
+                        (tile("Local only", page.local, state("degraded", "Network near this node")))
+                        (tile("No answer", page.unconfirmed, state("none", "No peer could be asked")))
+                    }
+                }
+                section.section aria-labelledby="lx" {
+                    div.section-head {
+                        h2 id="lx" { "Each service, from each place" }
+                        span.fact { "Typical answer time over 24 h" }
+                    }
+                    @if page.rows.is_empty() {
+                        p.quiet-line {
+                            (glyph("none"))
+                            "No peer shares its view of these services yet. Peers report what they watch too, once they can be asked ("
+                            code { "/api/peer/monitors" }
+                            ")."
+                        }
+                    } @else {
+                        (self.matrix())
+                    }
+                }
+            }
+        };
+        Document::new(
+            chrome,
+            format!("Watchers · {} status", chrome.site),
+            "The Hora mesh: who watches what, and each other.".to_owned(),
+            main,
+        )
+        .render()
+    }
 }
 
 pub(crate) struct WatchersPage {
