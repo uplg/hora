@@ -342,11 +342,11 @@ fn reconcile(
 }
 
 /// The probe clients monitors share: one for every monitor without a proxy,
-/// one per proxy URL for the others. A client carries its own TLS setup and
-/// connection pool - about 45 KB - so one per monitor cost 450 MB at 10,000
-/// monitors. Monitors on one client share its pool, as requests to the same
-/// host from one process do anyway; nothing else about a probe client is
-/// per monitor (credentials and timeouts are set per request).
+/// one per proxy URL for the others. A client carries its own TLS setup -
+/// about 45 KB - so one per monitor cost 450 MB at 10,000 monitors. Nothing
+/// about a probe client is per monitor (credentials and timeouts are set per
+/// request), and it keeps no connection between probes
+/// (see [`probe_client`](crate::http::probe_client)).
 #[derive(Default)]
 struct ProbeClients {
     clients: HashMap<Option<String>, Client>,

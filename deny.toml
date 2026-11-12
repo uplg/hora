@@ -2,7 +2,15 @@
 
 [advisories]
 yanked = "deny"
-ignore = []
+ignore = [
+    # SQLite before 3.54.0 can return uninitialized memory when it opens a
+    # database with a crafted `-wal` file. libsqlite3-sys 0.37 bundles 3.5x;
+    # the fix is in 0.39, which sqlx 0.9.0 (the latest) refuses (`<0.38.0`).
+    # Hora opens only its own database, in its own data directory: whoever can
+    # plant a `-wal` there already owns the data. Remove with the sqlx release
+    # that accepts libsqlite3-sys 0.39 (issue #28). Mirrored in .cargo/audit.toml.
+    { id = "RUSTSEC-2026-0459", reason = "local attack on a database file Hora alone writes; no sqlx release accepts the fixed libsqlite3-sys yet" },
+]
 
 [licenses]
 # Permissive (and public-domain-equivalent) licenses we accept. Crates offering
