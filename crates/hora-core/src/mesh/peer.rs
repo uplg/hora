@@ -21,12 +21,12 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use super::wire::{HealthReport, HealthStatus, PeerSeen, PeerState};
+use super::wire::{HealthReport, HealthStatus, HeartbeatBody, PeerSeen, PeerState};
 use crate::config::{Config, Health, Peer};
 use crate::db;
 use crate::heartbeat::{Cadence, heartbeat_expected_since, heartbeat_outcome_for};
 use crate::notifications::Notifiers;
-use crate::scheduler::{AlertCell, AlertLevel, AlertState, silenced};
+use crate::scheduler::{AlertCell, AlertLevel, AlertState, muted};
 
 /// Floor on the scheduler-liveness tolerance, so a node whose fastest monitor
 /// ticks very frequently is not flagged unhealthy by a momentary scheduling jitter.
@@ -42,6 +42,7 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// concurrently, so this is one slow receiver's worth plus slack): a dead
 /// receiver can never delay the dead-man cadence to the others.
 const HEARTBEAT_ROUND_DEADLINE: Duration = Duration::from_secs(12);
+const _: () = assert!(HEARTBEAT_ROUND_DEADLINE.as_secs() > HEARTBEAT_TIMEOUT.as_secs());
 
 /// A witness `/healthz` report is a small JSON object; cap the body so a
 /// compromised peer can't stream hundreds of MB into memory within the timeout.
@@ -60,8 +61,10 @@ pub async fn report(store: &Store, config: &Config, last_tick: &AtomicU64) -> He
         peers.insert(peer.id.clone(), peer_seen(store, peer, now).await);
     }
 
+    let probes_ok = !crate::probe::local::recent(now);
+
     HealthReport {
-        status: if scheduler_ok && db_ok {
+        status: if scheduler_ok && db_ok && probes_ok {
             HealthStatus::Ok
         } else {
             HealthStatus::Degraded
@@ -69,6 +72,7 @@ pub async fn report(store: &Store, config: &Config, last_tick: &AtomicU64) -> He
         scheduler_ok,
         db_ok,
         last_tick_age,
+        probes_ok,
         id: config.health.as_ref().map(|health| health.id.clone()),
         peers,
     }
@@ -139,19 +143,40 @@ async fn peer_seen(store: &Store, peer: &Peer, now: i64) -> PeerSeen {
 
 // --- Outbound heartbeat (the dead-man) ------------------------------------
 
+/// Whether at least one notification channel still delivers: false only when
+/// there are channels and every one of them has reached the watchdog's
+/// failure threshold. A node without any channel has nothing to deliver
+/// through, by choice: that is not a failure to report.
+fn alerts_can_leave(channels: &[hora_notify::ChannelHealthEntry], threshold: u32) -> bool {
+    channels.is_empty()
+        || channels
+            .iter()
+            .any(|channel| channel.health.consecutive_failures < threshold.max(1))
+}
+
 /// Spawn the outbound heartbeat: every `health.interval_secs`, when this node is
 /// locally healthy, `POST` a heartbeat to each peer's `ping_url` and to the
 /// optional `heartbeat_url`. When unhealthy it stays silent - that silence is the
 /// down signal the receiver detects. A shutdown signal stops it between ticks.
+///
+/// Unhealthy includes "no alert can get out": a node whose every notification
+/// channel is failing still probes and still writes its history, but it can no
+/// longer tell anyone about an outage - exactly the state a dead-man exists to
+/// reveal. Its silence makes the peer (or the external watchdog) say so.
 #[must_use]
 pub fn spawn_heartbeat(
     config: watch::Receiver<Arc<Config>>,
     store: Store,
     client: Client,
+    notifier: Notifiers,
     last_tick: Arc<AtomicU64>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        // What the last heartbeat announced, sent again if the windows
+        // cannot be read: to the peers a heartbeat without a list means
+        // "nothing planned", and one failed read must not withdraw a window.
+        let mut announced = HeartbeatBody::default();
         loop {
             // Re-read the interval each cycle so a changed `interval_secs` (or a
             // newly added/removed `[health]`) applies live without a restart.
@@ -172,30 +197,57 @@ pub fn spawn_heartbeat(
             let now = chrono::Utc::now().timestamp();
             let (scheduler_ok, age) = scheduler_liveness(&snapshot, &last_tick, now);
             let db_ok = db_ok(&store).await;
-            if !(scheduler_ok && db_ok) {
-                warn!(scheduler_ok, db_ok, "heartbeat skipped: node unhealthy");
+            // Checks skipped for lack of descriptors or memory: this node
+            // watches nothing for now, and must not say it is fine.
+            let probes_ok = !crate::probe::local::recent(now);
+            if !(scheduler_ok && db_ok && probes_ok) {
+                warn!(
+                    scheduler_ok,
+                    db_ok, probes_ok, "heartbeat skipped: node unhealthy"
+                );
+                continue;
+            }
+            let channels = notifier.load().health_snapshot();
+            if !alerts_can_leave(&channels, snapshot.alerts.channel_fail_threshold) {
+                warn!(
+                    channels = channels.len(),
+                    "heartbeat skipped: every notification channel is failing, no alert can get out"
+                );
                 continue;
             }
 
             let digest = format!("ok mon={} tick={}s", snapshot.monitors.len(), age.max(0));
+            match crate::planned::announcements(&store, &snapshot, now).await {
+                Ok(maintenance) => announced = HeartbeatBody { maintenance },
+                Err(err) => warn!("cannot read the planned maintenance windows: {err:#}"),
+            }
+            // The peers are told what is planned; the extra dead-man target
+            // is not a Hora and gets the bare ping it always got.
+            let body = (!announced.maintenance.is_empty()).then_some(&announced);
             let targets = snapshot
                 .peers
                 .iter()
                 .filter_map(|peer| {
-                    peer.ping_url
-                        .as_ref()
-                        .map(|url| (url.as_ref(), peer.ping_token.as_ref().map(AsRef::as_ref)))
+                    peer.ping_url.as_ref().map(|url| {
+                        (
+                            url.as_ref(),
+                            peer.ping_token.as_ref().map(AsRef::as_ref),
+                            body,
+                        )
+                    })
                 })
                 .chain(
                     health
                         .heartbeat_url
                         .as_ref()
-                        .map(|url| (url.as_ref(), None)),
+                        .map(|url| (url.as_ref(), None, None)),
                 );
             // Concurrently, under one deadline: sequential 10 s timeouts would
             // let a single dead receiver push every other heartbeat late.
-            let round =
-                join_all(targets.map(|(url, token)| send_heartbeat(&client, url, token, &digest)));
+            let round = join_all(
+                targets
+                    .map(|(url, token, body)| send_heartbeat(&client, url, token, &digest, body)),
+            );
             if tokio::time::timeout(HEARTBEAT_ROUND_DEADLINE, round)
                 .await
                 .is_err()
@@ -210,13 +262,27 @@ pub fn spawn_heartbeat(
 /// in the `X-Push-Token` header, so it stays out of the receiver's access logs.
 /// Fire-and-forget: a failure is logged (without the URL, which may carry
 /// credentials) and the next tick tries again.
-async fn send_heartbeat(client: &Client, url: &str, token: Option<&str>, digest: &str) {
+///
+/// `body` carries the planned maintenance windows, as JSON, when there are
+/// any: a receiver that does not know about them (Hora 0.11, an external
+/// dead-man service) reads the query string and never the body, so the
+/// heartbeat counts for it exactly as before.
+async fn send_heartbeat(
+    client: &Client,
+    url: &str,
+    token: Option<&str>,
+    digest: &str,
+    body: Option<&HeartbeatBody>,
+) {
     let mut request = client
         .post(url)
         .query(&[("status", "up"), ("msg", digest)])
         .timeout(HEARTBEAT_TIMEOUT);
+    if let Some(body) = body {
+        request = request.json(body);
+    }
     if let Some(token) = token {
-        request = request.header("x-push-token", token);
+        request = request.header(crate::mesh::wire::PUSH_TOKEN_HEADER, token);
     }
     match request.send().await {
         Ok(response) if response.status().is_success() => {}
@@ -280,6 +346,8 @@ pub(crate) fn spawn_watch(
                 peer.listen_id(),
                 &cadence,
                 expected_since,
+                // A peer's watch ticks at its own heartbeat cadence already.
+                0,
                 now.timestamp(),
             )
             .await
@@ -287,14 +355,16 @@ pub(crate) fn spawn_watch(
                 continue;
             };
 
-            let snapshot = config.borrow().clone();
-            // Muted by a maintenance window or an ad-hoc silence, exactly like a
-            // monitor: the miss is still recorded, only alerts are skipped.
-            if snapshot.in_maintenance(peer.listen_id(), now)
-                || silenced(&store, peer.listen_id()).await
-            {
+            // Muted by a maintenance window (the config's, one planned here,
+            // or one this very peer announced before going down) or an ad-hoc
+            // silence, exactly like a monitor: the miss is still recorded,
+            // only alerts are skipped. Nothing is counted meanwhile, so a peer
+            // still silent when the window ends is confirmed and announced
+            // from there, as a down that just began.
+            if muted(&store, &config, peer.listen_id()).await {
                 continue;
             }
+            let snapshot = config.borrow().clone();
             let threshold = snapshot.alerts.fail_threshold.max(1);
 
             if outcome.is_up() {
@@ -364,15 +434,7 @@ async fn announce_verdict(
             dispatch(
                 notifier,
                 peer,
-                Event::Down {
-                    monitor: &peer.name,
-                    error: outcome.error.as_deref(),
-                    cause: None,
-                    impacted: &[],
-                    vantage: None,
-                    event: None,
-                    local_only: false,
-                },
+                Event::down(&peer.name, outcome.error.as_deref()),
             )
             .await;
             state.level = AlertLevel::Down;
@@ -466,6 +528,25 @@ async fn dispatch(notifier: &Notifiers, peer: &Peer, event: Event<'_>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_dead_man_goes_silent_when_no_channel_delivers() {
+        let entry = |name: &str, failures| hora_notify::ChannelHealthEntry {
+            name: name.to_owned(),
+            health: hora_notify::ChannelHealth {
+                consecutive_failures: failures,
+                ..hora_notify::ChannelHealth::default()
+            },
+        };
+        // No channel configured: nothing to judge.
+        assert!(alerts_can_leave(&[], 3));
+        // One channel still delivering is enough.
+        assert!(alerts_can_leave(&[entry("ntfy", 5), entry("mail", 2)], 3));
+        assert!(alerts_can_leave(&[entry("ntfy", 0)], 3));
+        // Every channel at the watchdog threshold: nothing gets out.
+        assert!(!alerts_can_leave(&[entry("ntfy", 3), entry("mail", 9)], 3));
+        assert!(!alerts_can_leave(&[entry("ntfy", 1)], 0));
+    }
+
     use crate::config;
 
     async fn insert(store: &Store, id: &str, time: i64, status: i64) {
@@ -514,7 +595,8 @@ mod tests {
     async fn peer_seen_reflects_freshness_and_status() {
         let store = Store::in_memory().await;
         let base = cfg("[page]\n[server]\n[health]\nid=\"a\"\n\
-             [[peers]]\nid=\"x\"\nname=\"X\"\nexpect_every_secs=100\n");
+             [[peers]]\nid=\"x\"\nname=\"X\"\nexpect_every_secs=100\n\
+             listen_token=\"a-long-enough-listen-token\"\n");
         let mut peer = base.peers[0].clone();
         let now = 1_000_000;
 
@@ -555,6 +637,7 @@ mod tests {
         let store = Store::in_memory().await;
         let config = cfg("[page]\n[server]\n[health]\nid=\"hora-a\"\n\
              [[peers]]\nid=\"hora-b\"\nname=\"B\"\nexpect_every_secs=100\n\
+             listen_token=\"a-long-enough-listen-token\"\n\
              [[peers]]\nid=\"hc\"\nname=\"HC\"\nping_url=\"https://hc-ping.com/x\"\n");
         let report = report(&store, &config, &AtomicU64::new(0)).await;
         assert_eq!(report.id.as_deref(), Some("hora-a"));
@@ -565,5 +648,243 @@ mod tests {
         assert!(report.peers.contains_key("hora-b"));
         assert!(!report.peers.contains_key("hc"));
         assert_eq!(report.peers["hora-b"].state, PeerState::Unknown);
+    }
+
+    /// Node `yuki` watching its peer on `frank` every second, alerting on
+    /// the first missed heartbeat, through a webhook at `hook`. The peer may
+    /// announce up to 15 minutes of maintenance.
+    fn watching_config(hook: &str) -> Config {
+        cfg(&format!(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 1
+            [health]
+            id = "hora-yuki"
+            grace_secs = 0
+            [[channels]]
+            name = "hook"
+            type = "webhook"
+            url = "{hook}"
+            [[peers]]
+            id = "hora-frank"
+            name = "Frank"
+            listen_id = "frank-in"
+            expect_every_secs = 1
+            listen_token = "a-long-enough-listen-token"
+            host = "frank"
+            accept_maintenance_secs = 900
+            "#
+        ))
+    }
+
+    /// The peer heartbeats, announcing its reboot: a window under way that
+    /// lasts `secs` more seconds. Then its watch starts.
+    async fn watch_through_a_window(
+        store: &Store,
+        config: &Config,
+        secs: i64,
+    ) -> (JoinHandle<()>, watch::Sender<bool>) {
+        let now = chrono::Utc::now().timestamp();
+        db::insert_push(
+            store,
+            "frank-in",
+            crate::status::CheckStatus::Up,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let applied = crate::planned::apply_announcement(
+            store,
+            &config.peers[0],
+            true,
+            &[crate::mesh::wire::AnnouncedWindow {
+                id: 1,
+                starts_at: now - 1,
+                ends_at: now + secs,
+                reason: "kernel reboot".to_owned(),
+                host: Some("frank".to_owned()),
+            }],
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.accepted.len(), 1);
+        let client = crate::http::client(None).unwrap();
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = spawn_watch(
+            config.peers[0].clone(),
+            config_rx,
+            store.clone(),
+            client.clone(),
+            crate::notifications::shared(config, &client),
+            AlertCell::default(),
+            shutdown_rx,
+        );
+        (task, shutdown_tx)
+    }
+
+    /// The peer said it would be down for a few seconds and is still silent
+    /// when they are over: nothing during the window, "peer down" after it.
+    #[tokio::test]
+    async fn a_peer_still_silent_after_its_window_is_announced() {
+        let (hook, posts) = crate::testing::webhook_sink().await;
+        let config = watching_config(&hook);
+        let store = Store::in_memory().await;
+        let (task, _shutdown) = watch_through_a_window(&store, &config, 4).await;
+
+        // It has gone silent, and the watch sees it - and says nothing.
+        tokio::time::sleep(Duration::from_millis(3200)).await;
+        assert_eq!(crate::testing::events(&posts), Vec::<String>::new());
+        let checks = db::recent_checks(&store, "frank-in", 10).await.unwrap();
+        assert!(
+            checks
+                .iter()
+                .any(|check| check.status == crate::status::CheckStatus::Down),
+            "the missed heartbeats are recorded: {checks:?}"
+        );
+
+        // The window is over and the peer is not back: the alert goes out.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while crate::testing::events(&posts).is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(crate::testing::events(&posts), ["down"]);
+        assert_eq!(posts.lock().unwrap()[0]["monitor"], "Frank");
+
+        // And when it comes back, so does its recovery.
+        db::insert_push(
+            &store,
+            "frank-in",
+            crate::status::CheckStatus::Up,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while crate::testing::events(&posts).len() < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(crate::testing::events(&posts), ["down", "recovered"]);
+        task.abort();
+    }
+
+    /// The peer is back, heartbeating, before its window ends: no alert
+    /// then, none when the window ends, and no recovery of a down nobody
+    /// was told about.
+    #[tokio::test]
+    async fn a_peer_back_before_its_window_ends_is_never_announced() {
+        let (hook, posts) = crate::testing::webhook_sink().await;
+        let config = watching_config(&hook);
+        let store = Store::in_memory().await;
+        let (task, _shutdown) = watch_through_a_window(&store, &config, 4).await;
+
+        // Silent for a while inside the window...
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        // ...then heartbeating again, through its end and past it.
+        let beating = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                loop {
+                    db::insert_push(
+                        &store,
+                        "frank-in",
+                        crate::status::CheckStatus::Up,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            })
+        };
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert_eq!(crate::testing::events(&posts), Vec::<String>::new());
+        beating.abort();
+        task.abort();
+    }
+
+    /// The heartbeat a node sends while something is planned carries it, to
+    /// the peers and to them only; with nothing planned it is the bare ping
+    /// 0.11 sent.
+    #[tokio::test]
+    async fn the_heartbeat_carries_the_planned_windows() {
+        let (peer_hook, peer_posts) = crate::testing::webhook_sink().await;
+        let (other_hook, other_posts) = crate::testing::webhook_sink().await;
+        let config = cfg(&format!(
+            r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-frank"
+            host = "frank"
+            interval_secs = 1
+            heartbeat_url = "{other_hook}"
+            [[peers]]
+            id = "hora-yuki"
+            name = "Yuki"
+            ping_url = "{peer_hook}"
+            ping_token = "a-long-enough-ping-token"
+            "#
+        ));
+        let store = Store::in_memory().await;
+        let client = crate::http::client(None).unwrap();
+
+        // Nothing planned: no body at all (the sinks only record JSON).
+        send_heartbeat(&client, &peer_hook, Some("token"), "ok", None).await;
+        assert!(peer_posts.lock().unwrap().is_empty());
+
+        let now = chrono::Utc::now().timestamp();
+        let planned = crate::planned::plan(
+            &store,
+            &config,
+            crate::planned::Plan {
+                host: Some("frank"),
+                starts_at: Some(&(now + 3600).to_string()),
+                duration: "10m",
+                reason: "kernel reboot",
+                ..crate::planned::Plan::default()
+            },
+            now,
+        )
+        .await
+        .unwrap();
+
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config.clone()));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = spawn_heartbeat(
+            config_rx,
+            store.clone(),
+            client.clone(),
+            crate::notifications::shared(&config, &client),
+            Arc::new(AtomicU64::new(0)),
+            shutdown_rx,
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while peer_posts.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        task.abort();
+        let posts = peer_posts.lock().unwrap();
+        assert_eq!(
+            posts.first().expect("a heartbeat with a body"),
+            &serde_json::json!({"maintenance": [{
+                "id": planned.window.id,
+                "starts_at": now + 3600,
+                "ends_at": now + 4200,
+                "reason": "kernel reboot",
+                "host": "frank"
+            }]})
+        );
+        // The receiver reads it back as the wire type.
+        let body: HeartbeatBody = serde_json::from_value(posts[0].clone()).unwrap();
+        assert_eq!(body.maintenance[0].host.as_deref(), Some("frank"));
+        // The external dead-man target is not told.
+        assert!(other_posts.lock().unwrap().is_empty());
     }
 }

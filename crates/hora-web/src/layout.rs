@@ -31,8 +31,8 @@ use crate::handlers::assets::ASSET_VERSION;
 /// anything outside is ignored (no refresh, the default).
 pub(crate) const REFRESH_SECS: std::ops::RangeInclusive<u16> = 10..=3600;
 
-/// The page chrome handed to every HTML template (as `chrome`), used by
-/// `base.html` and its partials.
+/// The page chrome handed to every page (as `chrome`), used by
+/// the document and its header and footer (see `crate::page`).
 #[derive(Clone)]
 pub(crate) struct Chrome {
     /// The operator's name (`[page].title`), the sign in the header.
@@ -102,10 +102,13 @@ pub(crate) enum Hole {
     ThemeLabel,
     /// The private door's hidden theme field, or nothing.
     ThemeInput,
+    /// The `theme-color` metas: one per system scheme, or the forced
+    /// theme's alone.
+    ThemeColor,
 }
 
 impl Hole {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::ThemeAttr,
         Self::Scheme,
         Self::Refresh,
@@ -115,6 +118,7 @@ impl Hole {
         Self::ThemeHref,
         Self::ThemeLabel,
         Self::ThemeInput,
+        Self::ThemeColor,
     ];
 
     fn index(self) -> usize {
@@ -139,9 +143,8 @@ static MARKERS: LazyLock<(String, Vec<String>)> = LazyLock::new(|| {
 impl PerRequest {
     /// Read the per-request parts from the URI's query.
     pub(crate) fn from_uri(uri: &axum::http::Uri) -> Self {
-        let pairs: Vec<(String, String)> = Query::<Vec<(String, String)>>::try_from_uri(uri)
-            .map(|Query(pairs)| pairs)
-            .unwrap_or_default();
+        let pairs: Vec<(String, String)> =
+            Query::<Vec<(String, String)>>::try_from_uri(uri).map_or_default(|Query(pairs)| pairs);
         let last = |name: &str| {
             pairs
                 .iter()
@@ -229,47 +232,50 @@ impl PerRequest {
         match hole {
             Hole::ThemeAttr => self
                 .theme
-                .map(|theme| format!(" data-theme=\"{theme}\""))
-                .unwrap_or_default(),
+                .map_or_default(|theme| format!(" data-theme=\"{theme}\"")),
             Hole::Scheme => self.theme.unwrap_or("light dark").to_owned(),
             Hole::Refresh => self
                 .refresh
-                .map(|secs| format!("<meta http-equiv=\"refresh\" content=\"{secs}\">"))
-                .unwrap_or_default(),
-            Hole::Live => self
-                .refresh
-                .map(|secs| {
-                    format!(
-                        "<span class=\"pill\"><svg class=\"g up\" aria-hidden=\"true\"><use \
+                .map_or_default(|secs| format!("<meta http-equiv=\"refresh\" content=\"{secs}\">")),
+            Hole::Live => self.refresh.map_or_default(|secs| {
+                format!(
+                    "<span class=\"pill\"><svg class=\"g up\" aria-hidden=\"true\"><use \
                          href=\"#g-up\"/></svg>Updates every {}</span>",
-                        every(secs)
-                    )
-                })
-                .unwrap_or_default(),
+                    hora_core::fmt::duration(i64::from(secs))
+                )
+            }),
             Hole::Query => self.q.replace('&', "&amp;"),
             Hole::QueryMore => self
                 .q
                 .strip_prefix('?')
-                .map(|rest| format!("&amp;{}", rest.replace('&', "&amp;")))
-                .unwrap_or_default(),
+                .map_or_default(|rest| format!("&amp;{}", rest.replace('&', "&amp;"))),
             Hole::ThemeHref => self.theme_href.replace('&', "&amp;"),
             Hole::ThemeLabel => self.theme_label.to_owned(),
-            Hole::ThemeInput => self
-                .theme
-                .map(|theme| format!("<input type=\"hidden\" name=\"theme\" value=\"{theme}\">"))
-                .unwrap_or_default(),
+            Hole::ThemeInput => self.theme.map_or_default(|theme| {
+                format!("<input type=\"hidden\" name=\"theme\" value=\"{theme}\">")
+            }),
+            // The browser's own chrome takes the page's ground: the system's
+            // scheme picks it, unless `?theme=` forces one (then a media
+            // query on the system's would paint the wrong one).
+            Hole::ThemeColor => match self.theme {
+                Some("dark") => format!("<meta name=\"theme-color\" content=\"{GROUND_DARK}\">"),
+                Some(_) => format!("<meta name=\"theme-color\" content=\"{GROUND_LIGHT}\">"),
+                None => format!(
+                    "<meta name=\"theme-color\" content=\"{GROUND_LIGHT}\" \
+                     media=\"(prefers-color-scheme: light)\">\n\
+                     <meta name=\"theme-color\" content=\"{GROUND_DARK}\" \
+                     media=\"(prefers-color-scheme: dark)\">"
+                ),
+            },
         }
     }
 }
 
-/// A refresh period as the pill says it: `30 s`, `5 min`.
-fn every(secs: u16) -> String {
-    if secs >= 60 && secs.is_multiple_of(60) {
-        format!("{} min", secs / 60)
-    } else {
-        format!("{secs} s")
-    }
-}
+// tokens:begin - generated from brand/tokens.json by brand/src/tokens.py, do not edit
+/// The page's ground in each theme (`--ground`), for `theme-color`.
+const GROUND_LIGHT: &str = "#F2F0EA";
+const GROUND_DARK: &str = "#151A21";
+// tokens:end
 
 impl Chrome {
     /// Build the chrome from the request URI, the operator's page title and
@@ -367,6 +373,10 @@ impl Chrome {
 
     pub(crate) fn theme_input(&self) -> Cow<'_, str> {
         self.hole(Hole::ThemeInput)
+    }
+
+    pub(crate) fn theme_color(&self) -> Cow<'_, str> {
+        self.hole(Hole::ThemeColor)
     }
 }
 
@@ -470,29 +480,6 @@ impl FromRequestParts<AppState> for Chrome {
     }
 }
 
-/// The word of a display state (`up`, `degraded`, `down`, `maint`, `none`):
-/// the word is the truth, the shape and the colour help.
-pub(crate) fn word(state: &str) -> &'static str {
-    match state {
-        "up" => "Up",
-        "degraded" => "Slow",
-        "down" => "Down",
-        "maint" => "Maintenance",
-        _ => "No data",
-    }
-}
-
-/// A monitor's or a peer's status (`up`, `degraded`, `down`, `unknown`) as a
-/// display state (`unknown` has no data yet: `none`).
-pub(crate) fn display_state(status: &str) -> &'static str {
-    match status {
-        "up" => "up",
-        "degraded" => "degraded",
-        "down" => "down",
-        _ => "none",
-    }
-}
-
 /// Small numbers as words, as a sentence says them ("two are slow").
 pub(crate) fn count_word(n: usize) -> String {
     const WORDS: [&str; 11] = [
@@ -519,49 +506,21 @@ pub(crate) fn join_and<S: AsRef<str>>(items: &[S]) -> String {
     }
 }
 
-/// A latency in the unit a person reads: `64 ms`, `1.8 s`.
-pub(crate) fn ms(latency: i64) -> String {
-    if latency >= 1000 {
-        let tenths = (latency + 50) / 100;
-        format!("{}.{} s", tenths / 10, tenths % 10)
-    } else {
-        format!("{latency} ms")
-    }
-}
+pub(crate) use hora_core::fmt::latency as ms;
 
-/// A length in seconds as every page says it: `40 s` under a minute, then
-/// [`minutes`] (whole minutes, rounded down): `41 min`, `3 h 07 min`,
-/// `2 days 4 h`. The one spoken format of the web pages; the CLI and the
-/// machine outputs keep `hora_core::fmt::duration`.
-pub(crate) fn duration(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 60 {
-        format!("{seconds} s")
-    } else {
-        minutes(seconds / 60)
-    }
-}
-
-/// Minutes at a human size: `41 min`, `3 h 07 min`, `2 days 4 h`.
+/// Whole minutes as every page says a span: `41 min`, `3 h 7 min`,
+/// `2 d 4 h` - [`hora_core::fmt::duration`], for the figures the pages hold
+/// in minutes (a budget, a downtime rounded up to the minute).
 pub(crate) fn minutes(total: i64) -> String {
-    if total >= 2 * 1440 {
-        format!("{} days {} h", total / 1440, (total % 1440) / 60)
-    } else if total >= 60 {
-        format!("{} h {:02} min", total / 60, total % 60)
-    } else {
-        format!("{total} min")
+    // A figure kept in minutes says its nothing in minutes too: "0 s" in a
+    // column of "41 min" reads as another measurement.
+    if total <= 0 {
+        return "0 min".to_owned();
     }
+    hora_core::fmt::duration(total.saturating_mul(60))
 }
 
-/// A permille as the page writes a percentage: `99.97 %` reads better than
-/// `99.9 %` for a status page, but the data is permille, so one decimal.
-pub(crate) fn pct(permille: i64) -> String {
-    if permille >= 1000 {
-        "100 %".to_owned()
-    } else {
-        format!("{}.{} %", permille / 10, permille % 10)
-    }
-}
+pub(crate) use hora_core::fmt::permille as pct;
 
 #[cfg(test)]
 mod tests {
@@ -624,7 +583,7 @@ mod tests {
             format!(
                 "<html{}><meta content=\"{}\">{}<nav>{}<a href=\"/h{}\">h</a>\
                  <a href=\"{}\">{}</a></nav><form>{}</form><a href=\"/m/x{}\">x</a>\
-                 <a href=\"/r?group=g{}\">r</a></html>",
+                 <a href=\"/r?group=g{}\">r</a>{}</html>",
                 chrome.theme_attr(),
                 chrome.scheme(),
                 chrome.refresh_meta(),
@@ -635,6 +594,7 @@ mod tests {
                 chrome.theme_input(),
                 chrome.q(),
                 chrome.q_more(),
+                chrome.theme_color(),
             )
         };
         let cached = Spliced::new(page(&chrome("/").cached()));
@@ -654,6 +614,23 @@ mod tests {
         // The plain request is served the pre-filled bytes, not a copy.
         let plain = chrome("/").req;
         assert_eq!(cached.serve(&plain).as_ptr(), cached.plain.as_ptr());
+    }
+
+    /// A forced theme names its one ground; the system's scheme picks
+    /// between two otherwise.
+    #[test]
+    fn theme_color_follows_a_forced_theme() {
+        let auto = chrome("/").theme_color().into_owned();
+        assert_eq!(auto.matches("<meta").count(), 2);
+        assert!(auto.contains("prefers-color-scheme: dark"));
+        assert_eq!(
+            chrome("/?theme=dark").theme_color(),
+            "<meta name=\"theme-color\" content=\"#151A21\">"
+        );
+        assert_eq!(
+            chrome("/?theme=light").theme_color(),
+            "<meta name=\"theme-color\" content=\"#F2F0EA\">"
+        );
     }
 
     /// The cached render holds no request value: a token given to the
@@ -689,19 +666,16 @@ mod tests {
 
     #[test]
     fn words_and_units() {
-        assert_eq!(word("degraded"), "Slow");
-        assert_eq!(word("unknown"), "No data");
         assert_eq!(
             join_and(&["Paris", "Frankfurt", "Montréal"]),
             "Paris, Frankfurt and Montréal"
         );
         assert_eq!(ms(64), "64 ms");
         assert_eq!(ms(1849), "1.8 s");
-        assert_eq!(minutes(187), "3 h 07 min");
-        assert_eq!(duration(40), "40 s");
-        assert_eq!(duration(41 * 60), "41 min");
-        assert_eq!(duration(41 * 60 + 29), "41 min");
-        assert_eq!(duration(187 * 60), "3 h 07 min");
+        assert_eq!(minutes(0), "0 min");
+        assert_eq!(minutes(41), "41 min");
+        assert_eq!(minutes(187), "3 h 7 min");
+        assert_eq!(minutes(2 * 1440 + 4 * 60), "2 d 4 h");
         assert_eq!(pct(999), "99.9 %");
         assert_eq!(count_word(2), "two");
         assert_eq!(count_word(12), "12");

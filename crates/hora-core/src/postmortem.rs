@@ -81,8 +81,7 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
         incident
             .error
             .as_deref()
-            .map(|error| format!(" ({})", inline_code(error)))
-            .unwrap_or_default()
+            .map_or_default(|error| format!(" ({})", inline_code(error)))
     );
     if let Some(ended) = incident.ended_at {
         let _ = writeln!(out, "- {} - recovered", fmt::utc(ended));
@@ -145,7 +144,7 @@ mod tests {
             reason: None,
             note: Some("fiber cut at the DC".to_owned()),
             snapshot: Some("HTTP/2 503\n\n<html>maintenance</html>".to_owned()),
-            event: Some("deploy api v2.3, 3m before".to_owned()),
+            event: Some("deploy api v2.3, 3 min before".to_owned()),
             vantage: Some("confirmed down from 2/2 vantage points".to_owned()),
             created_at: 1_700_000_000,
         }
@@ -156,12 +155,12 @@ mod tests {
         let md = render(&incident(), "API");
         assert!(md.starts_with("# Post-mortem: API - 2023-11-14"), "{md}");
         assert!(md.contains("- **Incident:** #7 (resolved)"));
-        assert!(md.contains("- **Duration:** 9m 0s"));
+        assert!(md.contains("- **Duration:** 9 min"));
         assert!(md.contains("- **First failure:** `HTTP 503: upstream connect error`"));
         assert!(md.contains("- **Multi-vantage:** confirmed down from 2/2 vantage points"));
         assert!(md.contains("- **Probable cause (topology):** Database"));
         assert!(md.contains("- **Impacted:** Web, Worker"));
-        assert!(md.contains("- **Recent change:** deploy api v2.3, 3m before"));
+        assert!(md.contains("- **Recent change:** deploy api v2.3, 3 min before"));
         assert!(md.contains("## Operator note\n\nfiber cut at the DC"));
         assert!(md.contains("## What the service answered"));
         assert!(md.contains("<html>maintenance</html>"));

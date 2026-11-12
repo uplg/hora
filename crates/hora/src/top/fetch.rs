@@ -64,6 +64,9 @@ pub(super) struct Monitor {
     pub(super) id: String,
     pub(super) name: String,
     pub(super) status: String,
+    /// The reason of the maintenance window it is in, if it is in one.
+    #[serde(default)]
+    pub(super) maintenance: Option<String>,
     #[serde(default)]
     pub(super) group: Option<String>,
     #[serde(default)]
@@ -300,5 +303,19 @@ impl Drop for Fetcher {
         {
             task.abort();
         }
+    }
+}
+
+impl Monitor {
+    /// What the status page shows for it (see
+    /// [`hora_core::display::DisplayState::shown`]): a monitor inside a
+    /// maintenance window is in maintenance, whatever its checks say. The
+    /// summary does not say which downs are seen from this node only.
+    pub(super) fn shown(&self) -> hora_core::display::DisplayState {
+        hora_core::display::DisplayState::shown(
+            hora_core::status::MonitorState::from_word(&self.status),
+            self.maintenance.is_some(),
+            false,
+        )
     }
 }

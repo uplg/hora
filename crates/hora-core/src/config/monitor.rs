@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::parsed::{Compiled, DnsRecord, Parsed};
+use super::Alerts;
+use super::parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, Parsed};
 use super::raw::RawMonitor;
 use super::secret::{Secret, redact_url_secrets};
 
@@ -123,6 +124,9 @@ pub struct Monitor {
     /// Immediate re-probes after a failed check before recording it
     /// (default 1, at most 5).
     pub probe_retries: Option<u32>,
+    /// Consecutive failed checks before this monitor is confirmed down;
+    /// unset = `[alerts] fail_threshold` (see [`Monitor::fail_threshold`]).
+    pub fail_threshold: Option<u32>,
     /// Restrict this monitor's alerts to these channel names. Unset = every
     /// configured channel.
     pub notify: Option<Vec<String>>,
@@ -132,6 +136,9 @@ pub struct Monitor {
     pub retention_days: Option<u16>,
     /// Display group for the status page.
     pub group: Option<String>,
+    /// The machine the monitored service runs on: what a maintenance window
+    /// planned for a host (`POST /api/maintenance?host=...`) covers.
+    pub host: Option<String>,
     /// Upstream monitor ids this one depends on (validated as a DAG).
     pub depends_on: Option<Vec<String>>,
     /// Whether this monitor appears on the public status page.
@@ -149,6 +156,9 @@ pub struct Monitor {
     /// The monitor's own credential: required on `/api/push/{id}` (push
     /// monitors) and accepted on `/api/monitors/{id}/alert` (every kind).
     pub push_token: Option<Secret>,
+    /// Push monitor without a `push_token`: the id alone authorizes a
+    /// heartbeat (the operator's explicit opt-out).
+    pub allow_unauthenticated: bool,
     /// What is checked, and how: the kind with its own settings.
     pub spec: MonitorKind,
 }
@@ -171,8 +181,11 @@ pub struct HttpSpec {
     pub target: String,
     /// The same, parsed (always `http` or `https`).
     pub url: reqwest::Url,
-    /// The status that counts as up; unset = any 2xx. A 3xx is not followed.
-    pub expected_status: Option<u16>,
+    /// The statuses that count as up; unset = any 2xx. A monitor that
+    /// accepts a 3xx judges the first answer: redirects are not followed.
+    pub expected_status: Option<ExpectedStatus>,
+    /// The request sent, on every hop of a redirect chain.
+    pub method: HttpMethod,
     /// Extra request headers; values may be credentials.
     pub headers: HashMap<String, Secret>,
     /// The body must (or, inverted, must not) contain this text.
@@ -347,6 +360,7 @@ impl std::fmt::Debug for HttpSpec {
         f.debug_struct("HttpSpec")
             .field("target", &redact_url_secrets(&self.target))
             .field("expected_status", &self.expected_status)
+            .field("method", &self.method)
             .field("headers", &self.headers)
             .field("keyword", &self.keyword)
             .field("json", &self.json)
@@ -380,10 +394,12 @@ impl std::fmt::Debug for Monitor {
             .field("slo_uptime", &self.slo_uptime)
             .field("slo_window_days", &self.slo_window_days)
             .field("probe_retries", &self.probe_retries)
+            .field("fail_threshold", &self.fail_threshold)
             .field("notify", &self.notify)
             .field("check_cert", &self.check_cert)
             .field("retention_days", &self.retention_days)
             .field("group", &self.group)
+            .field("host", &self.host)
             .field("depends_on", &self.depends_on)
             .field("public", &self.public)
             .field("public_error_detail", &self.public_error_detail)
@@ -392,6 +408,7 @@ impl std::fmt::Debug for Monitor {
             .field("release", &self.release)
             .field("confirm_with_peers", &self.confirm_with_peers)
             .field("push_token", &self.push_token)
+            .field("allow_unauthenticated", &self.allow_unauthenticated)
             .field("spec", &self.spec)
             .finish()
     }
@@ -477,6 +494,19 @@ impl Monitor {
     #[must_use]
     pub fn probe_retries(&self) -> u32 {
         self.probe_retries.unwrap_or(1)
+    }
+
+    /// Consecutive failed checks that confirm this monitor down (and, with
+    /// `alert_on_degraded`, slow ones that confirm it degraded): its own
+    /// `fail_threshold`, else the global one. Never 0, which would confirm
+    /// nothing. The one place that decides it, so the alert, the status page
+    /// and the badge cannot disagree on when a monitor is down.
+    ///
+    /// A missed heartbeat does not wait for it: see
+    /// [`FailureKind::is_missed_heartbeat`](crate::probe::FailureKind::is_missed_heartbeat).
+    #[must_use]
+    pub fn fail_threshold(&self, alerts: &Alerts) -> u32 {
+        self.fail_threshold.unwrap_or(alerts.fail_threshold).max(1)
     }
 
     /// Availability SLO window in days (default 30).

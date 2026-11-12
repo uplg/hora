@@ -1,6 +1,6 @@
 //! The unified timeline: every kind of recorded moment - down/recovered
 //! transitions (incidents), operator events, pushed alerts, announcements,
-//! silences - merged into one chronology. "What happened this week?" in one
+//! silences, planned maintenance - merged into one chronology. "What happened this week?" in one
 //! command (`hora timeline`) or one page (`/timeline`), built entirely from
 //! data Hora already stores.
 
@@ -8,8 +8,11 @@ use std::collections::HashMap;
 
 use crate::db::Store;
 
-use crate::db::{self, Announcement, EventMarker, Incident, PushedAlert, Silence};
+use crate::db::{
+    self, Announcement, EventMarker, Incident, MaintenanceWindow, PushedAlert, Silence,
+};
 use crate::fmt;
+use crate::planned::Selector;
 
 /// What kind of moment an entry records - one stable lowercase tag, used as a
 /// CLI label and a CSS class.
@@ -21,6 +24,7 @@ pub enum Kind {
     Alert,
     Announce,
     Silence,
+    Maintenance,
 }
 
 impl Kind {
@@ -33,6 +37,7 @@ impl Kind {
             Self::Alert => "alert",
             Self::Announce => "announce",
             Self::Silence => "silence",
+            Self::Maintenance => "maintenance",
         }
     }
 }
@@ -61,6 +66,9 @@ pub struct Sources {
     pub alerts: Vec<PushedAlert>,
     pub announcements: Vec<Announcement>,
     pub silences: Vec<Silence>,
+    /// Maintenance windows planned at runtime (the API's, the peers'). The
+    /// config's own are not moments: they are in the file.
+    pub maintenance: Vec<MaintenanceWindow>,
 }
 
 /// Load the full (operator) sources since `since`. Each list is bounded by
@@ -84,6 +92,7 @@ pub async fn fetch(store: &Store, since: i64, limit: i64) -> crate::db::Result<S
         },
         announcements: db::announcements_since(store, since).await?,
         silences: db::silences_since(store, since).await?,
+        maintenance: db::maintenance_windows_since(store, since).await?,
     })
 }
 
@@ -163,7 +172,7 @@ pub fn merge<S: std::hash::BuildHasher>(
         });
     }
     for silence in &sources.silences {
-        let target = if silence.monitor_id == "*" {
+        let target = if silence.monitor_id == crate::silence::ALL {
             "all monitors".to_owned()
         } else {
             name(&silence.monitor_id)
@@ -179,6 +188,12 @@ pub fn merge<S: std::hash::BuildHasher>(
             incident_id: None,
         });
     }
+    entries.extend(
+        sources
+            .maintenance
+            .iter()
+            .map(|window| maintenance_entry(window, &name)),
+    );
 
     // Newest first; same-second moments keep a stable order by kind so a
     // down and its correlated event never swap between renders.
@@ -188,6 +203,34 @@ pub fn merge<S: std::hash::BuildHasher>(
     });
     entries.truncate(limit);
     entries
+}
+
+/// A planned maintenance window as a moment: when it was planned (or
+/// announced), what it covers, for how long, from when - and who planned it.
+fn maintenance_entry(window: &MaintenanceWindow, name: &impl Fn(&str) -> String) -> Entry {
+    let target = match Selector::parse(&window.selector) {
+        Some(Selector::All) => "all monitors".to_owned(),
+        Some(Selector::Ids(ids)) => ids.iter().map(|id| name(id)).collect::<Vec<_>>().join(", "),
+        Some(Selector::Host(host)) => format!("host {host}"),
+        Some(Selector::Peer) | None => "the peer itself".to_owned(),
+    };
+    let origin = match crate::planned::announcing_peer(&window.origin) {
+        Some(peer) => format!("announced by {}", name(peer)),
+        None => "planned on this node".to_owned(),
+    };
+    let mut detail = window.reason.clone();
+    push_part(&mut detail, &origin);
+    Entry {
+        at: window.created_at,
+        kind: Kind::Maintenance,
+        title: format!(
+            "maintenance planned for {target}: {} from {}",
+            fmt::duration(window.ends_at - window.starts_at),
+            fmt::utc(window.starts_at)
+        ),
+        detail: Some(detail),
+        incident_id: None,
+    }
 }
 
 /// Append `part` to `text` with a separator when needed.
@@ -215,7 +258,7 @@ mod tests {
             reason: None,
             note: None,
             snapshot: None,
-            event: Some("deploy api v2.3, 3m before".to_owned()),
+            event: Some("deploy api v2.3, 3 min before".to_owned()),
             vantage: None,
             created_at: started,
         }
@@ -258,27 +301,56 @@ mod tests {
                 reason: Some("deploying".to_owned()),
                 created_at: 110,
             }],
+            maintenance: vec![MaintenanceWindow {
+                id: 4,
+                starts_at: 3600,
+                ends_at: 4200,
+                reason: "kernel reboot".to_owned(),
+                selector: "host:frank".to_owned(),
+                origin: "peer:hora-frank".to_owned(),
+                remote_id: Some(9),
+                created_at: 105,
+            }],
         };
 
         let entries = merge(&sources, &names(), 0, 100);
         let kinds: Vec<&str> = entries.iter().map(|entry| entry.kind.as_str()).collect();
         assert_eq!(
             kinds,
-            ["recovered", "alert", "announce", "silence", "down", "event"]
+            [
+                "recovered",
+                "alert",
+                "announce",
+                "silence",
+                "maintenance",
+                "down",
+                "event"
+            ]
         );
 
         // The down entry resolves the display name, carries the reason and
         // the correlated change, and links its incident.
-        let down = &entries[4];
+        let down = &entries[5];
         assert_eq!(down.title, "API down");
         assert_eq!(down.incident_id, Some(7));
         let detail = down.detail.as_deref().unwrap();
         assert!(detail.contains("connection refused") && detail.contains("recent change"));
 
         // The recovery phrases its duration; the silence its span and reason.
-        assert_eq!(entries[0].detail.as_deref(), Some("after 1m 0s"));
-        assert_eq!(entries[3].title, "silenced all monitors for 10m 0s");
+        assert_eq!(entries[0].detail.as_deref(), Some("after 1 min"));
+        assert_eq!(entries[3].title, "silenced all monitors for 10 min");
         assert_eq!(entries[3].detail.as_deref(), Some("deploying"));
+
+        // A planned window says what it covers, for how long, from when -
+        // and where it came from.
+        assert_eq!(
+            entries[4].title,
+            "maintenance planned for host frank: 10 min from 1970-01-01 01:00:00 UTC"
+        );
+        assert_eq!(
+            entries[4].detail.as_deref(),
+            Some("kernel reboot · announced by hora-frank")
+        );
     }
 
     #[test]

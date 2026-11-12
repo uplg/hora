@@ -3,18 +3,17 @@ use std::net::SocketAddr;
 
 use super::dns::{record_type, resolver_for};
 use super::family::combine;
-use super::http::{
-    check_assertions, check_json, check_number, is_downgrade, same_origin, with_headers,
-};
+use super::http::{check_assertions, check_json, check_number, same_origin, with_headers};
 use super::snapshot::{
     MAX_SNAPSHOT_BODY_CHARS, MAX_SNAPSHOT_HEADER_CHARS, MAX_SNAPSHOT_HEADERS, render_head,
     render_snapshot,
 };
 use super::*;
 use crate::config::{
-    Compiled, DnsRecord, HttpSpec, JsonAssert, KeywordAssert, MonitorKind, NumberAssert, Parsed,
-    Secret,
+    Compiled, DnsRecord, ExpectedStatus, HttpMethod, HttpSpec, JsonAssert, KeywordAssert,
+    MonitorKind, NumberAssert, Parsed, Secret,
 };
+use crate::http::is_downgrade;
 
 #[test]
 fn public_reason_collapses_detail() {
@@ -46,7 +45,7 @@ fn public_reason_collapses_detail() {
     assert_eq!(
         public_reason(
             None,
-            "missed scheduled heartbeat (was due 03:00 UTC + 30m grace)"
+            "missed scheduled heartbeat (was due 03:00 UTC + 30 min grace)"
         ),
         "missed scheduled heartbeat"
     );
@@ -61,7 +60,7 @@ fn public_reason_collapses_detail() {
     );
     // Plugin output (device names, container ids) collapses to a category.
     assert_eq!(
-        public_reason(None, "plugin timed out after 30s"),
+        public_reason(None, "plugin timed out after 30 s"),
         "plugin check failed"
     );
     assert_eq!(
@@ -157,7 +156,7 @@ fn the_kinds_keep_the_public_words_of_the_old_classifier() {
         (FailureKind::NoRecords, "no MX records found"),
         (FailureKind::Ping, "icmp error: host unreachable"),
         (FailureKind::Ping, "icmp socket unavailable (denied)"),
-        (FailureKind::Plugin, "plugin timed out after 30s"),
+        (FailureKind::Plugin, "plugin timed out after 30 s"),
         (FailureKind::Plugin, "exec wait failed: interrupted"),
         (FailureKind::Ipv4Failing, "IPv4 failing: timeout (IPv6 ok)"),
         (FailureKind::Ipv6Failing, "IPv6 failing: refused (IPv4 ok)"),
@@ -168,7 +167,7 @@ fn the_kinds_keep_the_public_words_of_the_old_classifier() {
         (FailureKind::MissingHeartbeat, "missing heartbeat"),
         (
             FailureKind::MissedSchedule,
-            "missed scheduled heartbeat (was due 03:00 UTC + 30m grace)",
+            "missed scheduled heartbeat (was due 03:00 UTC + 30 min grace)",
         ),
         (FailureKind::Pushed, "backup failed"),
         (FailureKind::Other, "Connection refused (os error 61)"),
@@ -343,7 +342,7 @@ async fn expected_redirect_is_not_followed() {
         .await;
     let client = crate::http::probe_client(None).unwrap();
     let mut monitor = http_monitor(&url);
-    spec_mut(&mut monitor).expected_status = Some(301);
+    spec_mut(&mut monitor).expected_status = Some(ExpectedStatus::code(301));
     let outcome = http(&client, &monitor, spec(&monitor)).await;
     assert!(outcome.is_up(), "{:?}", outcome.error);
     assert_eq!(outcome.status_code, Some(301));
@@ -354,6 +353,96 @@ async fn expected_redirect_is_not_followed() {
     spec_mut(&mut monitor).expected_status = None;
     let outcome = http(&client, &monitor, spec(&monitor)).await;
     assert_eq!(outcome.error.as_deref(), Some("too many redirects"));
+}
+
+#[tokio::test]
+async fn a_listed_status_is_up() {
+    let (url, _hits) =
+        serve("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    // Unset, only a 2xx is up.
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(outcome.error.as_deref(), Some("HTTP 401"));
+
+    // An API behind authentication answers 401 when it is healthy.
+    for accepted in ["200,401", "4xx", "2xx,401"] {
+        spec_mut(&mut monitor).expected_status =
+            Some(ExpectedStatus::parse_list(accepted).unwrap());
+        let outcome = http(&client, &monitor, spec(&monitor)).await;
+        assert!(outcome.is_up(), "{accepted}: {:?}", outcome.error);
+        assert_eq!(outcome.status_code, Some(401));
+    }
+    // A list is still a list: what it leaves out is down.
+    spec_mut(&mut monitor).expected_status = Some(ExpectedStatus::parse_list("200,403").unwrap());
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(outcome.error.as_deref(), Some("HTTP 401"));
+}
+
+#[tokio::test]
+async fn a_list_holding_a_redirect_judges_the_first_answer() {
+    let (url, hits) = serve(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    // Followed, the 301 would never be the answer judged and could not count.
+    spec_mut(&mut monitor).expected_status = Some(ExpectedStatus::parse_list("200,301").unwrap());
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert!(outcome.is_up(), "{:?}", outcome.error);
+    assert_eq!(outcome.status_code, Some(301));
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// A server that sends `/` to `/next` and answers 200 anywhere else, without
+/// a body; returns its base URL and the request lines it received.
+async fn serve_recording() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..read]).into_owned();
+            let line = request.lines().next().unwrap_or_default().to_owned();
+            let response = if line.contains(" / ") {
+                "HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            };
+            record.lock().unwrap().push(line);
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (format!("http://{addr}"), seen)
+}
+
+#[tokio::test]
+async fn a_head_monitor_sends_head_on_every_hop() {
+    let (url, seen) = serve_recording().await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert!(outcome.is_up(), "{:?}", outcome.error);
+    assert_eq!(
+        std::mem::take(&mut *seen.lock().unwrap()),
+        ["GET / HTTP/1.1", "GET /next HTTP/1.1"]
+    );
+
+    spec_mut(&mut monitor).method = HttpMethod::Head;
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert!(outcome.is_up(), "{:?}", outcome.error);
+    assert_eq!(outcome.status_code, Some(200));
+    // The redirect does not turn it into a GET.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["HEAD / HTTP/1.1", "HEAD /next HTTP/1.1"]
+    );
 }
 
 #[tokio::test]
@@ -475,6 +564,46 @@ async fn a_proxy_refusing_us_is_blamed_not_the_target() {
         outcome.error.as_deref(),
         Some("proxy failed: tunnel error: proxy authorization required")
     );
+}
+
+/// A public target answering with a redirect to an internal address is a
+/// down with its own reason, and the internal service is never asked. The
+/// "public target" is reached through a proxy (a local server answering for
+/// it), which is the only way to have one in a test.
+#[tokio::test]
+async fn a_public_target_redirecting_inwards_is_refused() {
+    let (inside, inside_hits) =
+        serve("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret").await;
+    let redirect: &'static str = Box::leak(
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: {inside}/admin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .into_boxed_str(),
+    );
+    let (proxy, _hits) = serve(redirect).await;
+    let client = crate::http::probe_client(Some(&proxy)).unwrap();
+    let mut monitor = http_monitor("http://1.1.1.1/");
+    spec_mut(&mut monitor).proxy = Some(proxy.clone());
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("redirected to a private address")
+    );
+    assert_eq!(outcome.reason, Some(FailureKind::PrivateRedirect));
+    assert_eq!(outcome.snapshot, None);
+    assert_eq!(inside_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        public_reason(outcome.reason, "redirected to a private address"),
+        "redirected to a private address"
+    );
+
+    // An internal target may redirect to another internal address, as ever.
+    let (front, _hits) = serve(redirect).await;
+    let client = crate::http::probe_client(None).unwrap();
+    let monitor = http_monitor(&front.replace("127.0.0.1", "localhost"));
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert!(outcome.is_up(), "{:?}", outcome.error);
+    assert_eq!(inside_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]

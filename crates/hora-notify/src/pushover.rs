@@ -9,10 +9,9 @@ use crate::{Event, Notifier};
 
 const PUSHOVER_API: &str = "https://api.pushover.net/1/messages.json";
 
-/// Pushover rejects a message over 1024 characters (and a title over 250;
-/// ours is a short constant).
-const HEAD_MAX: usize = 256;
-const BODY_MAX: usize = 1024 - HEAD_MAX - 1;
+/// Pushover rejects a title over 250 characters and a message over 1024.
+const HEAD_MAX: usize = 250;
+const BODY_MAX: usize = 1024;
 
 pub struct PushoverNotifier {
     client: Client,
@@ -30,9 +29,12 @@ impl PushoverNotifier {
         }
     }
 
-    fn message(event: Event<'_>) -> (String, i8) {
+    /// The title (the event's headline), the message under it and the
+    /// priority.
+    fn message(event: Event<'_>) -> (String, String, i8) {
         let message = Message::render(event).fit(HEAD_MAX, BODY_MAX, Unit::Chars);
-        (message.plain(), priority(message.urgency()))
+        let (title, text) = message.titled();
+        (title, text, priority(message.urgency()))
     }
 }
 
@@ -53,13 +55,13 @@ impl Notifier for PushoverNotifier {
     }
 
     async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
-        let (message, priority) = Self::message(event);
+        let (title, message, priority) = Self::message(event);
         let build = || {
             self.client.post(PUSHOVER_API).json(&serde_json::json!({
                 "token": self.token,
                 "user": self.user,
                 "message": message,
-                "title": "Hora Alert",
+                "title": title,
                 "priority": priority,
             }))
         };
@@ -73,6 +75,18 @@ impl Notifier for PushoverNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    let (title, body, _priority) = PushoverNotifier::message(event);
+    crate::fuzz::Sent {
+        channel: "pushover",
+        title: Some(title),
+        body,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,15 +94,17 @@ mod tests {
 
     #[test]
     fn maps_events_to_text_and_priority() {
-        let (text, priority) = PushoverNotifier::message(Event::CertChanged {
+        let (title, text, priority) = PushoverNotifier::message(Event::CertChanged {
             monitor: "API",
             old_fingerprint: "aa",
             new_fingerprint: "bb",
         });
-        assert!(text.starts_with("API TLS certificate changed unexpectedly\nold: aa\nnew: bb"));
+        // The notification list names the monitor; the body does not repeat it.
+        assert_eq!(title, "API TLS certificate changed unexpectedly");
+        assert!(text.starts_with("old: aa\nnew: bb"), "{text}");
         assert_eq!(priority, 1);
 
-        let (_, priority) = PushoverNotifier::message(Event::Digest {
+        let (_, _, priority) = PushoverNotifier::message(Event::Digest {
             period: "week",
             summary: "ok",
         });
@@ -96,16 +112,17 @@ mod tests {
     }
 
     #[test]
-    fn long_alerts_fit_the_message_limit() {
-        let title = "t".repeat(200);
+    fn long_alerts_fit_the_title_and_message_limits() {
+        let name = "n".repeat(300);
         let message = "m".repeat(3000);
-        let (text, _) = PushoverNotifier::message(Event::Alert {
-            monitor: "API",
+        let (title, text, _) = PushoverNotifier::message(Event::Alert {
+            monitor: &name,
             severity: AlertSeverity::Error,
-            title: &title,
+            title: "disk full",
             message: &message,
         });
+        assert!(title.chars().count() <= 250, "{}", title.chars().count());
+        assert!(title.starts_with("[ERROR] nnn"));
         assert!(text.chars().count() <= 1024, "{}", text.chars().count());
-        assert!(text.starts_with("[ERROR] API: ttt"));
     }
 }

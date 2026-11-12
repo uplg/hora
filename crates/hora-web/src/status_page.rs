@@ -14,9 +14,11 @@ use std::fmt::Write as _;
 use chrono::{DateTime, Utc};
 use hora_core::config::Config;
 
+use crate::display::DisplayState;
 use crate::layout::{count_word, join_and, ms, pct};
-use crate::render::{day_bar, day_class, meter, owl};
+use crate::render::{day_bar, meter, owl};
 use crate::summary::{MonitorView, Summary};
+use maud::Markup;
 
 /// Above this many monitors the page uses its scale layout.
 pub(crate) const SCALE_AT: usize = 30;
@@ -24,7 +26,7 @@ pub(crate) const SCALE_AT: usize = 30;
 pub(crate) const ROWS_PER_GROUP: usize = 24;
 /// Rows in "Needs attention" before the rest is left to the groups.
 pub(crate) const ATTENTION_ROWS: usize = 50;
-/// Local-only monitors detailed in the operator's "why nobody was woken".
+/// Local-only monitors detailed in the operator's "why this is not an outage".
 const LOCAL_DETAILED: usize = 5;
 
 // A template's view model: the flags are independent facts the template
@@ -35,7 +37,7 @@ pub(crate) struct StatusPage<'a> {
     /// The page's state: `up`, `degraded`, `down`, `maint` or `none`.
     pub(crate) state: &'static str,
     /// The owl in that state's pose (one per page).
-    pub(crate) owl: String,
+    pub(crate) owl: Markup,
     /// The hour, the hero's eyebrow.
     pub(crate) when: String,
     /// The one sentence: "Everything is running."
@@ -144,7 +146,10 @@ pub(crate) struct Window {
     pub(crate) start: String,
     pub(crate) end: String,
     pub(crate) progress: String,
-    pub(crate) meter: String,
+    /// The same as numbers, in minutes, for the progress bar's values.
+    pub(crate) done: i64,
+    pub(crate) length: i64,
+    pub(crate) meter: Markup,
 }
 
 /// Monitors down from this node only, and what the page says about them.
@@ -159,7 +164,7 @@ pub(crate) struct LocalNotice<'a> {
 /// One local-only monitor in the operator's panel: who sees what.
 pub(crate) struct LocalDetail<'a> {
     pub(crate) monitor: &'a MonitorView,
-    pub(crate) owls: String,
+    pub(crate) owls: Markup,
     pub(crate) places: Vec<Place>,
 }
 
@@ -179,6 +184,9 @@ pub(crate) struct Row<'a> {
     /// The monitor id, URL-encoded for `/monitor/{id}`.
     pub(crate) href_id: String,
     pub(crate) state: &'static str,
+    /// Where the row sorts when problems come first (see
+    /// [`DisplayState::urgency`]).
+    urgency: u8,
     pub(crate) word: &'static str,
     /// After the word: `· 99.98 %` or `· 1.8 s`; empty for none.
     pub(crate) detail: String,
@@ -187,8 +195,10 @@ pub(crate) struct Row<'a> {
     /// The group, named on the "Needs attention" rows.
     pub(crate) group: Option<&'a str>,
     /// The daily bar (full rows only), and its words for assistive tech.
-    pub(crate) bar: String,
+    pub(crate) bar: Markup,
     pub(crate) bar_label: String,
+    /// The last 24 hours of answer times as a bare line (full rows only).
+    pub(crate) spark: Markup,
     /// Where a down was seen from ("confirmed from").
     pub(crate) seen: Vec<Place>,
     pub(crate) seen_note: String,
@@ -209,7 +219,7 @@ pub(crate) struct GroupBlock<'a> {
     /// Open on arrival: something is wrong in it, or it is the group's page.
     pub(crate) open: bool,
     /// The group's daily bar (scale layout), see [`group_day_classes`].
-    pub(crate) bar: String,
+    pub(crate) bar: Markup,
     pub(crate) uptime: String,
     pub(crate) rows: Vec<Row<'a>>,
     pub(crate) total: usize,
@@ -228,32 +238,22 @@ struct Counts {
 impl Counts {
     fn add(&mut self, monitor: &MonitorView) {
         match monitor.display_state() {
-            "up" => self.up += 1,
-            "degraded" => {
+            DisplayState::Up => self.up += 1,
+            DisplayState::Degraded => {
                 self.degraded += 1;
-                if monitor.word() == "Retrying" {
+                if monitor.retrying() {
                     self.retrying += 1;
                 }
             }
-            "down" => self.down += 1,
-            "maint" => self.maint += 1,
-            _ => self.none += 1,
+            DisplayState::Down => self.down += 1,
+            DisplayState::Maint => self.maint += 1,
+            DisplayState::None => self.none += 1,
         }
     }
 
     /// The page's state: the worst shown; `none` only when nothing has data.
-    fn state(&self, total: usize) -> &'static str {
-        if self.down > 0 {
-            "down"
-        } else if self.degraded > 0 {
-            "degraded"
-        } else if self.maint > 0 {
-            "maint"
-        } else if self.none == total {
-            "none"
-        } else {
-            "up"
-        }
+    fn state(&self, total: usize) -> DisplayState {
+        DisplayState::of_counts(self.down, self.degraded, self.maint, self.none, total)
     }
 }
 
@@ -288,8 +288,8 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
         .filter(|monitor| monitor.local_only() && monitor.maintenance.is_none())
         .collect();
 
-    let windows = active_windows(summary, config, now);
-    let window = (state == "maint")
+    let windows = active_windows(summary, now);
+    let window = (state == DisplayState::Maint)
         .then(|| {
             windows
                 .first()
@@ -314,13 +314,13 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
 
     StatusPage {
         summary,
-        state,
-        owl: owl(state, 96),
+        state: state.class(),
+        owl: owl(state.class(), 96),
         when: summary.when(),
         headline,
         sub_lead,
         sub_rest,
-        chips: chips(&counts, &local_monitors, summary.quiet_days, config, now),
+        chips: chips(&counts, &local_monitors, summary, now),
         announcements: summary
             .incidents
             .iter()
@@ -340,7 +340,7 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
             })
             .collect(),
         window,
-        maintenances: if state == "maint" {
+        maintenances: if state == DisplayState::Maint {
             Vec::new()
         } else {
             summary
@@ -355,29 +355,29 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
                     } else {
                         format!("{}. Affects {}.", window.reason, window.monitors)
                     },
-                    when: None,
+                    when: window.note.clone(),
                 })
                 .collect()
         },
-        next: next_window(config, now).map(|(start, end, title)| Callout {
+        next: next_window(summary, now).map(|window| Callout {
             class: "info",
             glyph: "info",
             title: "Next".to_owned(),
             body: format!(
                 "{} to {}: {}.",
-                start.format("%A %-d %B, %H:%M"),
-                if end.date_naive() == start.date_naive() {
-                    end.format("%H:%M UTC").to_string()
+                window.start.format("%A %-d %B, %H:%M"),
+                if window.end.date_naive() == window.start.date_naive() {
+                    window.end.format("%H:%M UTC").to_string()
                 } else {
-                    end.format("%A %-d %B, %H:%M UTC").to_string()
+                    window.end.format("%A %-d %B, %H:%M UTC").to_string()
                 },
-                if title.is_empty() {
+                if window.reason.is_empty() {
                     "planned maintenance"
                 } else {
-                    title
+                    &window.reason
                 }
             ),
-            when: None,
+            when: window.note.clone(),
         }),
         local: local_notice(&local_monitors, config),
         attention,
@@ -405,7 +405,7 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
                 .peers
                 .iter()
                 .map(|peer| {
-                    let state = crate::layout::display_state(peer.status.as_str());
+                    let state = DisplayState::from(peer.status);
                     let mut note = peer.last_seen.as_ref().map_or_else(
                         || "never heard from".to_owned(),
                         |seen| format!("last heartbeat {seen}"),
@@ -415,11 +415,13 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
                     }
                     PeerRow {
                         name: peer.name.clone(),
-                        state,
+                        state: state.class(),
                         word: match state {
-                            "up" => "Well",
-                            "down" => "Silent",
-                            _ => "Not heard yet",
+                            DisplayState::Up => "Well",
+                            DisplayState::Down => "Silent",
+                            DisplayState::Degraded | DisplayState::Maint | DisplayState::None => {
+                                "Not heard yet"
+                            }
                         },
                         note,
                     }
@@ -453,40 +455,33 @@ pub(crate) fn summary_sentence(summary: &Summary) -> String {
 }
 
 /// The active maintenance windows the page is about, soonest end first.
-fn active_windows(
-    summary: &Summary,
-    config: &Config,
-    now: DateTime<Utc>,
-) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
-    // The summary already holds the windows this page may announce (a group
-    // page drops other groups'); the config adds their hours.
-    let mut windows: Vec<(DateTime<Utc>, DateTime<Utc>)> = config
-        .maintenance
+fn active_windows(summary: &Summary, now: DateTime<Utc>) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    // The summary holds the windows this page may announce (a group page
+    // drops other groups'), each with its own hours. One may have ended
+    // since the summary was built.
+    let mut windows: Vec<(DateTime<Utc>, DateTime<Utc>)> = summary
+        .maintenances
         .iter()
         .filter(|window| now >= window.start && now <= window.end)
-        .filter(|window| {
-            summary
-                .maintenances
-                .iter()
-                .any(|shown| shown.reason == window.title)
-        })
         .map(|window| (window.start, window.end))
         .collect();
     windows.sort_by_key(|(_, end)| *end);
     windows
 }
 
-/// The next window that has not started, within a week.
-fn next_window(
-    config: &Config,
-    now: DateTime<Utc>,
-) -> Option<(DateTime<Utc>, DateTime<Utc>, &str)> {
-    config
-        .maintenance
+/// The next window that has not started, within a week: a config window, or
+/// one planned at runtime (through the API, or announced by a peer). The
+/// summary holds the ones this page may announce; one may have started
+/// since it was built.
+fn next_window(summary: &Summary, now: DateTime<Utc>) -> Option<&crate::summary::MaintenanceView> {
+    summary
+        .upcoming
         .iter()
-        .filter(|window| window.start > now && window.start <= now + chrono::TimeDelta::days(7))
+        .filter(|window| {
+            window.start > now
+                && window.start <= now + chrono::TimeDelta::days(crate::summary::UPCOMING_DAYS)
+        })
         .min_by_key(|window| window.start)
-        .map(|window| (window.start, window.end, window.title.as_str()))
 }
 
 fn hero_window(start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>) -> Window {
@@ -495,7 +490,13 @@ fn hero_window(start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>) -> 
     Window {
         start: start.format("%H:%M").to_string(),
         end: end.format("%H:%M").to_string(),
-        progress: format!("{done} of {length} min"),
+        progress: format!(
+            "{} of {}",
+            crate::layout::minutes(done),
+            crate::layout::minutes(length)
+        ),
+        done,
+        length,
         meter: meter(done, length, "meter maint"),
     }
 }
@@ -513,7 +514,7 @@ fn sentence(
     windows: &[(DateTime<Utc>, DateTime<Utc>)],
     now: DateTime<Utc>,
 ) -> (String, String, String) {
-    let names = |state: &str| -> Vec<&str> {
+    let names = |state: DisplayState| -> Vec<&str> {
         summary
             .monitors
             .iter()
@@ -532,7 +533,7 @@ fn sentence(
         if almost {
             "Almost everything is running.".to_owned()
         } else if counts.down <= 3 {
-            let down = names("down");
+            let down = names(DisplayState::Down);
             format!("{} {} down.", join_and(&down), is_are(down.len()))
         } else if counts.down * 2 < total {
             "Some services are down.".to_owned()
@@ -548,7 +549,7 @@ fn sentence(
         if almost {
             "Almost everything is running.".to_owned()
         } else if counts.degraded <= 3 {
-            let slow = names("degraded");
+            let slow = names(DisplayState::Degraded);
             format!("{} {} {trouble}.", join_and(&slow), is_are(slow.len()))
         } else {
             format!("Some services are {trouble}.")
@@ -622,8 +623,7 @@ fn sentence(
             let mut chars = joined.chars();
             let capitalised: String = chars
                 .next()
-                .map(|first| first.to_uppercase().chain(chars).collect())
-                .unwrap_or_default();
+                .map_or_default(|first| first.to_uppercase().chain(chars).collect());
             rest.push(' ');
             rest.push_str(&capitalised);
             rest.push_str(if counts.up > 0 {
@@ -643,24 +643,24 @@ fn sentence(
 fn chips(
     counts: &Counts,
     local: &[&MonitorView],
-    quiet_days: Option<i64>,
-    config: &Config,
+    summary: &Summary,
     now: DateTime<Utc>,
 ) -> Vec<Chip> {
+    let quiet_days = summary.quiet_days;
     let mut chips = Vec::new();
-    let mut add = |state: &'static str, n: usize, text: &str, href: Option<&str>| {
+    let mut add = |state: DisplayState, n: usize, text: &str, href: Option<&str>| {
         if n > 0 {
             chips.push(Chip {
-                state,
+                state: state.class(),
                 icon: "",
                 text: format!("{n} {text}"),
                 href: href.map(str::to_owned),
             });
         }
     };
-    add("down", counts.down, "down", Some("#attention"));
+    add(DisplayState::Down, counts.down, "down", Some("#attention"));
     add(
-        "degraded",
+        DisplayState::Degraded,
         counts.degraded,
         if counts.retrying == counts.degraded {
             "retrying"
@@ -669,9 +669,9 @@ fn chips(
         },
         Some("#attention"),
     );
-    add("maint", counts.maint, "in maintenance", None);
-    add("none", counts.none, "waiting", None);
-    add("up", counts.up, "up", None);
+    add(DisplayState::Maint, counts.maint, "in maintenance", None);
+    add(DisplayState::None, counts.none, "waiting", None);
+    add(DisplayState::Up, counts.up, "up", None);
     if !local.is_empty() {
         chips.push(Chip {
             state: "",
@@ -695,12 +695,12 @@ fn chips(
         });
     }
     if counts.maint == 0
-        && let Some((start, _, _)) = next_window(config, now)
+        && let Some(next) = next_window(summary, now)
     {
         chips.push(Chip {
-            state: "maint",
+            state: DisplayState::Maint.class(),
             icon: "",
-            text: format!("Planned: {}", start.format("%a %-d %b, %H:%M UTC")),
+            text: format!("Planned: {}", next.start.format("%a %-d %b, %H:%M UTC")),
             href: Some("#next".to_owned()),
         });
     }
@@ -742,20 +742,20 @@ fn local_notice<'a>(
             let mut places = vec![Place {
                 name: "This Hora".to_owned(),
                 role: "this node",
-                state: "down",
-                word: "Down",
+                state: DisplayState::Down.class(),
+                word: DisplayState::Down.word(),
                 answer: monitor
                     .last_error
                     .clone()
                     .unwrap_or_else(|| "no answer".to_owned()),
             }];
             places.extend(monitor.vantages.iter().map(|vantage| {
-                let state = crate::layout::display_state(vantage.status.as_str());
+                let state = DisplayState::from(vantage.status);
                 Place {
                     name: vantage.peer.clone(),
                     role: "peer",
-                    state,
-                    word: crate::layout::word(state),
+                    state: state.class(),
+                    word: state.word(),
                     answer: vantage.p50_ms.map_or_else(|| "-".to_owned(), ms),
                 }
             }));
@@ -788,29 +788,23 @@ fn local_notice<'a>(
 /// operator panel's footnote.
 fn local_routing(config: &hora_core::config::Config) -> String {
     const LEAD: &str = "This node asks its peers before it alerts. A down seen from here only, \
-        while every peer that answers sees the service up, does not page the usual channels:";
+        while every peer that answers sees the service up,";
+    const QUIET: &str = "does not page the usual channels:";
     const TAIL: &str = "The peers are asked again every 5 minutes; once they see it down too, \
         or stop answering, the usual alert goes out.";
     match config.alerts.notify_unconfirmed.as_deref() {
-        Some(quiet) if !quiet.is_empty() => format!(
-            "{LEAD} it goes to {} instead (alerts.notify_unconfirmed). {TAIL}",
+        // The default never lets a peer's answer silence a down on its own.
+        None => format!(
+            "{LEAD} still goes to the monitor's channels, marked as seen from here only (set \
+             alerts.notify_unconfirmed to send it to a quiet channel instead). {TAIL}"
+        ),
+        Some([]) => format!(
+            "{LEAD} {QUIET} it is only recorded (alerts.notify_unconfirmed is empty). {TAIL}"
+        ),
+        Some(quiet) => format!(
+            "{LEAD} {QUIET} it goes to {} instead (alerts.notify_unconfirmed). {TAIL}",
             join_and(quiet)
         ),
-        _ => format!(
-            "{LEAD} it is only recorded (set alerts.notify_unconfirmed to send it to a quiet \
-             channel). {TAIL}"
-        ),
-    }
-}
-
-/// How urgent a display state is, for "problems first".
-fn urgency(state: &str) -> u8 {
-    match state {
-        "down" => 0,
-        "degraded" => 1,
-        "maint" => 2,
-        "none" => 3,
-        _ => 4,
     }
 }
 
@@ -820,7 +814,7 @@ fn attention_rows(summary: &Summary) -> Vec<Row<'_>> {
         .monitors
         .iter()
         .map(AsRef::as_ref)
-        .filter(|monitor| matches!(monitor.display_state(), "down" | "degraded" | "maint"))
+        .filter(|monitor| monitor.display_state().notable())
         .map(|monitor| {
             let mut row = row(monitor, false);
             row.group = monitor.group.as_deref();
@@ -828,8 +822,8 @@ fn attention_rows(summary: &Summary) -> Vec<Row<'_>> {
         })
         .collect();
     rows.sort_by(|a, b| {
-        urgency(a.state)
-            .cmp(&urgency(b.state))
+        a.urgency
+            .cmp(&b.urgency)
             .then_with(|| a.m.name.cmp(&b.m.name))
     });
     rows
@@ -841,23 +835,23 @@ fn row(monitor: &MonitorView, with_bar: bool) -> Row<'_> {
     let now = Utc::now().timestamp();
     let detail = match state {
         // Up over the bar's days, the figure its bar shows.
-        "up" | "maint" => monitor
+        DisplayState::Up | DisplayState::Maint => monitor
             .uptime_long_permille
             .or(monitor.uptime_permille)
-            .map(pct)
-            .unwrap_or_default(),
-        "down" => crate::monitor_page::down_for(monitor, now).map_or_else(
-            || monitor.last_latency_ms.map(ms).unwrap_or_default(),
+            .map_or_default(pct),
+        DisplayState::Down => crate::monitor_page::down_for(monitor, now).map_or_else(
+            || monitor.last_latency_ms.map_or_default(ms),
             crate::layout::minutes,
         ),
-        "degraded" => monitor.last_latency_ms.map(ms).unwrap_or_default(),
-        _ => String::new(),
+        DisplayState::Degraded => monitor.last_latency_ms.map_or_default(ms),
+        DisplayState::None => String::new(),
     };
     let (seen, seen_note) = seen_from(monitor);
     Row {
         m: monitor,
         href_id: hora_core::fmt::percent_encode(&monitor.id),
-        state,
+        state: state.class(),
+        urgency: state.urgency(),
         word: monitor.word(),
         detail,
         why: why(monitor),
@@ -865,9 +859,14 @@ fn row(monitor: &MonitorView, with_bar: bool) -> Row<'_> {
         bar: if with_bar {
             day_bar(&day_classes(monitor))
         } else {
-            String::new()
+            Markup::default()
         },
         bar_label: bar_label(monitor),
+        spark: if with_bar {
+            crate::render::mini_spark(&monitor.spark)
+        } else {
+            Markup::default()
+        },
         seen,
         seen_note,
     }
@@ -885,7 +884,7 @@ fn why(monitor: &MonitorView) -> Option<String> {
     }
     let mut parts = Vec::new();
     match state {
-        "maint" => {
+        DisplayState::Maint => {
             let title = monitor.maintenance.as_deref().unwrap_or_default();
             parts.push(if title.is_empty() {
                 "Planned maintenance.".to_owned()
@@ -893,7 +892,7 @@ fn why(monitor: &MonitorView) -> Option<String> {
                 format!("Planned maintenance: {title}.")
             });
         }
-        "down" => {
+        DisplayState::Down => {
             if let Some(since) = crate::monitor_page::since_line(monitor, Utc::now().timestamp()) {
                 parts.push(since);
             }
@@ -901,31 +900,33 @@ fn why(monitor: &MonitorView) -> Option<String> {
                 parts.push(format!("Last answer: {error}."));
             }
         }
-        "degraded" => match (&monitor.last_error, monitor.last_latency_ms, monitor.p50_ms) {
-            (Some(error), _, _) => parts.push(format!(
-                "The last check failed ({error}); checking again before calling it down."
-            )),
-            // Say the limit it crossed: a 4 ms answer reads "slow" only next
-            // to the 1 ms the operator set.
-            (None, Some(latency), _)
-                if monitor.slow_over_ms.is_some_and(|limit| latency > limit) =>
-            {
-                parts.push(format!(
-                    "Answers take {}, over its {} limit.",
+        DisplayState::Degraded => {
+            match (&monitor.last_error, monitor.last_latency_ms, monitor.p50_ms) {
+                (Some(error), _, _) => parts.push(format!(
+                    "The last check failed ({error}); checking again before calling it down."
+                )),
+                // Say the limit it crossed: a 4 ms answer reads "slow" only next
+                // to the 1 ms the operator set.
+                (None, Some(latency), _)
+                    if monitor.slow_over_ms.is_some_and(|limit| latency > limit) =>
+                {
+                    parts.push(format!(
+                        "Answers take {}, over its {} limit.",
+                        ms(latency),
+                        ms(monitor.slow_over_ms.unwrap_or_default())
+                    ));
+                }
+                (None, Some(latency), Some(p50)) if p50 < latency => parts.push(format!(
+                    "Answers take {} (usually {}).",
                     ms(latency),
-                    ms(monitor.slow_over_ms.unwrap_or_default())
-                ));
+                    ms(p50)
+                )),
+                (None, Some(latency), _) => parts.push(format!("Answers take {}.", ms(latency))),
+                _ => {}
             }
-            (None, Some(latency), Some(p50)) if p50 < latency => parts.push(format!(
-                "Answers take {} (usually {}).",
-                ms(latency),
-                ms(p50)
-            )),
-            (None, Some(latency), _) => parts.push(format!("Answers take {}.", ms(latency))),
-            _ => {}
-        },
-        "none" => parts.push("Waiting for the first check.".to_owned()),
-        _ => {}
+        }
+        DisplayState::None => parts.push("Waiting for the first check.".to_owned()),
+        DisplayState::Up => {}
     }
     if let Some(cause) = &monitor.cause {
         parts.push(format!("Probably caused by {cause}."));
@@ -947,27 +948,32 @@ fn why(monitor: &MonitorView) -> Option<String> {
 /// Where a down monitor was seen from: this node and each peer, and what
 /// the agreement means. Empty without peers.
 fn seen_from(monitor: &MonitorView) -> (Vec<Place>, String) {
-    if monitor.vantages.is_empty() || monitor.display_state() != "down" {
+    if monitor.vantages.is_empty() || monitor.display_state() != DisplayState::Down {
         return (Vec::new(), String::new());
     }
     let mut places = vec![Place {
         name: "Here".to_owned(),
         role: "this node",
-        state: "down",
-        word: "Down",
+        state: DisplayState::Down.class(),
+        word: DisplayState::Down.word(),
         answer: String::new(),
     }];
     places.extend(monitor.vantages.iter().map(|vantage| {
-        let state = crate::layout::display_state(vantage.status.as_str());
+        let state = DisplayState::from(vantage.status);
         Place {
             name: vantage.peer.clone(),
             role: "peer",
-            state,
-            word: crate::layout::word(state),
+            state: state.class(),
+            word: state.word(),
             answer: String::new(),
         }
     }));
-    let down = places.iter().filter(|place| place.state == "down").count();
+    // This node, and every peer that sees it down too.
+    let down = 1 + monitor
+        .vantages
+        .iter()
+        .filter(|vantage| DisplayState::from(vantage.status) == DisplayState::Down)
+        .count();
     let note = if down == places.len() {
         format!("{down} of {down} places: not a local problem")
     } else {
@@ -980,21 +986,16 @@ fn seen_from(monitor: &MonitorView) -> (Vec<Place>, String) {
 /// touched is maintenance unless it still was an outage; maintenance now
 /// marks today.
 fn day_classes(monitor: &MonitorView) -> Vec<u8> {
-    let mut days: Vec<u8> = monitor
+    let last = monitor.bar.len().saturating_sub(1);
+    monitor
         .bar
         .iter()
-        .map(|cell| match day_class(cell.state) {
-            b'u' | b'd' if cell.maint => b'm',
-            class => class,
+        .enumerate()
+        .map(|(index, cell)| {
+            let now = index == last && monitor.maintenance.is_some();
+            crate::summary::bar_class(cell.state, cell.maint, now)
         })
-        .collect();
-    if monitor.maintenance.is_some()
-        && let Some(today) = days.last_mut()
-        && *today == b'u'
-    {
-        *today = b'm';
-    }
-    days
+        .collect()
 }
 
 /// Below this mean availability over a day (per mille), a group's day reads
@@ -1067,7 +1068,8 @@ fn fold_group_days(services: &[(Vec<u8>, Vec<Option<i64>>)]) -> Vec<u8> {
         .collect()
 }
 
-/// The bar's words: the period, the outages, the slow days.
+/// The bar's words, read after the service's name in its link: the period,
+/// the outages, the slow days.
 fn bar_label(monitor: &MonitorView) -> String {
     let outages = monitor
         .bar
@@ -1080,13 +1082,8 @@ fn bar_label(monitor: &MonitorView) -> String {
         .filter(|cell| cell.state == "degraded")
         .count();
     let mut label = match monitor.uptime_long_permille {
-        Some(permille) => format!(
-            "{}: {} up over {} days, ",
-            monitor.name,
-            pct(permille),
-            monitor.bar.len()
-        ),
-        None => format!("{}, last {} days: ", monitor.name, monitor.bar.len()),
+        Some(permille) => format!("{} up over {} days, ", pct(permille), monitor.bar.len()),
+        None => format!("Last {} days: ", monitor.bar.len()),
     };
     if outages == 0 && slow == 0 {
         label.push_str("no incident");
@@ -1170,8 +1167,8 @@ fn group_block<'a>(
         .collect();
     if compact {
         rows.sort_by(|a, b| {
-            urgency(a.state)
-                .cmp(&urgency(b.state))
+            a.urgency
+                .cmp(&b.urgency)
                 .then_with(|| a.m.name.cmp(&b.m.name))
         });
         if !group_page && !name.is_empty() {
@@ -1182,7 +1179,7 @@ fn group_block<'a>(
     let bar = if scale {
         day_bar(&group_day_classes(monitors))
     } else {
-        String::new()
+        Markup::default()
     };
     let measured: Vec<i64> = monitors.iter().filter_map(|m| m.uptime_permille).collect();
     let uptime = if measured.is_empty() {
@@ -1203,11 +1200,11 @@ fn group_block<'a>(
         } else {
             format!("/status/{}", hora_core::fmt::percent_encode(name))
         },
-        state,
+        state: state.class(),
         fact,
         fact_lead,
         fact_rest,
-        open: group_page || !matches!(state, "up" | "none"),
+        open: group_page || !matches!(state, DisplayState::Up | DisplayState::None),
         bar,
         uptime,
         rows,
@@ -1250,5 +1247,125 @@ mod group_bar_tests {
             (vec![b'u'], vec![Some(1000)]),
         ];
         assert_eq!(fold_group_days(&services), vec![b'n', b'u', b'm']);
+    }
+}
+
+#[cfg(test)]
+mod local_routing_tests {
+    use super::local_routing;
+
+    #[test]
+    fn the_footnote_says_where_a_local_only_down_goes() {
+        let config = |alerts: &str| {
+            hora_core::config::parse(&format!(
+                "[page]\n[server]\n[alerts]\n{alerts}\n\
+                 [[channels]]\nname = \"low\"\ntype = \"webhook\"\nurl = \"https://example.com/h\"\n\
+                 [[monitors]]\nid = \"web\"\nname = \"Web\"\n\
+                 target = \"https://example.com\"\ninterval_secs = 60\n"
+            ))
+            .expect("config")
+        };
+        // Unset: never silent.
+        let unset = local_routing(&config(""));
+        assert!(
+            unset.contains("still goes to the monitor's channels"),
+            "{unset}"
+        );
+        assert!(!unset.contains("does not page"), "{unset}");
+        let quiet = local_routing(&config("notify_unconfirmed = [\"low\"]"));
+        assert!(
+            quiet.contains("does not page the usual channels: it goes to low instead"),
+            "{quiet}"
+        );
+        let silent = local_routing(&config("notify_unconfirmed = []"));
+        assert!(
+            silent.contains("does not page the usual channels: it is only recorded"),
+            "{silent}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod maintenance_window_tests {
+    use std::collections::HashMap;
+
+    use chrono::{TimeDelta, Utc};
+
+    use super::{Ask, build};
+    use crate::summary::{BuildState, build_summary, for_group};
+
+    /// Two windows with the same title, one per group, running at once. The
+    /// hero used to find its window in the config by that title, so a
+    /// group's page took whichever ended first: the other group's hours.
+    #[tokio::test]
+    async fn a_group_page_shows_its_own_windows_hours() {
+        let now = Utc::now();
+        let at = |hours: i64| {
+            (now + TimeDelta::hours(hours))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        let config = hora_core::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            group = "Alpha"
+            target = "https://alpha.example.com"
+            interval_secs = 60
+            [[monitors]]
+            id = "db"
+            name = "Database"
+            group = "Beta"
+            target = "https://beta.example.com"
+            interval_secs = 60
+            [[maintenance]]
+            title = "Upgrade"
+            start = "{}"
+            end = "{}"
+            monitors = ["api"]
+            [[maintenance]]
+            title = "Upgrade"
+            start = "{}"
+            end = "{}"
+            monitors = ["db"]
+            "#,
+            at(-1),
+            at(5),
+            at(-2),
+            at(1),
+        ))
+        .expect("config");
+        let store = hora_core::db::Store::in_memory().await;
+        let built = build_summary(
+            &store,
+            &config,
+            &mut BuildState::default(),
+            &[],
+            &HashMap::new(),
+        )
+        .await;
+        let ask = Ask {
+            operator: false,
+            update: None,
+            token_given: false,
+            group_page: true,
+        };
+
+        // Alpha's window lasts six hours and ends in five; Beta's, three and one.
+        let alpha = for_group(&built.summary, &config, "Alpha").expect("group");
+        let page = build(&alpha, &config, &ask);
+        let window = page.window.expect("the hero is the maintenance window");
+        assert_eq!(window.length, 6 * 60);
+        assert_eq!(
+            window.end,
+            (now + TimeDelta::hours(5)).format("%H:%M").to_string()
+        );
+
+        let beta = for_group(&built.summary, &config, "Beta").expect("group");
+        let page = build(&beta, &config, &ask);
+        assert_eq!(page.window.expect("window").length, 3 * 60);
     }
 }

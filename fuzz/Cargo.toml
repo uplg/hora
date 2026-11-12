@@ -1,0 +1,148 @@
+# Coverage-guided fuzzing of what Hora parses from outside: `just fuzz`.
+#
+# A workspace of its own, so that the main `cargo` commands, `cargo deny` and
+# the release build never see libFuzzer. The targets reach private code
+# through the `fuzz` hooks of the crates, compiled only with `--cfg fuzzing`
+# (which `cargo fuzz` sets).
+
+[package]
+name = "hora-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arc-swap = "1.9.2"
+axum = "0.8.9"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+hora-core = { path = "../crates/hora-core", features = ["test-support"] }
+hora-notify = { path = "../crates/hora-notify" }
+hora-web = { path = "../crates/hora-web" }
+reqwest = { version = "0.13.5", default-features = false }
+serde_json = "1.0.151"
+serde_json_path = "0.7.2"
+tokio = { version = "1.53.1", default-features = false, features = ["rt", "sync"] }
+toml = "1.1.6"
+tower = { version = "0.5.3", features = ["util"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[profile.release]
+debug = 1
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "config_parse"
+path = "fuzz_targets/config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "schedule"
+path = "fuzz_targets/schedule.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text"
+path = "fuzz_targets/text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "numbers"
+path = "fuzz_targets/numbers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "histogram"
+path = "fuzz_targets/histogram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "budget"
+path = "fuzz_targets/budget.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "maintenance"
+path = "fuzz_targets/maintenance.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_assert"
+path = "fuzz_targets/http_assert.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "remote_json"
+path = "fuzz_targets/remote_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kuma_import"
+path = "fuzz_targets/kuma_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cert"
+path = "fuzz_targets/cert.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "starttls"
+path = "fuzz_targets/starttls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "notify_render"
+path = "fuzz_targets/notify_render.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_request"
+path = "fuzz_targets/web_request.rs"
+test = false
+doc = false
+bench = false

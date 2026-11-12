@@ -6,6 +6,8 @@ use axum::http::HeaderMap;
 use serde::Deserialize;
 
 use hora_core::config::Kind;
+use hora_core::mesh::fingerprint::check_fingerprint;
+use hora_core::mesh::wire::disclosed_target;
 use hora_core::status::MonitorState;
 
 use crate::AppState;
@@ -21,7 +23,7 @@ use crate::error::AppError;
         (status = 200, description = "This vantage's verdict on the target", body = hora_core::mesh::wire::ProbeResponse),
         (status = 400, description = "Exec and push monitors are not network probes"),
         (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token"),
-        (status = 404, description = "The target is not in this node's configuration")
+        (status = 404, description = "The target is not in this node's configuration, or not checked the way the request's `check` says")
     )
 )]
 pub(crate) async fn peer_probe(
@@ -46,10 +48,27 @@ pub(crate) async fn peer_probe(
     // The SSRF guard: only targets present in THIS node's configuration are
     // probed - a peer is a vantage point, never a proxy. The matched
     // monitor's own settings (timeout, assertions, proxy) drive the probe.
+    //
+    // Targets are compared as peers disclose them, secrets masked on both
+    // sides: a 0.12 node sends its target masked, a 0.11 node verbatim, and
+    // either finds the monitor. When the request says what it checks (its
+    // fingerprint), only a monitor that checks the same way answers: another
+    // monitor on the same URL - another expected status, another Host header -
+    // would confirm or contradict a verdict it knows nothing about. Without
+    // one (a 0.11 node, an ad-hoc `hora probe --confirm`) the first monitor
+    // on the target answers, as it always did.
+    let target = disclosed_target(&request.target);
     let monitor = config
         .monitors
         .iter()
-        .find(|monitor| monitor.kind() == request.kind && monitor.target() == request.target)
+        .find(|monitor| {
+            monitor.kind() == request.kind
+                && disclosed_target(monitor.target()) == target
+                && request
+                    .check
+                    .as_ref()
+                    .is_none_or(|check| check_fingerprint(monitor).as_ref() == Some(check))
+        })
         .ok_or(AppError::NotFound(
             "target not in this node's configuration",
         ))?;
@@ -84,6 +103,14 @@ pub(crate) async fn peer_probe(
             }));
         }
     };
+    // Out of descriptors or memory here: this vantage has no verdict, and
+    // "down" would be a false one. No answer is what the requester expects
+    // of a vantage that cannot see.
+    if outcome.is_local_fault() {
+        return Err(AppError::Unavailable(
+            "this node cannot run checks right now",
+        ));
+    }
     Ok(Json(hora_core::mesh::wire::ProbeResponse {
         up: outcome.is_up(),
         // Bounded: the reason crosses the wire into another node's logs.
@@ -103,7 +130,7 @@ pub(crate) struct PeerMonitorsQuery {
     params(("from" = String, Query, description = "The requesting peer's [health].id")),
     security(("push_token" = [])),
     responses(
-        (status = 200, description = "This node's probeable monitors, with its own view of each (status, 24h median)", body = hora_core::mesh::wire::PeerMonitors),
+        (status = 200, description = "This node's probeable monitors, with its own view of each (status, 24 h median)", body = hora_core::mesh::wire::PeerMonitors),
         (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token")
     )
 )]
@@ -117,8 +144,11 @@ pub(crate) async fn peer_monitors(
     authorize_peer(&config, &headers, &query.from)?;
 
     // What a mesh member may know: kind + target (it can probe those anyway
-    // via /api/peer/probe) and this node's live view of each - never names,
-    // notes or credentials. Push/exec monitors have no probeable target.
+    // via /api/peer/probe), the fingerprint of what each asserts (a digest:
+    // comparable, not readable) and this node's live view of each - never names,
+    // notes or credentials, including the ones a target URL carries
+    // (`user:pass@`, `?api_key=`), which are masked. Push/exec monitors have
+    // no probeable target.
     // Answered from the status snapshot the page is served from (its
     // statuses and 24h medians), never from the database.
     let summary = state
@@ -138,9 +168,10 @@ pub(crate) async fn peer_monitors(
             let view = views.get(monitor.id.as_str());
             hora_core::mesh::wire::PeerMonitor {
                 kind: monitor.kind(),
-                target: monitor.target().to_owned(),
+                target: disclosed_target(monitor.target()),
                 status: view.map_or(MonitorState::Unknown, |view| view.status),
                 p50_ms: view.and_then(|view| view.p50_ms),
+                check: check_fingerprint(monitor),
             }
         })
         .collect();

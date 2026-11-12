@@ -6,24 +6,150 @@
 
 use std::fmt::Write as _;
 
-use askama::Template;
 use hora_core::config::Config;
 use hora_core::db::Incident;
-use hora_core::fmt::xml_escape;
 use hora_core::mesh::wire::{HealthReport, HealthStatus, PeerState};
 
-use crate::layout::{Chrome, display_state, ms, word};
+use crate::display::DisplayState;
+use crate::layout::{Chrome, ms};
+use crate::page::{Document, glyph, raw, state};
 use crate::render::{OWL_PARTS as OWL, coord, owl};
 use crate::summary::Summary;
+use maud::{Markup, PreEscaped, html};
 
 /// Services listed in the per-place table, disagreements first.
 const MATRIX_ROWS: usize = 60;
 
-#[derive(Template)]
-#[template(path = "watchers.html")]
 pub(crate) struct WatchersTemplate {
     pub(crate) chrome: Chrome,
     pub(crate) page: WatchersPage,
+}
+
+impl WatchersTemplate {
+    /// The mesh as a picture, and the nodes one by one.
+    fn mesh(&self) -> Markup {
+        let page = &self.page;
+        html! {
+            div.meshgrid {
+                section.panel aria-labelledby="mp" {
+                    div.panel-head {
+                        h2 id="mp" { "The mesh" }
+                        span.aside { "As this node sees it" }
+                    }
+                    (page.map)
+                    div.key {
+                        span { i {} "Heartbeats flowing" }
+                        span { i.t {} "No heartbeat lately" }
+                        span { i.e {} "Heartbeats sent, not watched back" }
+                    }
+                }
+                section aria-labelledby="nd" {
+                    div.section-head { h2 id="nd" { "Nodes" } }
+                    ul.nodes {
+                        @for node in &page.nodes {
+                            li class={ "node " (node.state) } {
+                                (node.owl)
+                                span.n { (node.name) small { (node.id) } }
+                                span.s { (state(node.state, node.word)) }
+                                span.d { (node.detail) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Each shared service as each place sees it.
+    fn matrix(&self) -> Markup {
+        let page = &self.page;
+        html! {
+            div.tw.panel.table tabindex="0" role="region" aria-labelledby="lx" {
+                table.mx {
+                    thead { tr {
+                        th scope="col" { "Service" }
+                        @for column in &page.columns { th scope="col" { (column) } }
+                    } }
+                    tbody {
+                        @for row in &page.rows {
+                            tr class=[row.disagree.then_some("disagree")] {
+                                td { (row.name) }
+                                @for (state, text) in &row.cells {
+                                    td {
+                                        (glyph(state))
+                                        @if *state == "up" { (text) }
+                                        @else { span class={ "word " (state) } { (text) } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            @if page.rows_more > 0 {
+                p.more { "And " (page.rows_more) " more services watched from several places." }
+            }
+        }
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let (chrome, page) = (&self.chrome, &self.page);
+        let tile = |key: &str, value: usize, note: Markup| {
+            html! {
+                div.tile { span.k { (key) } span.v { (value) } span.n { (note) } }
+            }
+        };
+        let main = html! {
+            main id="main" class="page" {
+                nav.crumbs aria-label="Breadcrumb" {
+                    a href={ "/" (raw(chrome.q())) } { "Status" }
+                    span.sep aria-hidden="true" { "/" }
+                    span aria-current="page" { "Watchers" }
+                }
+                div.title {
+                    h1 { "Watchers" }
+                    span class={ "state-big " (page.state) } { (state(page.state, &page.state_word)) }
+                }
+                p.lede { (page.lede) }
+                (self.mesh())
+                section.section aria-labelledby="cf" {
+                    div.section-head {
+                        h2 id="cf" { "Confirmations, last 30 days" }
+                        span.fact { "When this node sees a service down, it asks the others first" }
+                    }
+                    div.stats {
+                        (tile("Asked", page.asked, html! { "times this node saw a service down" }))
+                        (tile("Confirmed", page.confirmed, state("down", "Real outages")))
+                        (tile("Local only", page.local, state("degraded", "Network near this node")))
+                        (tile("No answer", page.unconfirmed, state("none", "No peer could be asked")))
+                    }
+                }
+                section.section aria-labelledby="lx" {
+                    div.section-head {
+                        h2 id="lx" { "Each service, from each place" }
+                        span.fact { "Typical answer time over 24 h" }
+                    }
+                    @if page.rows.is_empty() {
+                        p.quiet-line {
+                            (glyph("none"))
+                            "No peer shares its view of these services yet. Peers report what they watch too, once they can be asked ("
+                            code { "/api/peer/monitors" }
+                            ")."
+                        }
+                    } @else {
+                        (self.matrix())
+                    }
+                }
+            }
+        };
+        Document::new(
+            chrome,
+            format!("Watchers · {} status", chrome.site),
+            "The Hora mesh: who watches what, and each other.".to_owned(),
+            main,
+        )
+        .render()
+    }
 }
 
 pub(crate) struct WatchersPage {
@@ -31,7 +157,7 @@ pub(crate) struct WatchersPage {
     pub(crate) state: &'static str,
     pub(crate) state_word: String,
     pub(crate) lede: String,
-    pub(crate) map: String,
+    pub(crate) map: Markup,
     pub(crate) nodes: Vec<Node>,
     pub(crate) asked: usize,
     pub(crate) confirmed: usize,
@@ -43,7 +169,7 @@ pub(crate) struct WatchersPage {
 }
 
 pub(crate) struct Node {
-    pub(crate) owl: String,
+    pub(crate) owl: Markup,
     pub(crate) name: String,
     pub(crate) id: String,
     pub(crate) state: &'static str,
@@ -68,17 +194,10 @@ struct PeerLink {
     link: &'static str,
 }
 
-/// Seconds at a human size: `21 s`, `6 min`, `3 h`.
+/// An age at a human size: `21 s`, `6 min`, `3 h`, `3 d`
+/// ([`hora_core::fmt::elapsed`]; a clock skew cannot make it negative).
 fn ago(secs: i64) -> String {
-    if secs < 60 {
-        format!("{} s", secs.max(0))
-    } else if secs < 3600 {
-        format!("{} min", secs / 60)
-    } else if secs < 2 * 86_400 {
-        format!("{} h", secs / 3600)
-    } else {
-        format!("{} days", secs / 86_400)
-    }
+    hora_core::fmt::elapsed(secs.max(0).unsigned_abs())
 }
 
 // One flat assembly of the page's parts; splitting it would only scatter it.
@@ -105,6 +224,10 @@ pub(crate) fn build(
         (true, false) => "The database does not answer.".to_owned(),
         (false, false) => "Scheduler stalled and database not answering.".to_owned(),
     };
+    if !health.probes_ok {
+        self_detail
+            .push_str(" Checks are being skipped: this host is out of file descriptors or memory.");
+    }
     if pinged > 0 {
         let _ = write!(
             self_detail,
@@ -270,42 +393,26 @@ pub(crate) fn build(
 /// The mesh drawn: this node in the middle, each peer around it, the link
 /// solid while heartbeats flow, dashed when they stopped. Only this node's
 /// own links are known here (a peer's view of another peer is not).
-fn map(self_name: &str, healthy: bool, links: &[PeerLink]) -> String {
+fn map(self_name: &str, healthy: bool, links: &[PeerLink]) -> Markup {
     // This node on the left, its peers fanned out on an arc to the right,
     // so no label sits on a link.
     const CX: f64 = 110.0;
     const CY: f64 = 190.0;
-    let mut edges = String::new();
-    let mut nodes = String::new();
+    let whole = |value: f64| format!("{value:.0}");
     let count = links.len();
-    for (index, link) in links.iter().enumerate() {
-        let spread = std::f64::consts::FRAC_PI_3;
-        let angle = if count > 1 {
-            -spread + 2.0 * spread * coord(index) / coord(count - 1)
-        } else {
-            0.0
-        };
-        let (x, y) = (CX + 330.0 * angle.cos(), CY + 160.0 * angle.sin());
-        let _ = write!(
-            edges,
-            "<path class=\"{}\" d=\"M{CX:.0} {CY:.0}L{x:.0} {y:.0}\"/>\
-             <text class=\"ll{}\" x=\"{:.0}\" y=\"{:.0}\" text-anchor=\"middle\">{}</text>",
-            link.link,
-            if link.state == "up" { "" } else { " split" },
-            f64::midpoint(CX, x) + 20.0,
-            f64::midpoint(CY, y) - 10.0,
-            xml_escape(&link.label),
-        );
-        let _ = write!(
-            nodes,
-            "<g transform=\"translate({x:.0} {y:.0})\"><circle class=\"ring\" r=\"34\"/>\
-             <svg class=\"owl\" data-state=\"{}\" viewBox=\"6 6 40 40\" width=\"48\" height=\"48\" \
-             x=\"-24\" y=\"-26\">{OWL}</svg>\
-             <text class=\"lab\" y=\"52\" text-anchor=\"middle\">{}</text></g>",
-            link.state,
-            xml_escape(&link.name),
-        );
-    }
+    let placed: Vec<(&PeerLink, f64, f64)> = links
+        .iter()
+        .enumerate()
+        .map(|(index, link)| {
+            let spread = std::f64::consts::FRAC_PI_3;
+            let angle = if count > 1 {
+                -spread + 2.0 * spread * coord(index) / coord(count - 1)
+            } else {
+                0.0
+            };
+            (link, CX + 330.0 * angle.cos(), CY + 160.0 * angle.sin())
+        })
+        .collect();
     let label = if links.is_empty() {
         format!("{self_name} watches alone: no peer configured.")
     } else {
@@ -321,18 +428,39 @@ fn map(self_name: &str, healthy: bool, links: &[PeerLink]) -> String {
             }
         )
     };
-    format!(
-        "<svg class=\"map\" viewBox=\"0 0 560 400\" role=\"img\" aria-label=\"{}\">\
-         {edges}\
-         <g transform=\"translate({CX:.0} {CY:.0})\"><circle class=\"ring me\" r=\"34\"/>\
-         <svg class=\"owl\" data-state=\"{}\" viewBox=\"6 6 40 40\" width=\"48\" height=\"48\" \
-         x=\"-24\" y=\"-26\">{OWL}</svg>\
-         <text class=\"lab\" y=\"52\" text-anchor=\"middle\">{}</text>\
-         <text class=\"sub\" y=\"67\" text-anchor=\"middle\">this Hora</text></g>{nodes}</svg>",
-        xml_escape(&label),
-        if healthy { "up" } else { "degraded" },
-        xml_escape(self_name),
-    )
+    // As tall as the fan of peers needs, no taller: one peer sits level with
+    // this node, and a fixed square left that drawing afloat in an empty card.
+    let reach = if count > 1 {
+        160.0 * std::f64::consts::FRAC_PI_3.sin()
+    } else {
+        0.0
+    };
+    let (top, height) = (CY - reach - 56.0, 2.0 * reach + 140.0);
+    // A node of the mesh: a ring, its owl, its name.
+    let node = |x: f64, y: f64, ring: &str, state: &str, name: &str, me: bool| {
+        html! {
+            g transform={ "translate(" (whole(x)) " " (whole(y)) ")" } {
+                circle class=(ring) r="34" {}
+                svg.owl data-state=(state) viewBox="6 6 40 40" width="48" height="48" x="-24" y="-26" {
+                    (PreEscaped(OWL))
+                }
+                text.lab y="52" text-anchor="middle" { (name) }
+                @if me { text.sub y="67" text-anchor="middle" { "this Hora" } }
+            }
+        }
+    };
+    html! {
+        svg.map viewBox={ "0 " (whole(top)) " 560 " (whole(height)) } role="img" aria-label=(label) {
+            @for (link, x, y) in &placed {
+                path class=(link.link) d={ "M" (whole(CX)) " " (whole(CY)) "L" (whole(*x)) " " (whole(*y)) } {}
+                text class=(if link.state == "up" { "ll" } else { "ll split" })
+                    x=(whole(f64::midpoint(CX, *x) + 20.0)) y=(whole(f64::midpoint(CY, *y) - 10.0))
+                    text-anchor="middle" { (link.label) }
+            }
+            (node(CX, CY, "ring me", if healthy { "up" } else { "degraded" }, self_name, true))
+            @for (link, x, y) in &placed { (node(*x, *y, "ring", link.state, &link.name, false)) }
+        }
+    }
 }
 
 /// Each shared service from each place: this node, then every peer that
@@ -351,16 +479,18 @@ fn matrix(summary: &Summary) -> (Vec<String>, Vec<MatrixRow>, usize) {
         .iter()
         .filter(|monitor| !monitor.vantages.is_empty())
         .map(|monitor| {
-            let here = display_state(monitor.status.as_str());
+            let here = DisplayState::from(monitor.status);
             let here_cell = match here {
-                "up" | "degraded" => monitor
+                DisplayState::Up | DisplayState::Degraded => monitor
                     .p50_ms
                     .or(monitor.last_latency_ms)
-                    .map_or_else(|| word(here).to_owned(), ms),
-                "down" => "Down here".to_owned(),
-                _ => word(here).to_owned(),
+                    .map_or_else(|| here.word().to_owned(), ms),
+                DisplayState::Down => "Down here".to_owned(),
+                DisplayState::Maint | DisplayState::None => here.word().to_owned(),
             };
-            let mut cells = vec![(here, here_cell)];
+            // What each peer that watches it sees; `None` where one does not.
+            let mut seen: Vec<DisplayState> = Vec::new();
+            let mut cells = vec![(here.class(), here_cell)];
             for peer in &peers {
                 cells.push(
                     match monitor
@@ -369,21 +499,23 @@ fn matrix(summary: &Summary) -> (Vec<String>, Vec<MatrixRow>, usize) {
                         .find(|vantage| &vantage.peer == peer)
                     {
                         Some(vantage) => {
-                            let state = display_state(vantage.status.as_str());
-                            let text = match (state, vantage.p50_ms) {
-                                ("up" | "degraded", Some(latency)) => ms(latency),
-                                _ => word(state).to_owned(),
+                            let state = DisplayState::from(vantage.status);
+                            let text = match vantage.p50_ms {
+                                Some(latency) if state.answers() => ms(latency),
+                                _ => state.word().to_owned(),
                             };
-                            (state, text)
+                            seen.push(state);
+                            (state.class(), text)
                         }
-                        None => ("none", "Not watched there".to_owned()),
+                        None => (DisplayState::None.class(), "Not watched there".to_owned()),
                     },
                 );
             }
-            let disagree = cells
+            // A peer without data takes no side.
+            let disagree = seen
                 .iter()
-                .filter(|(state, _)| *state != "none")
-                .any(|(state, _)| (*state == "down") != (here == "down"));
+                .filter(|state| **state != DisplayState::None)
+                .any(|state| (*state == DisplayState::Down) != (here == DisplayState::Down));
             MatrixRow {
                 name: monitor.name.clone(),
                 disagree,
@@ -408,6 +540,6 @@ mod tests {
         assert_eq!(ago(21), "21 s");
         assert_eq!(ago(360), "6 min");
         assert_eq!(ago(7200), "2 h");
-        assert_eq!(ago(3 * 86_400), "3 days");
+        assert_eq!(ago(3 * 86_400), "3 d");
     }
 }

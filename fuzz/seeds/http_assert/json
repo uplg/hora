@@ -1,0 +1,5 @@
+
+$.items[?(@.up == true)].name
+api
+
+{"items":[{"up":true,"name":"api"},{"up":false}]}

@@ -7,6 +7,494 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-12
+
+A hardening pass on who may do what with which token. Several configs that
+loaded on 0.11 no longer do: read the
+[upgrade notes](UPGRADES.md#0115--0120) and run `hora check` with the new
+binary first.
+
+It also closes four ways a real outage could go unannounced or be announced
+late, halves the size of the check history on disk, and reworks the monthly
+report and its PDF.
+
+And it went through a load campaign (300 monitors, a year of history, the
+image under a 64 MiB limit): the status page can no longer be used to make
+the monitoring lie or to get the daemon killed, and the pages that read the
+database serve five times as many visitors.
+
+### Fixed
+
+- **A flood of connections on the status page no longer turns every monitor
+  down.** Every connection is a file descriptor of the process that also
+  opens the checks' sockets, and one that connected and then said nothing
+  was kept for ever. With an open-files limit of 256, 400 idle connections
+  were enough: the checks failed with `Too many open files`, were recorded
+  as failures of their targets, and 280 monitors paged down, then recovered
+  when the connections left. Three things now stand in the way:
+  - **connections are bounded** (`server.max_connections`; by default 1024,
+    fewer in a small container, never more than half the open-files limit).
+    The ones beyond wait in the kernel's queue, where they cost nothing;
+  - **a connection that stops making progress is closed**: nothing sent 30 s
+    after connecting, a request not answered 60 s after its first byte (a
+    request trickled in a byte at a time no longer holds its slot), an
+    answer the client takes nothing of for 30 s, three minutes of silence on
+    a keep-alive connection;
+  - **a check that could not run for lack of resources here is not a failed
+    check**: out of descriptors, of socket buffers or of memory, it is
+    skipped - no row, no failure counted, no alert - and the node reports
+    itself degraded (`"probes_ok": false` on `/healthz`, which answers 503,
+    and stops its heartbeat) so its peers raise the one alert that is true.
+    A peer asked for its verdict in that state answers 503 rather than
+    "down".
+- **The pages no longer delay the alerts.** The status pages' queries are
+  the slow ones and anyone may ask for them; they shared the daemon's eight
+  database connections with the scheduler and the alert path. With a few
+  hundred visitors on `/history` and `/timeline`, each step of a
+  notification's delivery queued behind them: one notification a second
+  went out, then the channel's queue overflowed and notifications were
+  dropped. The pages now read through connections of their own, and what
+  must not wait (heartbeats received, the API's writes, `/healthz`) stays
+  on the daemon's. Under the same flood the first alert leaves 12 s after
+  the outage, as it does on an idle node, and heartbeats are recorded at
+  440 a second where 35 got through.
+- **A whole fleet going down no longer overflows a channel's queue.** A
+  channel held 256 waiting notifications and dropped the rest: one host
+  with 280 monitors on it was enough on a channel that takes a second to
+  deliver. It holds 4096. And a down that no channel took - every one
+  failed, ran into its deadline, or was full - is no longer lost until the
+  next restart: while the outage lasts it is sent again every ten minutes,
+  on the same incident, until one channel takes it. A channel that never
+  got a down is not sent its recovery either.
+- **One machine cannot take every connection.** A client address may hold
+  a quarter of `server.max_connections` (`server.max_connections_per_ip`;
+  an IPv6 client is its /64, loopback is never counted, and there is no
+  limit when `client_ip_header` says a proxy fronts Hora). The heartbeats
+  of jobs and peers come in by the same door as the visitors: with every
+  slot held by one client they timed out, and Hora announced a peer or a
+  job as silent that was not.
+- **A trusted peer cannot mute itself for good.** `accept_maintenance_secs`
+  bounded one window, not how many: a script on the peer planning "now,
+  for ten minutes" every minute kept its host silent indefinitely. A peer
+  now has four accepted lengths in any 24 hours (an hour a day at 900 s),
+  counted on the time actually muted, overlaps once; past it a window is
+  cut, then refused, and the alerts come back. A window the peer withdraws
+  while it runs is kept on record up to that moment. Time already muted
+  inside a new window is spent too: windows laid over one another no
+  longer get a fresh allowance for what sticks out.
+- **What fuzzing found.** Fifteen targets now feed arbitrary input to
+  everything Hora parses from outside (`just fuzz`; the config, requests,
+  peers' JSON, monitored servers' answers, alert texts):
+  - a `schedule` with a field that lists nothing (a stray comma) was
+    accepted, and looking for its next run walked every day up to the year
+    5000: eleven seconds of a scheduler thread on each tick of that push
+    monitor. It is refused at load;
+  - two heartbeats reporting a `ping` near the top of a 64-bit integer
+    overflowed a sum in SQLite, which answers with an error: every
+    monitor's sparkline was gone, and the daily roll-up failed for all of
+    them, for as long as the rows stayed. The sums are now computed in
+    floating point, and a `ping` over a day (86 400 000 ms) is refused with
+    a 400;
+  - the same figures overflowed the rounding of a latency (`1.8 s`), of
+    `hora tune`'s suggestion and of a stored latency histogram's
+    percentiles;
+  - a message exactly at a channel's size limit followed by a blank line
+    came out one character over, and the API refused it whole (Pushover at
+    1025 characters): the alert was lost;
+  - a URL whose query key held an encoded `&`, `=` or `+` was written back
+    decoded when its secrets were masked for a log, and read as another
+    query.
+- **`Authorization: bearer <token>` is accepted.** The scheme's name is
+  case-insensitive (RFC 9110); only `Bearer` was read.
+- **Concurrent readers of the database no longer queue behind one lock.**
+  The bundled SQLite kept allocation statistics, which put a process-wide
+  mutex around every allocation it made - and every column of every row
+  read is one. Eight connections reading at once were slower than one:
+  `/timeline` served 129 requests a second alone and 55 with eight
+  visitors, at 900 % CPU. SQLite is now built without them
+  (`SQLITE_DEFAULT_MEMSTATUS=0`, in `.cargo/config.toml`): 295 alone, 300
+  with eight or with fifty; `/history` and the latency API go from 265 to
+  1400.
+- **Request bodies can no longer fill the memory.** `/api/push/{id}` read
+  its body before looking at the token, up to 2 MiB: 300 slow uploads held
+  695 MiB. The body is now read only for a peer whose token matched, 64 KiB
+  at most, and a job's heartbeat body is not read at all (as on 0.11). The
+  JSON endpoints (`/api/monitors/{id}/alert`, `/api/peer/probe`) take
+  64 KiB and answer 413 beyond.
+- **A new snapshot is rendered once, not once per waiting request.** Every
+  few seconds each cached body is rendered again; a hundred requests in
+  flight each rendered their own copy of `/api/summary` - a megabyte each
+  on a large fleet, enough with the kernel's send buffers to get a 64 MiB
+  container killed. One renders, the others take it, and the send buffer of
+  a connection is fixed at 64 KiB instead of growing to megabytes for a
+  client that does not read.
+- **A missed heartbeat is announced when it is missed.** A push monitor
+  without a `schedule` was only looked at once per `interval_secs` - its
+  tolerance - and a miss then went through `fail_threshold` like a failed
+  check: with `interval_secs = 90000` for a nightly job, up to a day passed
+  before the miss was seen and two more before it was confirmed. Push
+  monitors are now evaluated at least every minute, and a heartbeat that did
+  not come is down at once, on the page and in the alert: its interval, or
+  its schedule's grace, was the tolerance. A job that pushes `status=down`
+  still needs `fail_threshold` evaluations (minutes now). The miss is
+  recorded once per interval, so availability counts it as one check. Found
+  through `@Jakob-Gliwa`'s fork.
+- **Live reload follows the config file however it is replaced.** The
+  watch is on the config's directory and on the file's name in it, and
+  moves when a link changes: a file rewritten by renaming a temporary one
+  over it (Ansible's `template`, most editors), one rewritten in place, and
+  a Kubernetes `ConfigMap` (a symlink swap) are all applied about a second
+  after the last write - a burst of events is one reload, and a file being
+  written is not read half-way. Other files in the directory, the database
+  among them, wake nothing. Where notifications cannot be trusted - NFS,
+  SMB, 9p, sshfs, some FUSE and overlay mounts, an overflowed event queue -
+  the file is also re-read every 60 s, so a missed event costs a minute at
+  most; a text that did not change is not parsed, and one that fails
+  validation is refused once, not every minute. A config bind-mounted as a
+  single file (`./config.toml:/etc/hora/config.toml`) cannot be followed
+  once the host replaces it: Hora now says so, once, as a warning at
+  startup, in `hora check` and in `hora doctor` (`reload`), with the remedy
+  - mount the directory. The same goes for a config on a network
+  filesystem. The watcher stops with the supervisor instead of living as
+  long as the process. From `@Jakob-Gliwa`'s fork.
+- **A down after a silenced recovery is announced.** A monitor alerted as
+  down, then silenced (or in maintenance), that came back up and failed
+  again kept its "down" level through the silence: the second outage opened
+  no incident and sent no alert, and only a "recovered" followed. The second
+  outage is now a new incident with its own alert, after the usual
+  `fail_threshold`. The same hole existed with `alert_on_degraded` when a
+  single slow answer interrupted an outage.
+- **A confirmed down survives a restart.** The incident is recorded before
+  the peers are asked and before the grouping window; a daemon stopped in
+  between found an open incident on its next start, took the down for
+  announced and sent only its recovery. Incidents now record whether their
+  alert went out (`incidents.notified`), and a start that finds an open,
+  unannounced incident confirms and announces it. On shutdown the alerts the
+  monitor loops send on their way out are handled before the daemon exits.
+- **A silent notification channel no longer delays the others.** Alerts were
+  delivered one after the other, each waiting for every channel: a webhook
+  that accepted the connection and never answered held each alert for three
+  15-second attempts, on the healthy channels too. Each channel now has its
+  own delivery queue (order kept within a channel, so a recovery never
+  overtakes its down), and one delivery is abandoned after 20 seconds.
+- **A rate-limited channel is retried when it says to.** A 429 was retried
+  after 200 ms and 400 ms, then the alert was dropped - typically while many
+  monitors went down at once. `Retry-After` is honoured (up to 5 seconds),
+  and a channel that keeps answering 429 is no longer counted as failing by
+  the channel watchdog.
+- **A pushed alert that could not be recorded can be retried.** The
+  anti-flood window opened before the database insert: when the insert
+  failed, the producer's retry was answered "coalesced" for an alert that
+  never existed.
+- **Maintenance banners no longer name private monitors.** An active
+  `[[maintenance]]` window listed every monitor it covered to every
+  audience: the public page, `/api/summary` and the text page named
+  `public = false` monitors, and a group's page named other groups'. A
+  window now lists only what the viewer may see, and is not announced to a
+  viewer who may see none of it.
+- **A group token opens what its pages link to.** `/incident/{id}`, the
+  latency series and the heatmap of a group's private monitor answered 404
+  to the group's own token. A group page also lists its own recent
+  incidents, rather than whichever of the three newest overall were its.
+- **A config reload keeps the page logo.** Any edit of the config dropped
+  `[page] logo` until the next restart.
+- **A failed daily roll-up no longer costs a day of history.** The hourly
+  buckets were pruned even when the daily roll-up they feed had just failed.
+- **Expiry alerts survive a restart, and a failed one is retried.** The
+  certificate and domain watchers remembered what they had warned about in
+  memory: every restart sent every expiring-certificate and domain alert
+  again, and an alert that no channel accepted was still counted as sent
+  until the next restart. The mark is now stored, and written only once a
+  channel accepted the alert: no repeat after a restart, a retry at the next
+  sweep (12 hours) while every channel fails, and a new alert when a renewed
+  certificate or domain nears its next expiry. The "certificate could not be
+  read" alert follows the same rule, and a release alert is recorded only
+  once delivered.
+- **An HTTP probe no longer follows a redirect into your network.** A
+  monitored site that answered `302 Location: http://10.0.0.5/...` (or
+  `169.254.169.254`, or `localhost`) had the probe fetch it from inside,
+  then store and show the answer in the incident. A target on a public
+  address that redirects to a loopback, link-local, private (RFC 1918,
+  `fc00::/7`), carrier-grade NAT or unspecified address is now a down,
+  `redirected to a private address`. A target that is itself on such an
+  address redirects wherever it likes, as before. The RDAP and release
+  lookups follow the same rule.
+- **Discord alerts are escaped.** A monitor called `my_db_primary` came out
+  with `db` in italics, and the text of a pushed alert could plant a masked
+  link under Hora's name. Markdown in names, reasons and alert text is now
+  shown as typed.
+- **The webhook's `days_left` tells an expired certificate from one about to
+  expire.** It was 0 both 23 hours before and 23 hours after the expiry. It
+  is now rounded down (0 during the last day, -1 once expired), and
+  `secs_left` gives the exact figure.
+- Resolving a host is bounded by the monitor's timeout for ICMP and
+  per-family TCP probes; every incident left open for a monitor is closed
+  on its recovery, not only the one the loop held.
+- The response-time chart places its points at their time (deploy markers
+  sat at the wrong place across a gap), scales from zero and has axes.
+- **`hora check` shows the warnings.** It installed no log output, so what
+  the loader only warns about (a timeout longer than its interval, a
+  channel over cleartext http, a `${VAR}` that is not set) was lost:
+  the command printed "valid" for a config that warns. Each warning is now
+  printed and counted ("config.toml is valid, 2 warnings."), still with
+  exit 0; see `--strict` under *Added*.
+- **A notifier reads at most 4 KiB of a rejection.** A channel that
+  answered an error had its whole body read to log 200 characters of it: a
+  broken or hostile endpoint could make the daemon buffer as much as it
+  cared to send, or hold the delivery while it trickled.
+- **Logs are coloured only on a terminal.** `docker logs`, journald and a
+  redirected file no longer get ANSI escape codes in every line. A
+  non-empty `NO_COLOR` turns the colours off on a terminal too.
+
+### Added
+
+- **Planned maintenance by API, announced to peers.** A host that knows it
+  will reboot says so once to its local Hora -
+  `POST /api/maintenance?host=frank&starts_at=...&duration=10m&reason=...`,
+  or `hora maintenance plan --host frank --at ... --for 10m "kernel reboot"` -
+  and the window behaves like a `[[maintenance]]` one of the config: alerts
+  muted, checks recorded, *Planned maintenance* on the status page (*Next*
+  before it starts), the day marked in the bars and the monthly report, a
+  line in the timeline. `GET /api/maintenance` / `hora maintenance list`
+  show the planned and active windows, `DELETE /api/maintenance/{id}` /
+  `hora maintenance cancel <id>` withdraw one; planning the same window
+  twice returns the first. A selector is `monitors=<ids|all>` or
+  `host=<name>`, with a new optional `host` label on `[[monitors]]`,
+  `[health]` and `[[peers]]`. A node carries the windows of its own host on
+  its heartbeat, and a peer that sets the new `accept_maintenance_secs` on
+  its `[[peers]]` entry stays quiet with it: no *peer silent* alert, and no
+  alert for its own monitors labelled with that peer's host - for at most
+  that many seconds, and never for any other monitor. If the host is not
+  back when the window ends, everything alerts as usual. See
+  [planned maintenance of a host](https://uplg.github.io/hora/guides/peers/#planned-maintenance-of-a-host).
+- **`hora check --strict`** exits non-zero when the config loads with at
+  least one warning, for a pipeline that wants a config the daemon starts
+  on without a word.
+- **`${VAR:-fallback}` in the config.** The fallback stands in when the
+  variable is unset or empty; `${VAR:-}` is how a value says it is
+  optional, and warns about nothing.
+- **`server.view_token`: a read-only token.** It opens every monitor on the
+  read-only views - private ones and their failure detail included - and
+  nothing else: no write endpoint accepts it, and it does not show the
+  operator's streams (event markers, silences, channel health, `/watchers`).
+  The one for a wall display's `?token=` URL or a colleague. Until now the
+  only token that showed a private monitor was `server.auth_token`, which
+  also mutes alerts and pins banners; a kiosk URL carried all of it.
+- **`allow_unauthenticated = true`** on a push monitor or a watched peer:
+  the explicit way to accept heartbeats on the id alone (see *Changed*).
+- **Failed authentications are logged.** A request that presented a
+  credential and was answered 401 leaves one `WARN authentication failed`
+  line with the client address and the route - never the token, nor the
+  query string. It sits behind the rate limiter.
+- **`fail_threshold` on a monitor.** `[alerts] fail_threshold` was the same
+  for every monitor; a `[[monitors]]` entry may now set its own (at least
+  1): `fail_threshold = 1` for a service whose first failed check is
+  already an outage, more for one known to flap. The alert, the status on
+  the page, the badge and `alert_on_degraded` all go by it, and an upstream
+  (`depends_on`) is the cause of its dependents' alerts once it is down by
+  its own value - it used to be judged by the threshold of the monitor that
+  was alerting. A missed heartbeat still waits for none, and watched peers
+  keep the global one. `hora tune` replays from the monitor's value and
+  says where to write the one it recommends; `hora import kuma` turns
+  `maxretries` into it. The idea comes from `@Jakob-Gliwa`'s fork.
+- **`expected_status` takes a list, and `method = "HEAD"`.** An HTTP monitor
+  can accept several answers - `expected_status = [200, 401]`, or with a
+  class, `["2xx", 401]` - where it took one status; the single form is
+  unchanged. A list that holds a 3xx judges the first answer, without
+  following redirects, like `expected_status = 301` always did. `method`
+  is `"GET"` (the default) or `"HEAD"`, kept on every hop of a redirect
+  chain; a `HEAD` with a body assertion (`keyword`, `json_query`,
+  `number_regex`) is refused at load, and there is no other method, since
+  Hora sends no request body. Both are part of what peers compare before
+  confirming a down, and `hora peers diff` reports a difference as *same
+  target, checked differently*; a monitor that sets neither keeps the
+  fingerprint it had. `hora probe` takes `--method` and `--expect` for an
+  ad-hoc target, and `hora import kuma` now keeps Kuma's accepted status
+  codes (codes and whole classes) and a `HEAD`. From `@Jakob-Gliwa`'s
+  fork, which had them as `expected_statuses` and a free-form `method`.
+
+### Changed
+
+- **The pages are written with maud instead of askama templates.** Markup
+  is Rust now: a component is a function that takes typed values, a tag
+  left open does not compile, and escaping is the macro's everywhere - the
+  drawings built in Rust no longer pass through a `|safe` that trusted
+  whoever wrote them. Nothing changes for a visitor: every page was
+  compared with the previous build, tag for tag and word for word, on four
+  sets of data (all well, outages and maintenance, nothing configured,
+  everything private).
+- **`/api/summary` reads a page as the page does.** `overall` folded the
+  raw statuses: a monitor down inside a planned maintenance window made it
+  `down` ("Major outage") while the status page said maintenance, and one
+  monitor without data yet made it `unknown` while the page said all was
+  well. It is now the page's own rule, with a new value: `maintenance`
+  ("Planned maintenance") when nothing is slow or down outside a window.
+  A down seen from this node only counts as up, as on the page. A script
+  that matches `overall` should expect the fifth value.
+- **One wording for the same thing.** Uptime is `100 %`, not `100.0 %` on
+  some pages; a latency over a second is `1.8 s` in `curl`, `hora top` and
+  `hora probe` as on the page (it was `1800 ms`); `hora top` shows a
+  monitor inside a maintenance window as in maintenance. A silence now
+  mutes a monitor's certificate, domain and release alerts too, as a
+  maintenance window always did.
+- **A channel disabled by an empty secret says so.** An unset `${VAR}`
+  expands to nothing, and a channel left with an empty token or URL is left
+  out while the others keep working: that has not changed, since the config
+  can be fixed and reloaded while the daemon runs. But the only trace was a
+  warning that named the variable and neither the key nor the channel, so a
+  typo in a variable's name was enough for an alert channel to vanish
+  unnoticed. The load (and every reload) now warns twice, by name:
+  `channels[1].token: environment variable GOTFY_TOKEN is not set (write
+  ${GOTFY_TOKEN:-} if it is optional, or ${GOTFY_TOKEN:-fallback} for a
+  default)` and `channel phone: token is empty, the channel is disabled
+  until it is set`. A variable whose value is not valid Unicode, and a
+  `${...}` that names no variable (left as written), are warned about the
+  same way. `hora check` prints and counts these warnings, and `hora check
+  --strict` exits non-zero on them; `hora doctor` lists the disabled
+  channels.
+- **The peer probe request no longer carries credentials.** To confirm a
+  down, a node sent each peer the monitor's target verbatim: a peer that
+  did not have that monitor learned the `user:pass@` or `?api_key=...` of
+  its URL. The target is now sent masked, and the peer compares masked on
+  both sides (see the [upgrade notes](UPGRADES.md#0115--0120) for a mesh on
+  two versions).
+- **A peer confirms a down only for a monitor that checks the same way.**
+  The peer answered with its first monitor on the same kind and target,
+  whatever that one asserted: another expected status, a body assertion, a
+  `Host` header. Its "up" could then make a real down local-only, and its
+  "down" confirm one it knew nothing about. The request now carries a
+  fingerprint of the check (target, expected status, assertions, headers,
+  address families, DNS record and pinned answer, STARTTLS protocol; not
+  timeouts, intervals or the proxy), and a peer with no monitor of that
+  fingerprint answers as for a target it does not watch.
+  `/api/peer/monitors` lists the fingerprint as `check`, and `hora peers
+  diff` reports "same target, checked differently" as drift.
+- **Gotify, ntfy and Pushover titles name the monitor.** Every notification
+  was titled "Hora Alert", so a phone's notification list showed the same
+  line for each. The title is now the event's headline ("API is DOWN",
+  "API recovered") and the body the detail, without the headline repeated.
+  A Pushover title is cut at its 250-character limit; an ntfy title a
+  header cannot carry (a control character in a monitor's name) falls back
+  to the fixed one, with the headline in the body. Idea from
+  `@ariakeumi`'s fork.
+- **`/api/peer/monitors` masks the secrets in targets.** A peer was listed
+  every monitor's target verbatim, `user:pass@` and `?api_key=...`
+  included. They are now masked (`***`), and `hora peers diff` and the
+  per-vantage view compare targets masked on both sides (see the
+  [upgrade notes](UPGRADES.md#0115--0120) for a mesh on two versions).
+- **The status summary is rebuilt less often when nobody looks.** It was
+  rebuilt every 5 seconds around the clock, a query per monitor each time.
+  With no page view, API call or scrape since the last build, the next one
+  waits 30 seconds; the first request after such a stretch waits for a
+  rebuild (up to 2 seconds) rather than be shown the old page. A reader may
+  now see data up to 10 seconds old, where it was 5.
+- **The check history takes half the disk.** `checks` is now a table
+  clustered on (monitor, time), without the three indexes that repeated it:
+  125 to 57 bytes per check on a real database, and half the WAL volume per
+  insert. The first start after the upgrade rewrites the table (see the
+  [upgrade notes](UPGRADES.md#0115--0120)). The page cache is 4 MiB per
+  connection instead of 16: at most 32 MiB for the daemon, where a large
+  database could take it to 128.
+- **Responses are gzipped** for clients that accept it (pages, JSON,
+  metrics, the stylesheet), except fonts and a credentialed viewer's own
+  responses.
+- **The monthly report** was rebuilt for the screen (one lead figure, columns
+  aligned across groups, a labelled block per service on a phone) and for
+  paper: table headers repeat on each page, no row or note is left alone
+  across a page break, groups no longer each start a page.
+- **Interface.** The wordmark is drawn rather than set in its own font (one
+  69 KB font fewer on every page); the day strip has touch-sized links to
+  its eventful days; the heatmap's labels are legible on a phone and its
+  slowest hours are listed; meter tracks are visible; one tab stop per
+  service row. The operator panel for a local-only down is titled *Why this
+  is not an outage*.
+- **`x-forwarded-for` is read from the right.** With
+  `client_ip_header = "x-forwarded-for"` the rate limiter keyed on the
+  *first* address of the list - the one part a client writes itself: behind
+  a proxy that appends, a new value per request meant a new bucket per
+  request, and no limit on guessing a token. It now reads the entry your
+  proxy wrote: the last one, or the Nth from the right with the new
+  `server.trusted_proxies = N` (default 1) when several of your proxies
+  append. Single-valued headers (`x-real-ip`, `cf-connecting-ip`) are
+  unaffected.
+- **The heatmap is one hue.** Its five tiers are a single petrol ramp, each
+  step clearly further from the page than the last in both themes, so they
+  still read in greyscale; the red that means "down" no longer also means
+  "five times slower".
+- **A request is answered within 30 seconds** or gets a 503, and shutdown is
+  bounded: background tasks are told to stop at once, in-flight requests get
+  10 seconds, and the alert queues up to a minute to empty.
+- **`cert_expiry_days` is never 0.** A certificate in its last day read as
+  expired on the page, in `/api/summary` and in `hora_cert_expiry_days`. The
+  figure is now at least 1 while the certificate is valid and at most -1
+  once it has expired, and the page counts the last day in hours.
+- **A node that can no longer alert stops sending its heartbeat.** The
+  dead-man heartbeat (to the peers and to `health.heartbeat_url`) was only
+  withheld on a stalled scheduler or a broken database. It is now withheld
+  too when every notification channel has reached `channel_fail_threshold`:
+  the node still probes, but nobody would hear of an outage, and the peer or
+  the external watchdog says so. `health.heartbeat_url` is validated at
+  load. Both ideas from `@Jakob-Gliwa`'s fork.
+- **CI**: every job has a deadline, and the apt step is skipped when the
+  runner already has cmake and clang (from `@Jakob-Gliwa`'s fork).
+- **Push monitors and watched peers require a token.** A push monitor
+  without `push_token`, or a peer with `expect_every_secs` and no
+  `listen_token`, used to load with a warning and accept a heartbeat from
+  anyone who knew its id - and the id is on the status page, the API or
+  `/healthz`. Such a config no longer loads, unless it says
+  `allow_unauthenticated = true` on that monitor or peer. `hora import`
+  writes that line for a Kuma push monitor whose token is missing or too
+  short.
+- **Access tokens of fewer than 16 characters are refused** at load:
+  `server.auth_token`, `server.view_token`, `[server.group_tokens]`,
+  `push_token` and `listen_token`. They only warned. An outbound
+  `ping_token` still only warns: its length is the receiver's rule.
+- **A local-only down is no longer silent by default.** With
+  `confirm_with_peers`, a down that every peer that answered sees up went
+  to `alerts.notify_unconfirmed`, or nowhere when that key was not set: one
+  peer answering "up" was enough to hide an outage from everyone. Without
+  the key it now goes to the monitor's own channels, flagged as local-only
+  (the wording, and `local_only` in the webhook, are unchanged), and so does
+  its recovery. `notify_unconfirmed = ["<channel>"]` still sends it to a
+  quiet channel instead; `notify_unconfirmed = []` keeps the previous
+  behaviour: recorded, sent nowhere.
+- **A peer that confirms downs must be reached over https.** With
+  `confirm_with_peers` on (in `[health]` or on any monitor), a peer whose
+  `ping_url` is `http://` is refused at load: on cleartext anyone on the
+  path can answer "up" for the peer. `localhost`, `127.0.0.0/8` and `::1`
+  stay allowed. Without confirmation an http `ping_url` still only warns.
+- A private monitor (`public = false`) loads with either `server.auth_token`
+  or `server.view_token` set.
+- **A duration is written one way.** The same outage read "3 h 07 min" on
+  the pages, "3h 7m" in the CLI, the Atom feed, post-mortems and
+  notifications, and "3h07m" in the error-budget label. Every duration a
+  person reads is now written the SI way: the symbols `d`, `h`, `min`, `s`,
+  a space between a number and its unit, no padding, the two largest units
+  and no zero second one ("3 h 7 min", "2 h", "42 s", "1 d 2 h").
+  Percentages and latencies take the same space where they did not
+  ("99.97 %", "812 ms"), and an expiry warning reads "expires in 3 d".
+  Numbers a program reads, and the durations you type (`hora silence api
+  2h30m`), are unchanged (see the
+  [upgrade notes](UPGRADES.md#0115--0120)).
+
+### Removed
+
+- **`?token=` on write endpoints**, deprecated in 0.11.0. `POST
+  /api/push/{id}`, `/api/monitors/{id}/alert`, `/api/silence`,
+  `/api/event`, `/api/peer/probe` and `POST`/`DELETE /api/announce` answer
+  401 to any request with a `token` query parameter - even a valid one,
+  even next to a valid header - with a body naming the header to use
+  (`Authorization: Bearer`, or `X-Push-Token` for a push or peer token).
+  The `Deprecation` and `Link` response headers go with it. Read-only views
+  keep `?token=`.
+
+## [0.12.0-beta.1] - 2026-11-12
+
+A preview of 0.12 for testing on real nodes before the release: everything
+listed under [0.12.0] above, as it stood on that day. Not for a node you
+cannot roll back - the migrations are one-way (back up `hora.db` first, see
+the [upgrade notes](UPGRADES.md#0115--0120)).
+
 ## [0.11.5] - 2026-11-12
 
 One fix: an HTTP monitor could stay down on a target that answered, until
@@ -217,7 +705,7 @@ check before upgrading.
   lasts; once they no longer all see it up, the real down goes out, once.
   A recovery goes to whoever received a down, across a daemon restart too
   (the routing is kept on the incident, migration `0022`, instant). The
-  operator panel *Why nobody was woken* says what the config does with such
+  operator panel *Why this is not an outage* says what the config does with such
   a down.
 - **Probe failures name their cause.** *connection failed: connection
   refused*, *connection failed: TLS invalid peer certificate: Expired*
@@ -1416,7 +1904,9 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.11.5...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0
+[0.12.0-beta.1]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0-beta.1
 [0.11.5]: https://github.com/uplg/hora/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/uplg/hora/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/uplg/hora/compare/v0.11.2...v0.11.3

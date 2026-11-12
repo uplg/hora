@@ -53,7 +53,9 @@ impl LatencyHistogram {
         if self.counts.len() <= bucket {
             self.counts.resize(bucket + 1, 0);
         }
-        self.counts[bucket] += count;
+        // Saturating, here and wherever counts are summed: a count is read
+        // back from a stored blob, which may hold anything.
+        self.counts[bucket] = self.counts[bucket].saturating_add(count);
     }
 
     /// Add every sample of `other`.
@@ -62,7 +64,7 @@ impl LatencyHistogram {
             self.counts.resize(other.counts.len(), 0);
         }
         for (mine, theirs) in self.counts.iter_mut().zip(&other.counts) {
-            *mine += theirs;
+            *mine = mine.saturating_add(*theirs);
         }
     }
 
@@ -82,7 +84,9 @@ impl LatencyHistogram {
     /// How many samples were recorded.
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.counts.iter().sum()
+        self.counts
+            .iter()
+            .fold(0, |total: u64, count| total.saturating_add(*count))
     }
 
     #[must_use]
@@ -98,10 +102,12 @@ impl LatencyHistogram {
         if n == 0 {
             return None;
         }
-        let rank = (p * n).div_ceil(100).clamp(1, n);
-        let mut seen = 0;
+        // In 128 bits: `p * n` passes `u64` from 2^57 samples on.
+        let rank = (u128::from(p) * u128::from(n)).div_ceil(100);
+        let rank = u64::try_from(rank).unwrap_or(n).clamp(1, n);
+        let mut seen: u64 = 0;
         for (bucket, &count) in self.counts.iter().enumerate() {
-            seen += count;
+            seen = seen.saturating_add(count);
             if seen >= rank {
                 return Some(midpoint(u64::try_from(bucket).unwrap_or(u64::MAX)));
             }
@@ -317,6 +323,30 @@ mod tests {
             first.record(value, 2);
         }
         assert_eq!(a, first);
+    }
+
+    /// A stored blob holds whatever counts its bytes say. Found by the
+    /// `histogram` fuzz target: two buckets of 2^62 samples overflowed the
+    /// rank (`p * n`), and merging the blob twice overflowed a bucket.
+    #[test]
+    fn counts_beyond_any_real_sample_count_saturate() {
+        let mut blob = vec![ENCODING_V1];
+        for (delta, count) in [(0, 1 << 62), (3, 1 << 62)] {
+            write_varint(&mut blob, delta);
+            write_varint(&mut blob, count);
+        }
+        let mut hist = LatencyHistogram::decode(&blob).expect("well formed");
+        assert_eq!(hist.len(), 1 << 63);
+        assert_eq!(hist.p50_p95_p99(), Some((0, 3, 3)));
+        // A day of such hours: every sum stops at the top instead of wrapping.
+        for _ in 0..4 {
+            hist.merge_encoded(&blob).expect("well formed");
+        }
+        hist.merge(&hist.clone());
+        hist.record(3, u64::MAX);
+        assert_eq!(hist.len(), u64::MAX);
+        assert!(hist.p50_p95_p99().is_some());
+        assert_eq!(LatencyHistogram::decode(&hist.encode()), Some(hist));
     }
 
     #[test]

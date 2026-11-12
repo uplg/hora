@@ -134,3 +134,26 @@ async fn bodies_are_rendered_once_per_snapshot_and_audience() {
         "{metrics}"
     );
 }
+
+/// A request that waits (here: on the first build, with a deadline it cannot
+/// meet) is answered 503 with the usual headers, instead of holding its
+/// connection as long as the wait lasts. Before the deadline existed, such a
+/// request also held a graceful stop until the process was killed.
+#[tokio::test]
+async fn a_request_past_its_deadline_is_answered_503() {
+    let store = hora_core::db::Store::in_memory().await;
+    let config = Arc::new(hora_core::config::parse(TWO).expect("config"));
+    let client = hora_core::http::client(None).expect("client");
+    let notifier = hora_core::notifications::shared(&config, &client);
+    let (_tx, rx) = watch::channel(config);
+    let state = AppState::new(store, rx, Arc::new(AtomicU64::new(fresh_tick())), notifier);
+    let app = crate::routes::router_with_deadline(state, std::time::Duration::ZERO);
+
+    let res = app.clone().oneshot(get("/api/summary")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Cut inside the global layers: it is an answer like any other.
+    assert!(res.headers().contains_key("content-security-policy"));
+    assert!(res.headers().contains_key("x-request-id"));
+    // Not the starting node's 503 (that one is not a failure to log).
+    assert!(res.extensions().get::<crate::routes::Starting>().is_none());
+}

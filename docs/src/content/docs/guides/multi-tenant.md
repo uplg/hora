@@ -32,7 +32,8 @@ like any viewer token (`Authorization: Bearer` or `?token=`):
 https://status.example.com/status/Clients%20ACME?token=...
 ```
 
-The global `server.auth_token` always works too. Tokens are validated at
+The global `server.auth_token` and the read-only `server.view_token` always
+work too. A group token is at least 16 characters, like every access token. Tokens are validated at
 load: an entry for a group no monitor belongs to fails startup (that is a
 typo, not a plan).
 
@@ -53,7 +54,7 @@ https://status.example.com/report/2026-05?group=Clients%20ACME&token=...
 The same report exists as text:
 
 ```sh
-hora report            # last month - "here is your May report, 99.95%"
+hora report            # last month - "here is your May report, 99.95 %"
 hora report 2026-05    # any month within the one-year aggregate retention
 ```
 

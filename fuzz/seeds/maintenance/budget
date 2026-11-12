@@ -1,0 +1,8 @@
+A{"maintenance": [{"id": 0, "starts_at": 1800000000, "ends_at": 1800000900, "reason": "x", "host": "beta"}]}
+T600
+A{"maintenance": [{"id": 1, "starts_at": 1800000600, "ends_at": 1800001500, "reason": "x", "host": "beta"}]}
+T600
+A{"maintenance": [{"id": 2, "starts_at": 1800001200, "ends_at": 1800002100, "reason": "x", "host": "beta"}]}
+T600
+A{"maintenance": [{"id": 3, "starts_at": 1800001800, "ends_at": 1800002700, "reason": "x", "host": "beta"}]}
+T600

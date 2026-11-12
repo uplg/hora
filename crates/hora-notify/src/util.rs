@@ -1,5 +1,7 @@
 //! Shared helpers for the built-in notifiers.
 
+use std::time::Duration;
+
 use reqwest::{Client, RequestBuilder};
 use serde::Serialize;
 use tracing::warn;
@@ -12,21 +14,29 @@ pub(crate) fn escape(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// `"2d 3h"`, `"6h"`, `"45m"`, `"30s"` - coarse on purpose: it phrases a burn
-/// estimate and how long a channel has been failing, not a measurement.
+/// `"2 d 3 h"`, `"6 h"`, `"45 min"`, `"30 s"` - a span in SI notation, coarse
+/// on purpose: it phrases a burn estimate, the time a certificate has left
+/// and how long a channel has been failing, not a measurement. One unit under
+/// two days, days and hours from there (`"2 d"` on the hour).
 ///
 /// Twin of `hora_core::fmt::elapsed` (hora-notify sits below hora-core and
-/// cannot call it): keep both outputs identical so a span reads the same in a
-/// notification and in `hora top`.
-pub(crate) fn human_duration(secs: u64) -> String {
+/// cannot call it), so a span reads the same in a notification and in
+/// `hora top`. Public, though no part of the notifier API, so that hora-core
+/// can hold the two together: its `the_notify_twin_writes_the_same_spans`
+/// test fails when either one changes alone.
+#[must_use]
+pub fn human_duration(secs: u64) -> String {
     if secs >= 2 * 86_400 {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
+        match (secs % 86_400) / 3600 {
+            0 => format!("{} d", secs / 86_400),
+            hours => format!("{} d {hours} h", secs / 86_400),
+        }
     } else if secs >= 3600 {
-        format!("{}h", secs / 3600)
+        format!("{} h", secs / 3600)
     } else if secs >= 60 {
-        format!("{}m", secs / 60)
+        format!("{} min", secs / 60)
     } else {
-        format!("{secs}s")
+        format!("{secs} s")
     }
 }
 
@@ -102,6 +112,48 @@ impl std::fmt::Display for PayloadRejected {
 
 impl std::error::Error for PayloadRejected {}
 
+/// Marker error for a notification the API kept answering 429 to. Like
+/// [`PayloadRejected`], the channel itself is alive - it is asking us to slow
+/// down, typically while many monitors go down at once - so the dispatcher
+/// does not count it toward the channel's failure streak. Still logged and
+/// returned as a delivery failure.
+#[derive(Debug)]
+pub(crate) struct RateLimited(pub String);
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
+/// Whether a delivery error says nothing about the channel's health (see
+/// [`PayloadRejected`] and [`RateLimited`]).
+pub(crate) fn spares_health(err: &anyhow::Error) -> bool {
+    err.is::<PayloadRejected>() || err.is::<RateLimited>()
+}
+
+/// The longest a `Retry-After` is honoured for. An outage alert must still go
+/// out promptly, and the whole delivery has to fit the dispatcher's
+/// per-channel deadline.
+const RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
+
+/// The wait a 429 asks for: its `Retry-After` in whole seconds (the form the
+/// chat APIs send), capped at [`RETRY_AFTER_CAP`]. `None` when the header is
+/// absent or in another form, which falls back to the short backoff.
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    let seconds: u64 = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds).min(RETRY_AFTER_CAP))
+}
+
 /// Delivery attempts: the initial send plus two retries. The caller marks the
 /// alert as sent regardless of the outcome, so a transient blip here would
 /// otherwise silently drop the notification.
@@ -114,7 +166,8 @@ const MAX_ATTEMPTS: u32 = 3;
 /// is logged (it usually says *why*, e.g. "chat not found").
 ///
 /// Transient failures (a network error, an HTTP 5xx, or 429) are retried with a
-/// short backoff. Client errors (4xx other than 429) are permanent, so they are
+/// short backoff; a 429 that carries `Retry-After` waits that long instead
+/// (capped). Client errors (4xx other than 429) are permanent, so they are
 /// reported immediately without retrying. Every notifier goes through here, so
 /// they all share one retry and redaction policy.
 /// The failure is both logged here (one policy for the daemon, which fires and
@@ -135,16 +188,25 @@ where
                 let status = response.status();
                 let transient =
                     status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                let throttled = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
                 if transient && attempt < MAX_ATTEMPTS {
-                    backoff(attempt).await;
+                    // A rate limit names its own wait; retrying sooner only
+                    // burns the remaining attempts against the same limit.
+                    match retry_after(&response).filter(|_| throttled) {
+                        Some(wait) => tokio::time::sleep(wait).await,
+                        None => backoff(attempt).await,
+                    }
                     continue;
                 }
-                let body = response.text().await.unwrap_or_default();
+                let body = rejection_body(response).await;
                 let detail = redact(&snippet(&body), secrets);
                 warn!("{channel} rejected the notification (HTTP {status}): {detail}");
                 let message = format!("rejected (HTTP {status}): {detail}");
                 if payload_rejected(status) {
                     return Err(PayloadRejected(message).into());
+                }
+                if throttled {
+                    return Err(RateLimited(message).into());
                 }
                 anyhow::bail!(message);
             }
@@ -160,6 +222,29 @@ where
         }
     }
     unreachable!("every iteration either returns, bails or continues within MAX_ATTEMPTS")
+}
+
+/// How much of a rejection's body is read: the log line shows 200 characters
+/// of it, and 4 KiB holds those in any encoding.
+const REJECTION_BODY_MAX: usize = 4096;
+
+/// The start of a rejected request's body, at most [`REJECTION_BODY_MAX`]
+/// bytes of it. The endpoint is whatever the operator configured (or whatever
+/// answers in its place): reading the whole body to log a snippet would let
+/// it make the daemon buffer as much as it cares to send. Dropping the
+/// response once the limit is reached closes the connection on the rest. A
+/// body that fails midway keeps what arrived: the status is the verdict, the
+/// text only a hint.
+async fn rejection_body(mut response: reqwest::Response) -> String {
+    let mut body = Vec::new();
+    while body.len() < REJECTION_BODY_MAX {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let room = REJECTION_BODY_MAX - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+    }
+    String::from_utf8_lossy(&body).into_owned()
 }
 
 /// Whether `status` means "this request's content was too large" (see
@@ -184,7 +269,7 @@ pub(crate) async fn post_json<T: Serialize>(
 /// so a genuine outage alert is still delivered promptly.
 async fn backoff(attempt: u32) {
     let ms = 200_u64 * 2_u64.pow(attempt - 1);
-    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    tokio::time::sleep(Duration::from_millis(ms)).await;
 }
 
 /// Strip every secret from `text` - raw, and in the two percent-encoded forms
@@ -254,6 +339,120 @@ fn snippet(body: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A server answering each request with the next of `replies` (the last
+    /// one from then on). Returns its URL and when each request arrived.
+    async fn replying(
+        replies: &'static [&'static str],
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let arrivals = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = [0; 4096];
+                if socket.read(&mut request).await.unwrap_or(0) == 0 {
+                    continue;
+                }
+                let index = {
+                    let mut arrivals = arrivals.lock().unwrap();
+                    arrivals.push(std::time::Instant::now());
+                    (arrivals.len() - 1).min(replies.len() - 1)
+                };
+                let _ = socket.write_all(replies[index].as_bytes()).await;
+            }
+        });
+        (url, seen)
+    }
+
+    const THROTTLED_1S: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const THROTTLED_NOW: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const OK: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    /// A 429 is retried when the API says so, not 200 ms later against the
+    /// same limit: the alert that used to be dropped is delivered.
+    #[tokio::test]
+    async fn a_rate_limit_waits_its_retry_after() {
+        let (url, seen) = replying(&[THROTTLED_1S, OK]).await;
+        let client = Client::new();
+        send_retrying(|| client.post(&url), "test", &[])
+            .await
+            .expect("delivered on the retry");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[1] - seen[0] >= Duration::from_secs(1));
+    }
+
+    /// A channel that keeps answering 429 is alive: the failure is reported,
+    /// but as one the dispatcher keeps out of the channel's health.
+    #[tokio::test]
+    async fn a_lasting_rate_limit_spares_the_channel_health() {
+        let (url, seen) = replying(&[THROTTLED_NOW]).await;
+        let client = Client::new();
+        let err = send_retrying(|| client.post(&url), "test", &[])
+            .await
+            .expect_err("still throttled");
+        assert!(spares_health(&err));
+        assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+
+    /// A server answering every request with a 400 whose body never ends.
+    /// Returns its URL.
+    async fn rejecting_without_end() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0; 4096];
+                    if socket.read(&mut request).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let head = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nSTART ";
+                    if socket.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    // Until the client hangs up.
+                    while socket.write_all(&[b'x'; 1024]).await.is_ok() {}
+                });
+            }
+        });
+        url
+    }
+
+    /// The body of a rejection is read up to its limit and no further: an
+    /// endpoint streaming without end used to hold the delivery (and the
+    /// memory) for as long as it kept sending.
+    #[tokio::test]
+    async fn a_rejection_body_is_read_up_to_its_limit() {
+        let url = rejecting_without_end().await;
+        let client = Client::new();
+
+        let response = client.post(&url).send().await.expect("answered");
+        let body = tokio::time::timeout(Duration::from_secs(10), rejection_body(response))
+            .await
+            .expect("the read stops at the limit");
+        assert_eq!(body.len(), REJECTION_BODY_MAX);
+        assert!(body.starts_with("START xxx"));
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_retrying(|| client.post(&url), "test", &[]),
+        )
+        .await
+        .expect("the delivery ends")
+        .expect_err("rejected");
+        assert!(
+            err.to_string()
+                .starts_with("rejected (HTTP 400 Bad Request): START xxx")
+        );
+    }
+
     #[test]
     fn escapes_metacharacters() {
         assert_eq!(escape("a<b>&c"), "a&lt;b&gt;&amp;c");
@@ -261,11 +460,11 @@ mod tests {
 
     #[test]
     fn human_duration_formats() {
-        assert_eq!(human_duration(30), "30s");
-        assert_eq!(human_duration(90), "1m");
-        assert_eq!(human_duration(3600), "1h");
-        assert_eq!(human_duration(9000), "2h");
-        assert_eq!(human_duration(200_000), "2d 7h");
+        assert_eq!(human_duration(30), "30 s");
+        assert_eq!(human_duration(90), "1 min");
+        assert_eq!(human_duration(3600), "1 h");
+        assert_eq!(human_duration(9000), "2 h");
+        assert_eq!(human_duration(200_000), "2 d 7 h");
     }
 
     #[test]

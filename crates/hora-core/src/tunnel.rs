@@ -254,6 +254,24 @@ fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The text helpers for the fuzz targets in `fuzz/` (built with
+/// `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    /// [`super::base64`].
+    #[must_use]
+    pub fn base64(bytes: &[u8]) -> String {
+        super::base64(bytes)
+    }
+
+    /// [`super::percent_decode`].
+    #[must_use]
+    pub fn percent_decode(raw: &str) -> String {
+        super::percent_decode(raw)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

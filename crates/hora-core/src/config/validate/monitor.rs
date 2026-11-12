@@ -6,7 +6,9 @@ use crate::config::monitor::{
     NumberAssert, PushSchedule, PushSpec, Starttls, TcpSpec,
 };
 use crate::config::raw::RawMonitor;
-use crate::config::{DnsRecord, Kind, Parsed, ReleaseWatch, parse_cron, split_host_port};
+use crate::config::{
+    DnsRecord, ExpectedStatus, HttpMethod, Kind, Parsed, ReleaseWatch, parse_cron, split_host_port,
+};
 
 /// Validate one `[[monitors]]` table and turn it into a [`Monitor`]: every
 /// check that needs nothing but the monitor itself (targets, kind-specific
@@ -33,6 +35,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         "monitor {}: target must not be empty",
         raw.id
     );
+    super::validate_host_label(&format!("monitor {}: host", raw.id), raw.host.as_deref())?;
     validate_monitor_io(&raw)?;
     warn_ignored(&raw);
     let spec = spec_of(&mut raw)?;
@@ -46,10 +49,12 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         slo_uptime: raw.slo_uptime,
         slo_window_days: raw.slo_window_days,
         probe_retries: raw.probe_retries,
+        fail_threshold: raw.fail_threshold,
         notify: raw.notify,
         check_cert: raw.check_cert,
         retention_days: raw.retention_days,
         group: raw.group,
+        host: raw.host,
         depends_on: raw.depends_on,
         public: raw.public,
         public_error_detail: raw.public_error_detail,
@@ -58,6 +63,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         release: raw.release,
         confirm_with_peers: raw.confirm_with_peers,
         push_token: raw.push_token,
+        allow_unauthenticated: raw.allow_unauthenticated.unwrap_or(false),
         spec,
     })
 }
@@ -74,7 +80,16 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
         Kind::Http => MonitorKind::Http(HttpSpec {
             url: reqwest::Url::parse(&target).map_err(|_| compiled("target"))?,
             target,
-            expected_status: raw.expected_status,
+            expected_status: match raw.expected_status.take() {
+                Some(statuses) => Some(
+                    ExpectedStatus::from_raw(&statuses).map_err(|_| compiled("expected_status"))?,
+                ),
+                None => None,
+            },
+            method: match &raw.method {
+                Some(method) => *method.get().ok_or_else(|| compiled("method"))?,
+                None => HttpMethod::Get,
+            },
             headers: std::mem::take(&mut raw.headers),
             keyword: raw.keyword.take().map(|text| KeywordAssert {
                 text,
@@ -267,14 +282,13 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         "monitor {}: max_body_kb must be > 0",
         monitor.id
     );
-    // No server answers outside 100-599, so such a monitor could never be up.
-    if let Some(status) = monitor.expected_status {
-        anyhow::ensure!(
-            (100..=599).contains(&status),
-            "monitor {}: expected_status {status} is not an HTTP status (100-599)",
-            monitor.id
-        );
-    }
+    // A threshold of 0 would read as "never wait", and confirm nothing.
+    anyhow::ensure!(
+        monitor.fail_threshold != Some(0),
+        "monitor {}: fail_threshold must be at least 1",
+        monitor.id
+    );
+    validate_http_request(monitor)?;
     // Catch header typos / CR-LF injection at load rather than at send time.
     for (name, value) in &monitor.headers {
         anyhow::ensure!(
@@ -318,6 +332,40 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         validate_dual_stack(monitor)?;
     }
     validate_schedule_and_slo(monitor)?;
+    Ok(())
+}
+
+/// Validate what an HTTP monitor sends and accepts: the `expected_status`
+/// entries, and a `method` that suits the assertions.
+fn validate_http_request(monitor: &RawMonitor) -> anyhow::Result<()> {
+    if let Some(statuses) = &monitor.expected_status
+        && let Err(err) = ExpectedStatus::from_raw(statuses)
+    {
+        anyhow::bail!("monitor {}: {err}", monitor.id);
+    }
+    let Some(method) = &monitor.method else {
+        return Ok(());
+    };
+    // A new key has no file to keep loading: on another kind it is a
+    // mistake, said at once rather than ignored with a warning.
+    anyhow::ensure!(
+        monitor.kind == Kind::Http,
+        "monitor {}: method requires an http monitor",
+        monitor.id
+    );
+    if let Some(err) = method.error() {
+        anyhow::bail!("monitor {}: {err}", monitor.id);
+    }
+    // The answer to a HEAD has no body: an assertion on it would fail on
+    // every check, and the monitor would be down for good.
+    let asserts_body =
+        monitor.keyword.is_some() || monitor.json_query.is_some() || monitor.number_regex.is_some();
+    anyhow::ensure!(
+        method.get() != Some(&HttpMethod::Head) || !asserts_body,
+        "monitor {}: method = \"HEAD\" gets no response body, so keyword / json_query / \
+         number_regex could never pass: use \"GET\" or drop the assertion",
+        monitor.id
+    );
     Ok(())
 }
 

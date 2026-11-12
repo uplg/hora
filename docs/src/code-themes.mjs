@@ -41,6 +41,7 @@ function theme(name, type, c) {
 	};
 }
 
+// tokens:begin - generated from brand/tokens.json by brand/src/tokens.py, do not edit
 export const horaDark = theme('hora-dark', 'dark', {
 	bg: '#1a2029',
 	fg: '#d9d6cf',
@@ -64,3 +65,4 @@ export const horaLight = theme('hora-light', 'light', {
 	punct: '#525a66',
 	down: '#a5372a',
 });
+// tokens:end

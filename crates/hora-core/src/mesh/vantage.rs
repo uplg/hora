@@ -58,10 +58,18 @@ pub fn new_map() -> VantageMap {
 }
 
 /// The map key for a monitor's target. Kind-qualified: the same `host:port`
-/// as a tcp connect and as a dns lookup are different measurements.
+/// as a tcp connect and as a dns lookup are different measurements. The
+/// target is keyed as peers disclose it, secrets masked (see
+/// [`disclosed_target`](super::wire::disclosed_target)), so a local monitor
+/// whose URL carries a credential still finds its peers' views - and so does
+/// one a 0.11 peer still lists verbatim.
 #[must_use]
 pub fn key(kind: Kind, target: &str) -> String {
-    format!("{}|{target}", kind.as_str())
+    format!(
+        "{}|{}",
+        kind.as_str(),
+        super::wire::disclosed_target(target)
+    )
 }
 
 /// The vantages relevant to one monitor, cloned out of the snapshot.
@@ -188,7 +196,7 @@ pub async fn fetch_peer_monitors(
 ) -> Option<PeerMonitors> {
     let mut builder = client.get(url).query(&[("from", from)]);
     if let Some(token) = token {
-        builder = builder.header("x-push-token", token);
+        builder = builder.header(crate::mesh::wire::PUSH_TOKEN_HEADER, token);
     }
     crate::http::fetch_json_capped(builder, MAX_RESPONSE_BYTES, POLL_TIMEOUT).await
 }
@@ -207,6 +215,7 @@ mod tests {
                     target: target.to_owned(),
                     status: serde_json::from_value(serde_json::json!(status)).unwrap(),
                     p50_ms,
+                    check: None,
                 })
                 .collect(),
         }
@@ -277,6 +286,27 @@ mod tests {
 
         // The same target under another kind is a different measurement.
         assert!(!map.contains_key(&key(Kind::Dns, "db:5432")));
+    }
+
+    /// A peer lists a credential-bearing URL masked (0.12) or verbatim (0.11):
+    /// either way the local monitor, which holds the secret, finds it.
+    #[test]
+    fn a_target_with_secrets_matches_its_masked_disclosure() {
+        let local = "https://user:hunter2@api.example.com/health?api_key=s3cret";
+        let masked = crate::mesh::wire::disclosed_target(local);
+        assert_eq!(masked, "https://***:***@api.example.com/health?api_key=***");
+        assert_eq!(crate::mesh::wire::disclosed_target(&masked), masked);
+
+        let monitor = crate::config::Monitor::ad_hoc(Kind::Http, local.to_owned()).unwrap();
+        for listed in [masked.as_str(), local] {
+            let mut map = HashMap::new();
+            let mut answer = answer(&[("unused", "up", Some(10))]);
+            answer.monitors[0].kind = Kind::Http;
+            listed.clone_into(&mut answer.monitors[0].target);
+            merge_peer(&mut map, "B", &answer);
+            assert_eq!(for_monitor(&map, &monitor).len(), 1, "{listed}");
+            assert!(map.keys().all(|key| !key.contains("hunter2")), "{map:?}");
+        }
     }
 
     #[test]

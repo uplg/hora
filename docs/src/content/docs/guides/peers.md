@@ -39,11 +39,17 @@ ping_url = "https://b.example/api/push/hora-a"
 ping_token = "${PEER_B_TOKEN}"                   # sent as X-Push-Token
 # IN - I watch the peer and alert if it goes silent:
 expect_every_secs = 90
-listen_token = "${PEER_B_IN}"                    # required from the peer's pings
+listen_token = "${PEER_B_IN}"                    # required with expect_every_secs (16+ characters)
 # listen_id = "hora-b"                           # the push id it pings: /api/push/{listen_id} (default: id)
 # witness_url = "https://b.example/healthz"      # default: origin(ping_url)/healthz
 # notify = ["ops-telegram"]                      # route this peer's alerts
 ```
+
+A watched peer **must** set a `listen_token`: peer ids are served on the
+unauthenticated `/healthz`, so the id alone must not be enough to forge its
+heartbeats and hide that it is down. A config without one fails to load;
+`allow_unauthenticated = true` on the peer is the explicit opt-out for a
+network where everyone who can reach `/api/push` is trusted.
 
 Watched peers appear in their own section on the status page (their state
 does not roll into the overall badge: it tracks your services, not the
@@ -52,16 +58,154 @@ else.
 
 A watched peer follows the same rules as a monitor:
 
-- It is down after `alerts.fail_threshold` missed heartbeats in a row.
+- It is down after `alerts.fail_threshold` missed heartbeats in a row (the
+  global value: a monitor's own `fail_threshold` is for monitors).
 - A peer that has **never** sent a heartbeat alerts too ("no heartbeat
   received yet") once `expect_every_secs` has passed since this node started
   watching it. That start is stored, so restarts do not reset it. For
   `grace_secs` after this node starts, peer alerts are held, so two nodes
   rebooting together do not page each other.
 - It can be muted: a `[[maintenance]]` window or a silence that names its
-  `listen_id` (`hora silence hora-b 30m "rebooting"`).
+  `listen_id` (`hora silence hora-b 30m "rebooting"`) - or the peer says so
+  itself, ahead of time: see
+  [planned maintenance of a host](#planned-maintenance-of-a-host).
 - Its alert state survives a config edit or a restart: no repeated down,
   no lost recovery.
+
+## Planned maintenance of a host
+
+Two nodes, `frank` and `yuki`, watch each other. When frank installs a
+kernel and reboots at 05:00, two things happen that are no surprise to
+anyone: frank's Hora stops heartbeating, and the services hosted on frank
+go down for three minutes. Without more, yuki alerts for both.
+
+Frank knows about the reboot hours ahead. It can say so, once, to its own
+Hora - and both nodes stay quiet for exactly that window, and alert as
+usual if frank is not back when it ends.
+
+### Label the hosts
+
+Three optional `host` keys, all free text, say what runs where. On frank:
+
+```toml
+[health]
+id = "hora-frank"
+host = "frank"                  # the machine this node runs on
+
+[[monitors]]
+id = "mail"
+name = "Mail"
+kind = "tcp"
+target = "mail.example.com:25"
+interval_secs = 60
+host = "frank"                  # the machine the service runs on
+```
+
+On yuki, which probes the same mail server and watches frank:
+
+```toml
+[[monitors]]
+id = "mail"
+# ... the same check ...
+host = "frank"
+
+[[peers]]
+id = "hora-frank"
+name = "Frank"
+ping_url = "https://frank.example.com/api/push/hora-yuki"
+ping_token = "${TO_FRANK}"
+expect_every_secs = 180
+listen_token = "${FROM_FRANK}"
+host = "frank"                  # the machine that peer runs on
+accept_maintenance_secs = 900   # trust its announcements, 15 min at most
+```
+
+### One call from the host
+
+The script that learns about the reboot (on a systemd host, it reads
+`/run/systemd/shutdown/scheduled`) makes one call to its **local** Hora,
+with the operator token:
+
+```sh
+curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+  "http://127.0.0.1:8787/api/maintenance?host=frank&starts_at=2026-11-13T05:00:00Z&duration=10m&reason=kernel%20reboot"
+```
+
+or, on the same machine, `hora maintenance plan --host frank --at
+2026-11-13T05:00:00Z --for 10m "kernel reboot"`. The script may run every
+few minutes: the same host, start and duration is the same window, not a
+second one. (Pass the start explicitly for that - the default, now, moves.)
+
+From then on:
+
+- **On frank**, the monitors labelled `host = "frank"` are in maintenance
+  from 05:00 to 05:10: alerts muted, checks still recorded, the status page
+  says *Planned maintenance*, and before 05:00 it announces the window as
+  *Next*.
+- **Frank tells its peers.** Each heartbeat carries the windows frank has
+  planned, until they end. A window for frank's own host (`[health] host`)
+  goes out with the host; a window for named monitors
+  (`monitors=mail,web`) goes out without one; a window for another host
+  than frank's own is not announced at all.
+- **On yuki**, which accepts frank's announcements, the same ten minutes
+  mute the watch of frank (no *peer silent* alert) and yuki's own monitors
+  labelled `host = "frank"`. Yuki's page shows the window, and tells the
+  operator it was announced by Frank.
+- **At 05:10** everything alerts normally again. If frank is still silent,
+  the peer alert goes out after the usual `fail_threshold` missed
+  heartbeats counted from there; a service still down is confirmed and
+  announced the same way. A service that came back during the window was
+  never announced down, so nothing is said about it.
+
+`hora maintenance list` (or `GET /api/maintenance`) shows the planned and
+active windows of a node, the peers' included, and `hora maintenance cancel
+<id>` (or `DELETE /api/maintenance/{id}`) withdraws one: frank's next
+heartbeat no longer lists it, and yuki drops it on receipt.
+
+### What a peer may mute
+
+`accept_maintenance_secs` is a trust decision, and off unless you set it:
+you let another machine decide that this one stays quiet. What it buys the
+peer is deliberately small.
+
+- Nothing at all unless the `[[peers]]` entry sets
+  `accept_maintenance_secs`, and unless the heartbeat that carries the
+  announcement is authenticated with that peer's `listen_token`. The key
+  is refused together with `allow_unauthenticated`.
+- A window lasts at most `accept_maintenance_secs`: a longer one is cut
+  from its start, not refused. A window that starts more than 7 days ahead
+  is refused.
+- A peer has a budget of four times `accept_maintenance_secs` of muted
+  time in any 24 hours (an hour a day at 900 seconds), overlapping windows
+  counted once. Past it a window is cut, then refused, and the alerts come
+  back: a script that plans a window every minute cannot keep a host silent.
+- A peer has a budget of four times `accept_maintenance_secs` of muted
+  time in any 24 hours (an hour a day at 900 seconds), overlapping windows
+  counted once. Past it a window is cut, then refused, and the alerts come
+  back: a script that plans a window every minute cannot keep a host silent.
+- It always mutes the watch of **that peer**, and nothing else of the mesh.
+- It mutes this node's monitors labelled with a host only when the
+  announcement names a host **and** that host is the `host` of the peer's
+  own `[[peers]]` entry. A peer cannot declare maintenance for another
+  host, and cannot name monitors: a monitor without the peer's host label
+  is never muted by it.
+- Removing `accept_maintenance_secs` takes effect at once, for the windows
+  already accepted too.
+
+An accepted window is logged once (`maintenance window accepted from the
+peer`), a refused announcement at most once an hour, with the reason.
+
+A window mutes alerts, never observations: a node asked by a peer to
+[confirm a down](#multi-vantage-confirmation) for a monitor it has in
+maintenance still probes and answers what it sees.
+
+### Mixed versions
+
+The announcement rides the heartbeat as a JSON body, sent only when there
+is something to announce. A 0.11 node never reads a heartbeat's body, so a
+0.12 node's heartbeat counts for it as before, and it mutes nothing; a 0.11
+node sends no body, which a 0.12 node reads as "nothing planned". Upgrade
+both nodes before relying on it.
 
 ## Quorum: outage or partition?
 
@@ -95,15 +239,21 @@ Two Raspberry Pi at two homes become a distributed Pingdom.
 
 When **every peer that answered sees the target up** (and at least one
 answered), the down is *local-only*: a problem on the road from this node,
-not an outage. It does **not** go to the monitor's channels. It goes to the
-channels listed in `alerts.notify_unconfirmed`, or, without that key, it is
-only recorded - the incident, the timeline, and the status page's
-*Not an outage* notice.
+not an outage. The alert says so (*seen from this node only*), the status
+page shows *Not an outage*, and where it goes is yours to choose with
+`alerts.notify_unconfirmed`:
 
 ```toml
 [alerts]
-notify_unconfirmed = ["ntfy-low"]   # optional: a quiet channel for local-only downs
+# unset (default): the monitor's own channels, flagged as local-only
+notify_unconfirmed = ["ntfy-low"]   # a quiet channel instead of the monitor's
+# notify_unconfirmed = []           # nowhere: only recorded (incident, timeline)
 ```
+
+The default errs on the side of telling someone: a peer answering "up" is
+one HTTP response, and it should not be able to silence a down on its own.
+Name a quiet channel once you trust the mesh, or set the empty list to only
+record such downs.
 
 Only an explicit contradiction quiets a down. No peer configured, no peer
 reachable, peers that do not watch this target, or **any** peer seeing it
@@ -113,8 +263,9 @@ outages.
 While a local-only down lasts, the node asks its peers again every 5
 minutes. As soon as they no longer all see the target up (they see it down
 too, or stop answering), the real down alert goes out, once, to the usual
-channels. A recovery goes to whoever received a down: the quiet channels
-for a down that stayed local-only, both after a late confirmation. The
+channels. A recovery goes to whoever received a down: for a down that
+stayed local-only, the channels that took it (the quiet ones, or the
+monitor's own by default); both after a late confirmation. The
 [webhook](../alerting/#channels) payload carries `local_only: true` on the
 `down` and `recovered` events of a local-only down.
 
@@ -135,6 +286,12 @@ it presents its `ping_token`, which the responder checks against its
 `listen_token` for that peer - **required** here; the id alone never
 authorizes a probe.
 
+Because a peer's "up" changes what happens to an alert, a node with
+`confirm_with_peers` on only loads peers whose `ping_url` is **https**: over
+cleartext http anyone on the path could write that answer, or read the token
+that asks for it. `http://localhost` and loopback addresses stay allowed
+(two nodes on one host, tests).
+
 The responder only probes targets **present in its own configuration**
 (matched on kind + target, probed with its own timeout, assertions and
 proxy) - never an arbitrary target, so a leaked token cannot turn a peer
@@ -154,7 +311,7 @@ before the peers are even consulted.
 
 Every peer with a `ping_url` is also asked, once a minute, how it sees the
 targets both nodes monitor. The status page then shows each shared monitor
-from the other places ("Hora B: 220ms"). The exchange is
+from the other places ("Hora B: 220 ms"). The exchange is
 authenticated like a probe request, read-only and fail-open.
 
 Confirmation only works for monitors both nodes have. To check that the
@@ -164,9 +321,17 @@ mesh agrees, run:
 hora peers diff
 ```
 
-It lists, per peer, the monitors (kind and target) that only one side has,
-and exits non-zero on any difference or an unreachable peer, so it can gate
-a config deploy in CI.
+It lists, per peer, the monitors (kind and target) that only one side has
+and those both have but check differently, and exits non-zero on any
+difference or an unreachable peer, so it can gate a config deploy in CI.
+
+A peer confirms a down only with a monitor that checks the same way: same
+kind and target, same `method`, same expected statuses, assertions and headers, same
+`dual_stack`, DNS record, pinned answer and resolver, same STARTTLS
+protocol. Timeouts, intervals, thresholds and the proxy are each node's own
+business. A peer that watches the URL with another assertion answers as if
+it did not watch it, and the down is alerted unconfirmed. The target is sent
+to peers with the secrets of its URL masked.
 
 ## External receivers
 

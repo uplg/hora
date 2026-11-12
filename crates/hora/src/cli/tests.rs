@@ -82,6 +82,44 @@ fn probe_args_return_usage_errors_instead_of_exiting() {
 }
 
 #[test]
+fn probe_takes_a_method_and_statuses_for_an_ad_hoc_http_target() {
+    use hora_core::config::{HttpMethod, Kind, Monitor, MonitorKind};
+
+    let args = strings(&[
+        "https://example.com",
+        "--method",
+        "head",
+        "--expect",
+        "2xx,401",
+    ]);
+    let parsed = parse_probe_args(&args).expect("parse");
+    let mut monitor = Monitor::ad_hoc(Kind::Http, parsed.target.to_owned()).unwrap();
+    super::probe::apply_http_options(&mut monitor, &parsed, false).expect("an ad-hoc http target");
+    let MonitorKind::Http(spec) = &monitor.spec else {
+        panic!("http");
+    };
+    assert_eq!(spec.method, HttpMethod::Head);
+    let expected = spec.expected_status.as_ref().expect("set");
+    assert!(expected.matches(401) && expected.matches(204) && !expected.matches(403));
+
+    // A configured monitor is probed as configured, and a ping has neither.
+    let error = usage_message(super::probe::apply_http_options(
+        &mut monitor,
+        &parsed,
+        true,
+    ));
+    assert!(error.contains("own method and expected_status"), "{error}");
+    let mut ping = Monitor::ad_hoc(Kind::Icmp, "192.0.2.1".to_owned()).unwrap();
+    let error = usage_message(super::probe::apply_http_options(&mut ping, &parsed, false));
+    assert!(error.contains("need an http target"), "{error}");
+
+    let bad = |args: &[&str]| usage_message(parse_probe_args(&strings(args)));
+    assert!(bad(&["a", "--method", "POST"]).starts_with("--method: "));
+    assert!(bad(&["a", "--expect", "200,abc"]).starts_with("--expect: "));
+    assert!(bad(&["a", "--expect"]).starts_with("--expect: "));
+}
+
+#[test]
 fn event_args_disambiguate_list_from_a_title() {
     assert_eq!(
         parse_event_args(&strings(&["list"])).expect("list"),
@@ -149,5 +187,64 @@ async fn incident_ids_resolve_last_or_a_number() {
     match resolve_incident_id(&store, "last").await {
         Err(CliError::Failed(message)) => assert_eq!(message, "No incidents recorded yet."),
         other => panic!("expected a failure on an empty database, got {other:?}"),
+    }
+}
+
+#[test]
+fn maintenance_plan_takes_its_flags_anywhere_and_the_rest_as_the_reason() {
+    use super::annotations::{PlanArgs, parse_plan_args};
+
+    let args = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+    // 2027-01-15 08:00:00 UTC.
+    let now = 1_800_000_000;
+    let day_start = now - 8 * 3600;
+
+    // The host script's call: a full timestamp, so a repeat is the same plan.
+    let plan = parse_plan_args(
+        &args("--host frank --at 2027-01-16T05:00:00Z --for 10m kernel reboot"),
+        now,
+    )
+    .expect("parsed");
+    assert_eq!(
+        plan,
+        PlanArgs {
+            host: Some("frank".to_owned()),
+            monitors: None,
+            starts_at: Some(day_start + 86_400 + 5 * 3600),
+            duration: "10m".to_owned(),
+            reason: "kernel reboot".to_owned(),
+        }
+    );
+    // At a shell: a clock time is its next occurrence (UTC), flags anywhere.
+    let plan = parse_plan_args(
+        &args("disk swap --monitors api,web --for 1h --at 05:00"),
+        now,
+    )
+    .expect("parsed");
+    assert_eq!(plan.starts_at, Some(day_start + 86_400 + 5 * 3600));
+    assert_eq!(plan.monitors.as_deref(), Some("api,web"));
+    assert_eq!(plan.reason, "disk swap");
+    let plan =
+        parse_plan_args(&args("--host frank --for 10m --at 18:30 reboot"), now).expect("parsed");
+    assert_eq!(plan.starts_at, Some(day_start + 18 * 3600 + 1800));
+    // Unix seconds; and without --at, now (left to the planner).
+    let plan = parse_plan_args(&args("--host frank --for 10m --at 1800003600 reboot"), now)
+        .expect("parsed");
+    assert_eq!(plan.starts_at, Some(now + 3600));
+    let plan = parse_plan_args(&args("--host frank --for 10m reboot"), now).expect("parsed");
+    assert_eq!(plan.starts_at, None);
+
+    // No duration, a flag without its value, or a start that is not one.
+    for bad in [
+        "--host frank reboot",
+        "--host frank --for",
+        "--host frank --for 10m --at soon reboot",
+        "--host frank --for 10m --at 2h reboot",
+        "--host frank --for 10m --at 25:00 reboot",
+    ] {
+        assert!(
+            matches!(parse_plan_args(&args(bad), now), Err(CliError::Usage(_))),
+            "{bad}"
+        );
     }
 }

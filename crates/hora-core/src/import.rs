@@ -18,7 +18,9 @@
 //! | `jsonPath` / `expectedValue`         | `json_query` / `json_expected`  |
 //! | `interval`, `timeout`                | `interval_secs`, `timeout_secs` |
 //! | `headers` (JSON string)              | `headers = { ... }`             |
-//! | single `accepted_statuscodes` entry  | `expected_status`               |
+//! | `accepted_statuscodes`               | `expected_status`               |
+//! | `method` `HEAD`                      | `method = "HEAD"`               |
+//! | `maxretries`                         | `fail_threshold` (retries + 1)  |
 //! | `expiryNotification = false`         | `check_cert = false`            |
 //! | `dnsResolveType` / `dnsResolveServer`| `dns_record` / `dns_resolver`   |
 //! | `pushToken`                          | `push_token`                    |
@@ -30,19 +32,24 @@
 //! `sqlserver`, `postgres`, `mysql`, `mongodb`, `radius`, `redis`, `snmp`,
 //! `tailscale-ping`, `kafka-producer` and `rabbitmq`. Fields that are
 //! dropped (silently - they have no Hora counterpart): `retryInterval`,
-//! `resendInterval`, `upsideDown`, `maxredirects`, status-code *ranges*
-//! beyond the default, HTTP `method`/`body`/`httpBodyEncoding`, `authMethod`
+//! `resendInterval`, `upsideDown`, `maxredirects`, HTTP
+//! `body`/`httpBodyEncoding`, `authMethod`
 //! and its credentials (basic/NTLM/mTLS/OAuth2), `proxyId` (Hora proxies are
 //! per-monitor URLs), `notificationIDList` (channel routing differs),
 //! `tags`, `description`, `ignoreTls`, `packetSize` and per-type extras.
-//! `maxretries` becomes a comment: Hora's equivalent is the global
-//! `[alerts].fail_threshold`.
+//!
+//! Two are said in a comment instead, because the monitor would not check
+//! what it checked in Kuma: a `method` other than `GET` or `HEAD` (Hora sends
+//! no request body), and a status-code range that is not a whole class
+//! (`200-299` is `"2xx"`; `301-302` has no spelling here).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+
+use crate::config::MIN_TOKEN_CHARS;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +85,8 @@ struct KumaMonitor {
     headers: Option<String>,
     #[serde(alias = "accepted_statuscodes")]
     accepted_statuscodes: Option<Vec<String>>,
+    /// The HTTP method (`GET` unless the monitor says otherwise).
+    method: Option<String>,
     expiry_notification: Option<bool>,
     push_token: Option<String>,
     #[serde(alias = "dns_resolve_type")]
@@ -162,10 +171,22 @@ fn convert_monitor(
         }
         "dns" => convert_dns(out, monitor),
         "push" => {
-            if let Some(token) = &monitor.push_token {
-                let _ = writeln!(out, "push_token = {}", toml_string(token));
-            } else {
-                let _ = writeln!(out, "# push_token = \"...\"  # set a token");
+            // Hora refuses a push monitor without a token of at least
+            // MIN_TOKEN_CHARS: a Kuma token that is too short (or absent)
+            // becomes the explicit opt-out, so the result still loads and
+            // says what is left to do.
+            match &monitor.push_token {
+                Some(token) if token.chars().count() >= MIN_TOKEN_CHARS => {
+                    let _ = writeln!(out, "push_token = {}", toml_string(token));
+                }
+                _ => {
+                    let _ = writeln!(
+                        out,
+                        "# push_token = \"...\"  # set a token of {MIN_TOKEN_CHARS}+ characters, \
+                         then remove the next line"
+                    );
+                    let _ = writeln!(out, "allow_unauthenticated = true");
+                }
             }
             let _ = writeln!(out, "# heartbeats go to /api/push/{id}");
         }
@@ -177,8 +198,16 @@ fn convert_monitor(
         let _ = writeln!(out, "timeout_secs = {timeout}");
     }
     if monitor.max_retries > 0 {
-        // Hora's equivalent is the global [alerts].fail_threshold.
-        let _ = writeln!(out, "# max_retries was {} in Kuma", monitor.max_retries);
+        // Kuma marks a monitor down once its retries are spent: the first
+        // failure and each retry are that many failed checks in a row. Left
+        // out at 0, where Hora's default (three) is the safer reading of a
+        // setting nobody chose.
+        let _ = writeln!(
+            out,
+            "fail_threshold = {}  # maxretries was {} in Kuma",
+            monitor.max_retries.saturating_add(1),
+            monitor.max_retries
+        );
     }
     out.push('\n');
 }
@@ -199,17 +228,51 @@ fn convert_http(out: &mut String, monitor: &KumaMonitor) {
             let _ = writeln!(out, "json_expected = {}", toml_string(expected));
         }
     }
-    // Kuma's default is the 2xx range, which is also Hora's; a single exact
-    // code maps, anything fancier has no equivalent.
+    // Kuma's default is the 2xx range, which is also Hora's and needs no
+    // line. Kuma offers whole classes (`200-299`) and single codes, which is
+    // what `expected_status` takes; any other range has no equivalent.
     if let Some(codes) = &monitor.accepted_statuscodes
         && codes.as_slice() != ["200-299"]
+        && !codes.is_empty()
     {
-        if let [single] = codes.as_slice()
-            && let Ok(code) = single.parse::<u16>()
+        match codes
+            .iter()
+            .map(|code| kuma_status(code))
+            .collect::<Option<Vec<_>>>()
+            .as_deref()
         {
-            let _ = writeln!(out, "expected_status = {code}");
-        } else {
-            let _ = writeln!(out, "# accepted_statuscodes {codes:?} not supported");
+            // A single entry keeps the scalar form.
+            Some([single]) => {
+                let _ = writeln!(out, "expected_status = {single}");
+            }
+            Some(entries) => {
+                let _ = writeln!(out, "expected_status = [{}]", entries.join(", "));
+            }
+            None => {
+                let _ = writeln!(out, "# accepted_statuscodes {codes:?} not supported");
+            }
+        }
+    }
+    // HEAD maps; GET is the default and needs no line. Anything else would
+    // be sent as a GET, which is another check: said, not done silently.
+    if let Some(method) = monitor.method.as_deref().map(str::trim) {
+        if method.eq_ignore_ascii_case("HEAD") {
+            // Hora refuses a body assertion on a HEAD (its answer has no
+            // body): such a monitor stays a GET, which the assertion needs.
+            if monitor.keyword.is_some() || monitor.json_path.is_some() {
+                let _ = writeln!(
+                    out,
+                    "# method HEAD not kept: the body assertion above needs a GET"
+                );
+            } else {
+                let _ = writeln!(out, "method = \"HEAD\"");
+            }
+        } else if !method.is_empty() && !method.eq_ignore_ascii_case("GET") {
+            let _ = writeln!(
+                out,
+                "# method {method:?} not supported (GET or HEAD, no request body): \
+                 this monitor sends a GET"
+            );
         }
     }
     if let Some(headers) = monitor
@@ -234,6 +297,23 @@ fn convert_http(out: &mut String, monitor: &KumaMonitor) {
     {
         let _ = writeln!(out, "check_cert = false");
     }
+}
+
+/// One Kuma `accepted_statuscodes` entry as an `expected_status` entry in
+/// TOML: a code as a number, a whole class (`200-299`) as `"2xx"`. `None`
+/// for anything else.
+fn kuma_status(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    if let Ok(code) = entry.parse::<u16>() {
+        return (100..=599).contains(&code).then(|| code.to_string());
+    }
+    let (first, last) = entry.split_once('-')?;
+    let (first, last) = (
+        first.trim().parse::<u16>().ok()?,
+        last.trim().parse::<u16>().ok()?,
+    );
+    ((1..=5).contains(&(first / 100)) && first % 100 == 0 && last == first + 99)
+        .then(|| format!("\"{}xx\"", first / 100))
 }
 
 fn convert_dns(out: &mut String, monitor: &KumaMonitor) {
@@ -387,6 +467,11 @@ mod tests {
                 {
                     "name": "Backup job",
                     "type": "push",
+                    "pushToken": "abc123abc123abc123abc123"
+                },
+                {
+                    "name": "Short token",
+                    "type": "push",
                     "pushToken": "abc123"
                 }
             ]
@@ -397,7 +482,13 @@ mod tests {
         assert!(toml.contains("dns_record = \"A\""));
         assert!(toml.contains("dns_resolver = \"1.1.1.1:53\""));
         assert!(toml.contains("kind = \"push\""));
-        assert!(toml.contains("push_token = \"abc123\""));
+        assert!(toml.contains("push_token = \"abc123abc123abc123abc123\""));
+        // A token Hora would refuse becomes the explicit opt-out, and the
+        // result loads.
+        assert!(!toml.contains("push_token = \"abc123\""));
+        assert_eq!(toml.matches("allow_unauthenticated = true").count(), 1);
+        crate::config::parse(&format!("[page]\n[server]\n{toml}"))
+            .expect("the converted monitors load");
     }
 
     #[test]
@@ -422,6 +513,66 @@ mod tests {
         assert!(toml.contains("json_expected = \"ok\""));
         assert!(toml.contains("expected_status = 503"));
         assert!(toml.contains(r#"headers = { "Authorization" = "Bearer x" }"#));
+    }
+
+    /// Kuma's accepted status codes, method and retries become the keys
+    /// that mean the same here, and the result loads.
+    #[test]
+    fn statuses_method_and_retries_map_onto_the_monitor() {
+        let json = r#"{
+            "monitorList": [
+                {
+                    "name": "Private API",
+                    "type": "http",
+                    "url": "https://api.example.com/",
+                    "method": "HEAD",
+                    "maxretries": 1,
+                    "accepted_statuscodes": ["200-299", "401"]
+                },
+                {
+                    "name": "Classes",
+                    "type": "http",
+                    "url": "https://classes.example.com/",
+                    "method": "GET",
+                    "accepted_statuscodes": ["300-399", "200"]
+                },
+                {
+                    "name": "Form",
+                    "type": "http",
+                    "url": "https://form.example.com/",
+                    "method": "POST",
+                    "accepted_statuscodes": ["301-302"]
+                },
+                {
+                    "name": "Keyword",
+                    "type": "keyword",
+                    "url": "https://kw.example.com/",
+                    "method": "HEAD",
+                    "keyword": "ok"
+                }
+            ]
+        }"#;
+
+        let toml = convert_kuma_to_hora(json).unwrap();
+        assert!(toml.contains("expected_status = [\"2xx\", 401]"), "{toml}");
+        assert!(toml.contains("expected_status = [\"3xx\", 200]"), "{toml}");
+        assert_eq!(toml.matches("method = \"HEAD\"").count(), 1, "{toml}");
+        assert!(
+            toml.contains("fail_threshold = 2  # maxretries was 1 in Kuma"),
+            "{toml}"
+        );
+        // What has no equivalent is said, never approximated.
+        assert!(
+            toml.contains("# accepted_statuscodes [\"301-302\"] not supported"),
+            "{toml}"
+        );
+        assert!(toml.contains("# method \"POST\" not supported"), "{toml}");
+        assert!(toml.contains("# method HEAD not kept"), "{toml}");
+
+        let config = crate::config::parse(&format!("[page]\n[server]\n{toml}"))
+            .expect("the converted monitors load");
+        assert_eq!(config.fail_threshold("private-api"), 2, "{toml}");
+        assert_eq!(config.fail_threshold("classes"), 3);
     }
 
     #[test]

@@ -15,9 +15,7 @@ async fn event_requires_token_records_and_validates() {
 
     let res = app
         .clone()
-        .oneshot(push(
-            "/api/event?title=deploy+api+v2.3&token=0123456789abcdef",
-        ))
+        .oneshot(write("/api/event?title=deploy+api+v2.3"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -25,10 +23,7 @@ async fn event_requires_token_records_and_validates() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].title, "deploy api v2.3");
 
-    let res = app
-        .oneshot(push("/api/event?title=++&token=0123456789abcdef"))
-        .await
-        .unwrap();
+    let res = app.oneshot(write("/api/event?title=++")).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -68,12 +63,12 @@ async fn announce_requires_token_pins_and_clears() {
     // Pinned: the banner shows up in the public summary for everyone.
     let (app, _pool) = test_app_with_pool().await;
     let res = app
-            .clone()
-            .oneshot(push(
-                "/api/announce?title=Fiber+cut&body=ETA+6pm&severity=warning&until=4h&token=0123456789abcdef",
-            ))
-            .await
-            .unwrap();
+        .clone()
+        .oneshot(write(
+            "/api/announce?title=Fiber+cut&body=ETA+6pm&severity=warning&until=4h",
+        ))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let res = app.clone().oneshot(get("/api/summary")).await.unwrap();
     let body = body_text(res).await;
@@ -85,7 +80,8 @@ async fn announce_requires_token_pins_and_clears() {
     // Cleared via DELETE: gone from the summary.
     let req = Request::builder()
         .method("DELETE")
-        .uri("/api/announce?token=0123456789abcdef")
+        .uri("/api/announce")
+        .header("authorization", "Bearer 0123456789abcdef")
         .extension(fake_peer())
         .body(Body::empty())
         .unwrap();
@@ -99,9 +95,7 @@ async fn announce_requires_token_pins_and_clears() {
 async fn announce_until_takes_a_utc_clock_time() {
     let res = test_app()
         .await
-        .oneshot(push(
-            "/api/announce?title=Fiber+cut&until=18:00&token=0123456789abcdef",
-        ))
+        .oneshot(write("/api/announce?title=Fiber+cut&until=18:00"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -115,11 +109,11 @@ async fn announce_until_takes_a_utc_clock_time() {
 #[tokio::test]
 async fn announce_rejects_bad_severity_and_empty_title() {
     for bad in [
-        "/api/announce?title=x&severity=panic&token=0123456789abcdef",
-        "/api/announce?title=+&token=0123456789abcdef",
-        "/api/announce?title=x&until=nope&token=0123456789abcdef",
+        "/api/announce?title=x&severity=panic",
+        "/api/announce?title=+",
+        "/api/announce?title=x&until=nope",
     ] {
-        let res = test_app().await.oneshot(push(bad)).await.unwrap();
+        let res = test_app().await.oneshot(write(bad)).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
     }
 }
@@ -138,8 +132,8 @@ async fn silence_requires_the_viewer_token() {
 async fn silence_mutes_the_monitor_in_the_database() {
     let (app, store) = test_app_with_pool().await;
     let res = app
-        .oneshot(push(
-            "/api/silence?monitors=web&duration=10m&reason=deploy&token=0123456789abcdef",
+        .oneshot(write(
+            "/api/silence?monitors=web&duration=10m&reason=deploy",
         ))
         .await
         .unwrap();
@@ -168,9 +162,7 @@ async fn silence_mutes_the_monitor_in_the_database() {
 async fn silence_accepts_a_watched_peer() {
     let (app, store) = test_app_with_pool().await;
     let res = app
-        .oneshot(push(
-            "/api/silence?monitors=web,peer-x&duration=5m&token=0123456789abcdef",
-        ))
+        .oneshot(write("/api/silence?monitors=web,peer-x&duration=5m"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -186,9 +178,7 @@ async fn silence_accepts_a_watched_peer() {
 async fn silence_all_uses_the_wildcard() {
     let (app, store) = test_app_with_pool().await;
     let res = app
-        .oneshot(push(
-            "/api/silence?monitors=all&duration=5m&token=0123456789abcdef",
-        ))
+        .oneshot(write("/api/silence?monitors=all&duration=5m"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -204,18 +194,14 @@ async fn silence_all_uses_the_wildcard() {
 async fn silence_rejects_unknown_monitor_and_bad_duration() {
     let res = test_app()
         .await
-        .oneshot(push(
-            "/api/silence?monitors=nope&duration=10m&token=0123456789abcdef",
-        ))
+        .oneshot(write("/api/silence?monitors=nope&duration=10m"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
     let res = test_app()
         .await
-        .oneshot(push(
-            "/api/silence?monitors=web&duration=tomorrow&token=0123456789abcdef",
-        ))
+        .oneshot(write("/api/silence?monitors=web&duration=tomorrow"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);

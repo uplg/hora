@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use reqwest::Client;
+use reqwest::header::HeaderValue;
 
 use crate::message::{Kind, Message, Urgency};
 use crate::util::{Unit, send_retrying};
@@ -24,15 +25,37 @@ impl NtfyNotifier {
         Self { client, url, token }
     }
 
-    /// The body, the `Tags` header (an emoji shortcode) and the priority.
-    fn message(event: Event<'_>) -> (String, &'static str, u8) {
+    /// The event as ntfy takes it: the headline as the `Title` header, the
+    /// detail as the body.
+    fn message(event: Event<'_>) -> Push {
         let message = Message::render(event).fit(HEAD_MAX, BODY_MAX, Unit::Bytes);
-        (
-            message.plain(),
-            tag(message.kind),
-            priority(message.urgency()),
-        )
+        let (title, body) = match HeaderValue::from_str(&message.headline()) {
+            Ok(title) => (title, message.titled().1),
+            // A header cannot carry a control character (a monitor name with
+            // a newline or an escape in it): the title goes back to a fixed
+            // one and the body says everything, headline first, so the alert
+            // still names its monitor.
+            Err(_) => (HeaderValue::from_static(FALLBACK_TITLE), message.plain()),
+        };
+        Push {
+            title,
+            body,
+            tags: tag(message.kind),
+            priority: priority(message.urgency()),
+        }
     }
+}
+
+/// The title of a notification whose headline no header can carry.
+const FALLBACK_TITLE: &str = "Hora Alert";
+
+/// One ntfy publication: the body and the headers that dress it.
+struct Push {
+    title: HeaderValue,
+    body: String,
+    /// The `Tags` header, an emoji shortcode.
+    tags: &'static str,
+    priority: u8,
 }
 
 /// ntfy shows the tag as an emoji in front of the title.
@@ -69,12 +92,12 @@ impl Notifier for NtfyNotifier {
     }
 
     async fn notify(&self, event: Event<'_>) -> anyhow::Result<()> {
-        let (message, tags, priority) = Self::message(event);
+        let push = Self::message(event);
         let build = || {
-            let mut req = self.client.post(&self.url).body(message.clone());
-            req = req.header("Title", "Hora Alert");
-            req = req.header("Tags", tags);
-            req = req.header("Priority", priority.to_string());
+            let mut req = self.client.post(&self.url).body(push.body.clone());
+            req = req.header("Title", push.title.clone());
+            req = req.header("Tags", push.tags);
+            req = req.header("Priority", push.priority.to_string());
             if let Some(token) = &self.token {
                 req = req.bearer_auth(token);
             }
@@ -90,13 +113,25 @@ impl Notifier for NtfyNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    let push = NtfyNotifier::message(event);
+    crate::fuzz::Sent {
+        channel: "ntfy",
+        title: Some(String::from_utf8_lossy(push.title.as_bytes()).into_owned()),
+        body: push.body,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn maps_events_to_text_tags_and_priority() {
-        let (text, tags, priority) = NtfyNotifier::message(Event::Down {
+    fn maps_events_to_title_text_tags_and_priority() {
+        let push = NtfyNotifier::message(Event::Down {
             monitor: "API",
             error: Some("boom"),
             cause: Some("DB"),
@@ -105,32 +140,50 @@ mod tests {
             event: None,
             local_only: false,
         });
-        assert_eq!(text, "API is DOWN\nboom\ncaused by DB");
-        assert_eq!((tags, priority), ("rotating_light", 4));
+        // The headline is the title; the body does not say it again.
+        assert_eq!(push.title, "API is DOWN");
+        assert_eq!(push.body, "boom\ncaused by DB");
+        assert_eq!((push.tags, push.priority), ("rotating_light", 4));
 
-        let (_, tags, priority) = NtfyNotifier::message(Event::Recovered {
+        let push = NtfyNotifier::message(Event::Recovered {
             monitor: "API",
             local_only: false,
         });
-        assert_eq!((tags, priority), ("white_check_mark", 2));
+        assert_eq!(push.title, "API recovered");
+        assert_eq!((push.tags, push.priority), ("white_check_mark", 2));
 
-        let (text, tags, priority) = NtfyNotifier::message(Event::Alert {
+        let push = NtfyNotifier::message(Event::Alert {
             monitor: "API",
             severity: AlertSeverity::Critical,
             title: "disk full",
             message: "",
         });
-        assert_eq!(text, "[CRITICAL] API: disk full");
-        assert_eq!((tags, priority), ("rotating_light", 5));
+        assert_eq!(push.title, "[CRITICAL] API: disk full");
+        assert_eq!((push.tags, push.priority), ("rotating_light", 5));
+    }
+
+    #[test]
+    fn a_name_no_header_can_carry_moves_to_the_body() {
+        // UTF-8 travels in a header as it is...
+        let push = NtfyNotifier::message(Event::Recovered {
+            monitor: "Café ☕",
+            local_only: false,
+        });
+        assert_eq!(push.title.as_bytes(), "Café ☕ recovered".as_bytes());
+
+        // ...a line break does not: it would end the header, or the request.
+        let push = NtfyNotifier::message(Event::down("API\r\nX-Injected: 1", Some("boom")));
+        assert_eq!(push.title, FALLBACK_TITLE);
+        assert!(push.body.starts_with("API\r\nX-Injected: 1 is DOWN\nboom"));
     }
 
     #[test]
     fn long_bodies_stay_under_the_byte_limit() {
         let summary = "€".repeat(4000); // 12 000 bytes
-        let (text, _, _) = NtfyNotifier::message(Event::Digest {
+        let push = NtfyNotifier::message(Event::Digest {
             period: "week",
             summary: &summary,
         });
-        assert!(text.len() <= 4096, "{} bytes", text.len());
+        assert!(push.body.len() <= 4096, "{} bytes", push.body.len());
     }
 }

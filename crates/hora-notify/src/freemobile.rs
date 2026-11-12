@@ -67,21 +67,24 @@ impl Notifier for FreeMobileNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    crate::fuzz::Sent {
+        channel: "freemobile",
+        title: None,
+        body: FreeMobileNotifier::render(event),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn renders_each_event_plain() {
-        let down = FreeMobileNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = FreeMobileNotifier::render(Event::down("API", Some("boom")));
         assert_eq!(down, "API is DOWN\nboom");
 
         let recovered = FreeMobileNotifier::render(Event::Recovered {
@@ -94,7 +97,7 @@ mod tests {
             monitor: "API",
             secs_left: 3 * 86_400,
         });
-        assert!(cert.contains("expires in 3 days"));
+        assert!(cert.contains("expires in 3 d"));
         // No emoji, to keep the SMS in the cheaper GSM-7 encoding.
         assert!(down.is_ascii() && recovered.is_ascii() && cert.is_ascii());
     }

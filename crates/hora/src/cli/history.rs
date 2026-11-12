@@ -55,7 +55,12 @@ pub(crate) async fn report(month: Option<&str>) -> Result<(), CliError> {
             );
         }
         if let (Some(consumed), Some(budget)) = (row.budget_consumed_minutes, row.budget_minutes) {
-            let _ = write!(line, ", budget {consumed}m of {budget}m");
+            let _ = write!(
+                line,
+                ", budget {} of {}",
+                fmt::duration(consumed.saturating_mul(60)),
+                fmt::duration(budget.saturating_mul(60))
+            );
         }
         println!("{line}");
     }
@@ -63,8 +68,8 @@ pub(crate) async fn report(month: Option<&str>) -> Result<(), CliError> {
 }
 
 /// `hora timeline [--days N]`: the unified chronology - down/recovered
-/// transitions, operator events, pushed alerts, announcements, silences -
-/// merged newest-first. "What happened this week?" in one command.
+/// transitions, operator events, pushed alerts, announcements, silences,
+/// planned maintenance - merged newest-first. "What happened this week?" in one command.
 pub(crate) async fn timeline(args: &[String]) -> Result<(), CliError> {
     let mut days: i64 = 7;
     let mut iter = args.iter();
@@ -82,10 +87,18 @@ pub(crate) async fn timeline(args: &[String]) -> Result<(), CliError> {
     let (config, store) = open_database().await?;
     let since = chrono::Utc::now().timestamp() - days * hora_core::SECONDS_PER_DAY;
     let sources = hora_core::timeline::fetch(&store, since, 500).await?;
+    // Peers by id (a planned window names the one that announced it), the
+    // monitors on top.
     let names: std::collections::HashMap<String, String> = config
-        .monitors
+        .peers
         .iter()
-        .map(|monitor| (monitor.id.clone(), monitor.name.clone()))
+        .map(|peer| (peer.id.clone(), peer.name.clone()))
+        .chain(
+            config
+                .monitors
+                .iter()
+                .map(|monitor| (monitor.id.clone(), monitor.name.clone())),
+        )
         .collect();
     let entries = hora_core::timeline::merge(&sources, &names, since, 200);
 
@@ -96,10 +109,7 @@ pub(crate) async fn timeline(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
     for entry in entries {
-        let link = entry
-            .incident_id
-            .map(|id| format!("  (#{id})"))
-            .unwrap_or_default();
+        let link = entry.incident_id.map_or_default(|id| format!("  (#{id})"));
         println!(
             "{}  {:<9}  {}{link}",
             fmt::utc(entry.at),

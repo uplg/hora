@@ -1,21 +1,19 @@
-//! Incident history: the Askama-rendered `/history` page and the
+//! Incident history: the `/history` page and the
 //! `/history.atom` feed. The Atom XML is written by hand (a feed is a dozen
 //! lines; a template engine would not pull its weight there).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use askama::Template;
 use chrono::DateTime;
 use hora_core::db::{EventMarker, Incident, PushedAlert};
 use hora_core::fmt::{self, xml_escape};
 
 use crate::layout::Chrome;
+use crate::page::{Document, glyph, raw, state};
+use maud::{Markup, html};
 
-/// The `/history` page; rows are pre-formatted [`IncidentRow`]s, Askama does
-/// the escaping.
-#[derive(Template)]
-#[template(path = "history.html")]
+/// The `/history` page; rows are pre-formatted [`IncidentRow`]s.
 pub(crate) struct HistoryTemplate {
     /// The page chrome (its links carry the viewer's `?token=`, so a
     /// viewer authenticated by query keeps their view from page to page).
@@ -29,6 +27,102 @@ pub(crate) struct HistoryTemplate {
     pub(crate) events: Vec<EventRow>,
 }
 
+impl HistoryTemplate {
+    pub(crate) fn render(&self) -> String {
+        let chrome = &self.chrome;
+        let q = raw(chrome.q());
+        let main = html! {
+            main id="main" class="page" {
+                div.page-head {
+                    h1 { "History" }
+                    p.lede {
+                        "Every incident, newest first. Each one has its own page, written up as it happened. "
+                        a href="/history.atom" { "Follow them in a feed reader" }
+                        "."
+                    }
+                }
+                section.section.near aria-labelledby="inc" {
+                    div.section-head {
+                        h2 id="inc" { "Incidents" }
+                        span.fact { (self.incidents.len()) " shown" }
+                    }
+                    @if self.incidents.is_empty() {
+                        p.quiet-line { (glyph("up")) "Nothing to report: no incident recorded yet." }
+                    } @else {
+                        ul.past {
+                            @for incident in &self.incidents {
+                                li {
+                                    time datetime=(incident.started_iso) { (incident.day) }
+                                    span.t {
+                                        a href={ "/incident/" (incident.id) (q) } { (incident.headline) }
+                                        small {
+                                            (incident.span)
+                                            @if let Some(error) = &incident.error { " · " (error) }
+                                            @if let Some(cause) = &incident.cause { " · caused by " (cause) }
+                                            @if let Some((_, verdict)) = &incident.verdict { " · " (verdict) }
+                                        }
+                                    }
+                                    span.r {
+                                        @if incident.resolved { (state("up", "Resolved")) }
+                                        @else { (state("down", "Ongoing")) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                @if !self.pushed_alerts.is_empty() {
+                    section.section aria-labelledby="alerts" {
+                        div.section-head {
+                            h2 id="alerts" { "Alerts from your systems" }
+                            span.fact { "Sent to Hora by the services themselves" }
+                        }
+                        ul.past {
+                            @for alert in &self.pushed_alerts {
+                                li {
+                                    time datetime=(alert.iso) { (alert.at) }
+                                    span.t {
+                                        (alert.monitor) ": " (alert.title)
+                                        @if let Some(message) = &alert.message { small { (message) } }
+                                    }
+                                    span.r { (state(alert.state, &alert.severity)) }
+                                }
+                            }
+                        }
+                    }
+                }
+                @if !self.events.is_empty() {
+                    section.section aria-labelledby="events" {
+                        div.section-head {
+                            h2 id="events" { "Changes" }
+                            span.fact { "Deploys and other events, operators only" }
+                        }
+                        ul.past {
+                            @for event in &self.events {
+                                li {
+                                    time datetime=(event.iso) { (event.at) }
+                                    span.t { (event.title) }
+                                    span.r { (state("info", "Change")) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        Document::new(
+            chrome,
+            format!("History · {} status", chrome.site),
+            format!("Every incident of {}, newest first.", chrome.site),
+            main,
+        )
+        .head(html! {
+            link rel="alternate" type="application/atom+xml" title="Incident history" href="/history.atom";
+        })
+        .render()
+    }
+}
+
 /// One incident, formatted for display.
 pub(crate) struct IncidentRow {
     id: i64,
@@ -39,7 +133,7 @@ pub(crate) struct IncidentRow {
     impacted: Option<String>,
     note: Option<String>,
     snapshot: Option<String>,
-    /// Correlated event marker ("deploy api v2.3, 3m before"), when one was
+    /// Correlated event marker ("deploy api v2.3, 3 min before"), when one was
     /// recorded shortly before the down.
     event: Option<String>,
     /// Multi-vantage verdict recorded once the peers answered.
@@ -52,6 +146,11 @@ pub(crate) struct IncidentRow {
     span: String,
     /// "18 Sep 2026".
     day: String,
+    /// The start and the recovery as `<time datetime>` wants them.
+    started_iso: String,
+    ended_iso: Option<String>,
+    /// This instant, for the "Now" of an incident still open.
+    now_iso: String,
     /// "18 Sep, 19:12 UTC" and the recovery, for the facts.
     started_short: String,
     ended_short: Option<String>,
@@ -61,10 +160,11 @@ pub(crate) struct IncidentRow {
     verdict: Option<(&'static str, String)>,
 }
 
-/// A span at the size a person says it: `45 s`, `41 min`, `3 h 07 min`,
-/// `2 days 4 h` - the pages' one format ([`crate::layout::duration`]).
-pub(crate) fn human_duration(seconds: i64) -> String {
-    crate::layout::duration(seconds)
+/// A timestamp as `<time datetime>` wants it: `2026-09-18T19:12:00Z`.
+fn iso(timestamp: i64) -> String {
+    DateTime::from_timestamp(timestamp, 0).map_or_else(String::new, |at| {
+        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    })
 }
 
 /// The multi-vantage verdict (as `hora_core::mesh::confirm` writes it) in a
@@ -115,6 +215,7 @@ pub(crate) fn humanize_verdict(verdict: &str) -> Option<(&'static str, String)> 
 pub(crate) struct EventRow {
     title: String,
     at: String,
+    iso: String,
 }
 
 /// Build the event rows: newest first, timestamps formatted.
@@ -124,36 +225,238 @@ pub(crate) fn event_rows(events: &[EventMarker]) -> Vec<EventRow> {
         .map(|event| EventRow {
             title: event.title.clone(),
             at: fmt::utc(event.created_at),
+            iso: iso(event.created_at),
         })
         .collect()
 }
 
 /// The auto-generated post-mortem page (`/incident/{id}`): the incident card
 /// plus the raw markdown ready to paste into a ticket.
-#[derive(Template)]
-#[template(path = "incident.html")]
 pub(crate) struct IncidentTemplate {
     pub(crate) chrome: Chrome,
     pub(crate) row: IncidentRow,
     /// The markdown post-mortem, shown in a copyable block.
     pub(crate) markdown: String,
     /// The owl: awake while it is down, asleep once it is over.
-    pub(crate) owl: String,
+    pub(crate) owl: Markup,
     /// The raw verdict, for the operator (the visitor reads it humanized).
     pub(crate) operator: bool,
 }
 
+impl IncidentTemplate {
+    /// The account: the first failed answer, the probable cause, the operator's note.
+    fn what_happened(&self) -> Markup {
+        let row = &self.row;
+        html! {
+            h2 { "What happened" }
+            @match &row.error {
+                Some(error) => p { "The first failed check answered: " (error) "." },
+                None => p { (row.monitor) " stopped answering as expected." },
+            }
+            @if let Some(cause) = &row.cause {
+                p { "It depends on " (cause) ", which was down at the same time: the probable cause." }
+            }
+            @if let Some(note) = &row.note { p { (note) } }
+        }
+    }
+
+    /// The outage as moments: down, what changed just before, up again or still down.
+    fn timeline(&self) -> Markup {
+        let row = &self.row;
+        html! {
+            h2 { "Timeline" }
+            ol.tl {
+                li {
+                    (glyph("down"))
+                    time datetime=(row.started_iso) { (row.started_short) }
+                    span.e {
+                        b { "Down" }
+                        span {
+                            @match &row.verdict {
+                                Some((_, verdict)) => (verdict),
+                                None => "Several failures in a row: Hora retries a single failure before it records anything.",
+                            }
+                        }
+                    }
+                }
+                @if let Some(event) = &row.event {
+                    li {
+                        (glyph("info"))
+                        time datetime=(row.started_iso) { (row.started_short) }
+                        span.e { b { "Recent change" } span { (event) } }
+                    }
+                }
+                @match &row.ended_short {
+                    Some(ended) => li {
+                        (glyph("up"))
+                        time datetime=[row.ended_iso.as_deref()] { (ended) }
+                        span.e {
+                            b { "Up again" }
+                            span { @if let Some(length) = &row.length { "Down for " (length) "." } }
+                        }
+                    },
+                    None => li {
+                        (glyph("degraded"))
+                        time datetime=(row.now_iso) { "Now" }
+                        span.e {
+                            b { "Still down" }
+                            span { "This page updates when it answers again." }
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+    /// The figures beside the account.
+    fn facts(&self) -> Markup {
+        let row = &self.row;
+        html! {
+            div.facts { dl {
+                dt { "Started" } dd { (row.started_short) }
+                @if let Some(ended) = &row.ended_short { dt { "Recovered" } dd { (ended) } }
+                @if let Some(length) = &row.length { dt { "Duration" } dd { (length) } }
+                @if let Some(cause) = &row.cause { dt { "Probable cause" } dd { (cause) } }
+                @if let Some(impacted) = &row.impacted { dt { "Also affected" } dd { (impacted) } }
+                @if let Some((state, verdict)) = &row.verdict {
+                    dt { "Seen down from" } dd { (glyph(state)) " " (verdict) }
+                }
+                @if let (true, Some(vantage)) = (self.operator, &row.vantage) {
+                    dt { "Verdict, as sent" } dd { code { (vantage) } }
+                }
+            } }
+        }
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let (chrome, row) = (&self.chrome, &self.row);
+        let q = raw(chrome.q());
+        let monitor_href = html! { "/monitor/" (row.monitor_href) (q) };
+        let main = html! {
+            main id="main" class="page" {
+                nav.crumbs aria-label="Breadcrumb" {
+                    a href={ "/" (q) } { "Status" }
+                    span.sep aria-hidden="true" { "/" }
+                    a href=(monitor_href) { (row.monitor) }
+                    span.sep aria-hidden="true" { "/" }
+                    span aria-current="page" { "Incident #" (row.id) }
+                }
+                header.pm-head {
+                    (self.owl)
+                    div {
+                        p.eyebrow {
+                            span { "Post-mortem #" (row.id) }
+                            span aria-hidden="true" { "·" }
+                            @if row.resolved { (state("up", "Resolved")) }
+                            @else { (state("down", "Ongoing")) }
+                        }
+                        h1 { (row.headline) }
+                        p.sub {
+                            (row.span) "."
+                            @if let Some(impacted) = &row.impacted { " " (impacted) " depended on it." }
+                        }
+                        div.pm-actions {
+                            a.btn href=(monitor_href) { (row.monitor) "'s history" }
+                            a.btn.quiet href={ "/history" (q) } { "All incidents" }
+                        }
+                    }
+                }
+                div.pm-grid {
+                    article {
+                        (self.what_happened())
+                        (self.timeline())
+                        @if let Some(snapshot) = &row.snapshot {
+                            h2 { "What the service answered" }
+                            pre.snap { (snapshot) }
+                            p.muted.small { "Captured by Hora at the first confirmed failure." }
+                        }
+                        details.md {
+                            summary { "Markdown, for a ticket or a wiki" }
+                            pre.code { (self.markdown) }
+                            p.muted.small { "Select and copy: it is ready to paste." }
+                        }
+                    }
+                    aside { (self.facts()) }
+                }
+            }
+        };
+        Document::new(
+            chrome,
+            format!(
+                "Post-mortem #{}: {} · {} status",
+                row.id, row.monitor, chrome.site
+            ),
+            format!("{}. {}.", row.headline, row.span),
+            main,
+        )
+        .render()
+    }
+}
+
 /// The `/timeline` page: the unified chronology, newest first.
-#[derive(Template)]
-#[template(path = "timeline.html")]
 pub(crate) struct TimelineTemplate {
     pub(crate) chrome: Chrome,
     pub(crate) entries: Vec<TimelineRow>,
 }
 
+impl TimelineTemplate {
+    pub(crate) fn render(&self) -> String {
+        let chrome = &self.chrome;
+        let q = raw(chrome.q());
+        let main = html! {
+            main id="main" class="page" {
+                div.page-head {
+                    h1 { "Timeline" }
+                    p.lede {
+                        "The last 7 days, newest first: outages and recoveries, announcements"
+                        @if chrome.operator { ", changes, alerts and silences" }
+                        ". Times in UTC."
+                    }
+                }
+                section.section.near aria-label="Timeline entries" {
+                    @if self.entries.is_empty() {
+                        p.quiet-line { (glyph("up")) "A quiet week: nothing recorded." }
+                    } @else {
+                        ol.tl {
+                            @for entry in &self.entries {
+                                li {
+                                    (glyph(entry.state))
+                                    time datetime=(entry.iso) { (entry.at) }
+                                    span.e {
+                                        b { (entry.title) }
+                                        span {
+                                            span class={ "word " (entry.state) } { (entry.word) }
+                                            @if let Some(detail) = &entry.detail { " · " (detail) }
+                                            @if let Some(incident) = entry.incident {
+                                                " · "
+                                                a href={ "/incident/" (incident) (q) } { "Read the post-mortem" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        Document::new(
+            chrome,
+            format!("Timeline · {} status", chrome.site),
+            format!(
+                "What happened at {} over the last 7 days, newest first.",
+                chrome.site
+            ),
+            main,
+        )
+        .render()
+    }
+}
+
 /// One merged timeline entry, formatted for display.
 pub(crate) struct TimelineRow {
     at: String,
+    iso: String,
     /// The entry kind's shape (`down`, `up`, `info`, ...) and word.
     state: &'static str,
     word: &'static str,
@@ -173,6 +476,7 @@ pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<Timel
                 "recovered" => ("up", "Up again"),
                 "alert" => ("degraded", "Alert"),
                 "silence" => ("maint", "Silenced"),
+                "maintenance" => ("maint", "Maintenance"),
                 "announce" => ("info", "Announcement"),
                 _ => ("info", "Change"),
             };
@@ -181,6 +485,7 @@ pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<Timel
                     || fmt::utc(entry.at),
                     |at| at.format("%a %-d %b, %H:%M").to_string(),
                 ),
+                iso: iso(entry.at),
                 state,
                 word,
                 title: entry.title.clone(),
@@ -201,6 +506,7 @@ pub(crate) struct AlertRow {
     title: String,
     message: Option<String>,
     at: String,
+    iso: String,
 }
 
 /// Build the pushed-alert rows: ids resolved to display names, timestamp
@@ -225,6 +531,7 @@ pub(crate) fn alert_rows(
             title: alert.title.clone(),
             message: (!alert.message.is_empty()).then(|| alert.message.clone()),
             at: fmt::utc(alert.created_at),
+            iso: iso(alert.created_at),
         })
         .collect()
 }
@@ -248,7 +555,7 @@ pub(crate) fn incident_rows(
                 .get(&incident.monitor_id)
                 .unwrap_or(&incident.monitor_id)
                 .clone();
-            let length = incident.duration_s.map(human_duration);
+            let length = incident.duration_s.map(fmt::duration);
             let headline = match (&incident.ended_at, &length) {
                 (Some(_), Some(length)) => format!("{monitor} was down for {length}"),
                 (Some(_), None) => format!("{monitor} was down"),
@@ -282,6 +589,9 @@ pub(crate) fn incident_rows(
                 headline,
                 span,
                 day: at(incident.started_at, "%-d %b %Y"),
+                started_iso: iso(incident.started_at),
+                ended_iso: incident.ended_at.map(iso),
+                now_iso: iso(chrono::Utc::now().timestamp()),
                 started_short: at(incident.started_at, "%-d %b, %H:%M UTC"),
                 ended_short: incident
                     .ended_at
@@ -501,7 +811,7 @@ mod tests {
             reason: None,
             note: Some("fiber cut".to_owned()),
             snapshot: Some("HTTP/2 503\n\nmaintenance".to_owned()),
-            event: Some("deploy api v2.3, 3m before".to_owned()),
+            event: Some("deploy api v2.3, 3 min before".to_owned()),
             vantage: Some("confirmed down from 2/2 vantage points".to_owned()),
             created_at: 1000,
         };
@@ -510,11 +820,14 @@ mod tests {
         let rows = incident_rows(&[incident], &names);
         assert_eq!(rows[0].monitor, "Database");
         assert!(rows[0].resolved);
-        assert_eq!(rows[0].length.as_deref(), Some("1 min"));
-        assert_eq!(rows[0].headline, "Database was down for 1 min");
+        assert_eq!(rows[0].length.as_deref(), Some("1 min 30 s"));
+        assert_eq!(rows[0].headline, "Database was down for 1 min 30 s");
         assert_eq!(rows[0].impacted.as_deref(), Some("API, Web"));
         assert_eq!(rows[0].note.as_deref(), Some("fiber cut"));
-        assert_eq!(rows[0].event.as_deref(), Some("deploy api v2.3, 3m before"));
+        assert_eq!(
+            rows[0].event.as_deref(),
+            Some("deploy api v2.3, 3 min before")
+        );
         assert_eq!(
             rows[0].vantage.as_deref(),
             Some("confirmed down from 2/2 vantage points")
@@ -563,8 +876,6 @@ mod tests {
         let (_, text) = humanize_verdict("no peer watches this target, unconfirmed").unwrap();
         assert!(text.contains("no other place watches"), "{text}");
         assert!(humanize_verdict("something new").is_none());
-        assert_eq!(human_duration(41 * 60), "41 min");
-        assert_eq!(human_duration(1), "1 s");
     }
 
     #[test]

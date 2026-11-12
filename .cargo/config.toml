@@ -1,0 +1,11 @@
+# Build settings every `cargo` invocation in this repository picks up (the
+# Docker image and CI included: `.dockerignore` lets this file through).
+
+[env]
+# SQLite's memory statistics put one process-wide mutex around every
+# allocation it makes, and sqlx copies each column of each row it reads
+# (`sqlite3_value_dup`): with them on, the eight pooled readers queue behind
+# that mutex and a page that reads the database gets *slower* as visitors
+# are added. Hora never reads the statistics (no `sqlite3_status`, no soft
+# heap limit). Checked by `db::tests::sqlite_is_built_without_memory_statistics`.
+LIBSQLITE3_FLAGS = "SQLITE_DEFAULT_MEMSTATUS=0"

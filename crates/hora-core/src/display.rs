@@ -1,0 +1,276 @@
+//! The state a page shows for a monitor, a peer's view of one, or a whole
+//! page: one enum, so every place that words, draws or sorts a state matches
+//! it exhaustively. As class names passed around and matched with a `_ =>`
+//! fallback, a typo read as "No data" without a word from the compiler.
+
+use crate::status::MonitorState;
+
+/// What the page shows: the four statuses a check can give, plus planned
+/// maintenance (which hides the status under it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayState {
+    Up,
+    /// Slow, or a failed check being retried before it is called down.
+    Degraded,
+    Down,
+    /// Inside a planned maintenance window.
+    Maint,
+    /// No check recorded yet.
+    None,
+}
+
+impl DisplayState {
+    /// The state's name in the markup: its CSS class and its glyph in the
+    /// sprite (`#g-down`). The templates compare and print this.
+    #[must_use]
+    pub const fn class(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Degraded => "degraded",
+            Self::Down => "down",
+            Self::Maint => "maint",
+            Self::None => "none",
+        }
+    }
+
+    /// The state's word: the word is the truth, the shape and the colour help.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Up => "Up",
+            Self::Degraded => "Slow",
+            Self::Down => "Down",
+            Self::Maint => "Maintenance",
+            Self::None => "No data",
+        }
+    }
+
+    /// The one-character shape for plain text, the same shapes as the page's:
+    /// a disc, a half disc, a diamond, a clock, a dashed ring. Always beside
+    /// its word.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Up => "●",
+            Self::Degraded => "◐",
+            Self::Down => "◆",
+            Self::Maint => "◷",
+            Self::None => "◌",
+        }
+    }
+
+    /// How urgent the state is, for "problems first" (lowest first).
+    #[must_use]
+    pub const fn urgency(self) -> u8 {
+        match self {
+            Self::Down => 0,
+            Self::Degraded => 1,
+            Self::Maint => 2,
+            Self::None => 3,
+            Self::Up => 4,
+        }
+    }
+
+    /// Whether the target answers (up or slow), so an answer time means
+    /// something.
+    #[must_use]
+    pub const fn answers(self) -> bool {
+        match self {
+            Self::Up | Self::Degraded => true,
+            Self::Down | Self::Maint | Self::None => false,
+        }
+    }
+
+    /// What is shown for a monitor with this `status`: maintenance inside
+    /// a planned window whatever the checks say, and up for a down seen
+    /// from this node only (`local_only`) - the service is up for its users.
+    #[must_use]
+    pub fn shown(status: MonitorState, in_maintenance: bool, local_only: bool) -> Self {
+        if in_maintenance {
+            Self::Maint
+        } else if local_only {
+            Self::Up
+        } else {
+            Self::from(status)
+        }
+    }
+
+    /// A whole page's state from how many of its `total` monitors show each
+    /// state: the worst shown, maintenance when nothing is worse, and no
+    /// data only when nothing has any. The status page's headline and the
+    /// API's `overall` are this one rule.
+    #[must_use]
+    pub const fn of_counts(
+        down: usize,
+        degraded: usize,
+        maint: usize,
+        none: usize,
+        total: usize,
+    ) -> Self {
+        if down > 0 {
+            Self::Down
+        } else if degraded > 0 {
+            Self::Degraded
+        } else if maint > 0 {
+            Self::Maint
+        } else if none == total {
+            Self::None
+        } else {
+            Self::Up
+        }
+    }
+
+    /// [`Self::of_counts`] over the states themselves.
+    #[must_use]
+    pub fn overall(states: impl IntoIterator<Item = Self>) -> Self {
+        let (mut down, mut degraded, mut maint, mut none, mut total) = (0, 0, 0, 0, 0);
+        for state in states {
+            total += 1;
+            match state {
+                Self::Down => down += 1,
+                Self::Degraded => degraded += 1,
+                Self::Maint => maint += 1,
+                Self::None => none += 1,
+                Self::Up => {}
+            }
+        }
+        Self::of_counts(down, degraded, maint, none, total)
+    }
+
+    /// Worth a look: down, slow or in maintenance.
+    #[must_use]
+    pub const fn notable(self) -> bool {
+        match self {
+            Self::Down | Self::Degraded | Self::Maint => true,
+            Self::Up | Self::None => false,
+        }
+    }
+}
+
+/// A monitor's or a peer's status as a display state (`unknown` has no data
+/// yet: `none`).
+impl From<MonitorState> for DisplayState {
+    fn from(status: MonitorState) -> Self {
+        match status {
+            MonitorState::Up => Self::Up,
+            MonitorState::Degraded => Self::Degraded,
+            MonitorState::Down => Self::Down,
+            MonitorState::Unknown => Self::None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [DisplayState; 5] = [
+        DisplayState::Up,
+        DisplayState::Degraded,
+        DisplayState::Down,
+        DisplayState::Maint,
+        DisplayState::None,
+    ];
+
+    /// The names the stylesheet, the sprite and the templates know: renaming
+    /// one here without them breaks the page silently.
+    #[test]
+    fn classes_words_and_shapes_are_the_pages() {
+        let classes: Vec<&str> = ALL.iter().map(|state| state.class()).collect();
+        assert_eq!(classes, ["up", "degraded", "down", "maint", "none"]);
+        let words: Vec<&str> = ALL.iter().map(|state| state.word()).collect();
+        assert_eq!(words, ["Up", "Slow", "Down", "Maintenance", "No data"]);
+        let shapes: Vec<&str> = ALL.iter().map(|state| state.symbol()).collect();
+        assert_eq!(shapes, ["●", "◐", "◆", "◷", "◌"]);
+    }
+
+    #[test]
+    fn a_status_without_data_shows_as_none() {
+        assert_eq!(
+            DisplayState::from(MonitorState::Unknown),
+            DisplayState::None
+        );
+        assert_eq!(DisplayState::from(MonitorState::Down), DisplayState::Down);
+        assert_eq!(DisplayState::from(MonitorState::Unknown).word(), "No data");
+    }
+
+    #[test]
+    fn problems_sort_first() {
+        let mut states = ALL;
+        states.sort_by_key(|state| state.urgency());
+        assert_eq!(
+            states,
+            [
+                DisplayState::Down,
+                DisplayState::Degraded,
+                DisplayState::Maint,
+                DisplayState::None,
+                DisplayState::Up,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_shows_the_worst_of_what_it_holds() {
+        use DisplayState::{Degraded, Down, Maint, None, Up};
+        // (down, degraded, maint, none, total)
+        assert_eq!(DisplayState::of_counts(1, 5, 5, 0, 20), Down);
+        assert_eq!(DisplayState::of_counts(0, 1, 5, 3, 20), Degraded);
+        assert_eq!(DisplayState::of_counts(0, 0, 1, 3, 20), Maint);
+        // Some without data, the rest up: up. All without data: no data.
+        assert_eq!(DisplayState::of_counts(0, 0, 0, 3, 20), Up);
+        assert_eq!(DisplayState::of_counts(0, 0, 0, 20, 20), None);
+        assert_eq!(DisplayState::of_counts(0, 0, 0, 0, 20), Up);
+        // Nothing to show has no data either.
+        assert_eq!(DisplayState::of_counts(0, 0, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn the_overall_state_counts_each_state_once() {
+        use DisplayState::{Degraded, Down, Maint, None, Up};
+        assert_eq!(DisplayState::overall([Up, Up, Up]), Up);
+        assert_eq!(DisplayState::overall([Up, None, Up]), Up);
+        assert_eq!(DisplayState::overall([None, None]), None);
+        assert_eq!(DisplayState::overall([Up, Maint, None]), Maint);
+        assert_eq!(DisplayState::overall([Maint, Degraded, Up]), Degraded);
+        assert_eq!(DisplayState::overall([Degraded, Down, Maint]), Down);
+        // One of each kind alone is itself (a count gone wrong would not be).
+        for state in ALL {
+            assert_eq!(DisplayState::overall([state]), state, "{state:?}");
+        }
+        assert_eq!(DisplayState::overall([]), None);
+    }
+
+    #[test]
+    fn what_answers_and_what_is_worth_a_look() {
+        let answering: Vec<bool> = ALL.iter().map(|state| state.answers()).collect();
+        assert_eq!(answering, [true, true, false, false, false]);
+        let notable: Vec<bool> = ALL.iter().map(|state| state.notable()).collect();
+        assert_eq!(notable, [false, true, true, true, false]);
+    }
+
+    #[test]
+    fn maintenance_hides_the_status_and_a_local_down_shows_up() {
+        use crate::status::MonitorState;
+        assert_eq!(
+            DisplayState::shown(MonitorState::Down, true, false),
+            DisplayState::Maint
+        );
+        assert_eq!(
+            DisplayState::shown(MonitorState::Down, true, true),
+            DisplayState::Maint
+        );
+        assert_eq!(
+            DisplayState::shown(MonitorState::Down, false, true),
+            DisplayState::Up
+        );
+        assert_eq!(
+            DisplayState::shown(MonitorState::Down, false, false),
+            DisplayState::Down
+        );
+        assert_eq!(
+            DisplayState::shown(MonitorState::Unknown, false, false),
+            DisplayState::None
+        );
+    }
+}

@@ -7,6 +7,7 @@
 //! subcommand (the [`cli`] module), dispatched here.
 
 mod cli;
+mod listener;
 mod serve;
 mod top;
 
@@ -39,7 +40,7 @@ async fn run_subcommand(args: &[String]) -> Result<(), CliError> {
     let rest = &args[2..];
     match args[1].as_str() {
         "import" => cli::admin::import_kuma(rest),
-        "check" => cli::admin::check_config(),
+        "check" => cli::admin::check_config(rest),
         "test-alert" => {
             // Tracing first: delivery failures surface as per-channel
             // warnings from the notifiers, and that is the whole point.
@@ -76,6 +77,7 @@ async fn run_subcommand(args: &[String]) -> Result<(), CliError> {
             cli::history::postmortem(id).await
         }
         "silence" => cli::annotations::silence(rest).await,
+        "maintenance" => cli::annotations::maintenance(rest).await,
         "digest" => cli::admin::digest_preview().await,
         "report" => cli::history::report(rest.first().map(String::as_str)).await,
         "doctor" => cli::admin::doctor().await,

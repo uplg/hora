@@ -27,11 +27,32 @@ pub enum SilenceError {
     Database(crate::db::Error),
 }
 
+/// What an unparseable or too long duration is answered, wherever one is
+/// asked for (a silence, a maintenance window).
+pub const INVALID_DURATION: &str = "invalid duration (use e.g. 10m, 1h30m; max 7d)";
+
+/// The stored id of a silence (and the selector of a maintenance window)
+/// that covers every monitor.
+pub const ALL: &str = "*";
+
+impl SilenceError {
+    /// The error in words fit for an API answer: fixed, so nothing a caller
+    /// sent is echoed back.
+    #[must_use]
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::InvalidDuration => INVALID_DURATION,
+            Self::NoIds => "no monitor ids given",
+            Self::UnknownId(_) => "unknown monitor id",
+            Self::Database(_) => "recording the silence failed",
+        }
+    }
+}
+
 impl std::fmt::Display for SilenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidDuration => f.write_str("invalid duration (use e.g. 10m, 1h30m; max 7d)"),
-            Self::NoIds => f.write_str("no monitor ids given"),
+            Self::InvalidDuration | Self::NoIds => f.write_str(self.message()),
             Self::UnknownId(id) => write!(f, "unknown monitor id {id:?}"),
             Self::Database(err) => write!(f, "recording the silence failed: {err}"),
         }
@@ -84,10 +105,10 @@ pub async fn apply(
 
 /// The validated id list: `["*"]` for `all` / `*`, otherwise every listed id,
 /// each a configured monitor or watched peer.
-fn resolve_ids(config: &Config, ids: &str) -> Result<Vec<String>, SilenceError> {
+pub(crate) fn resolve_ids(config: &Config, ids: &str) -> Result<Vec<String>, SilenceError> {
     let ids = ids.trim();
-    if ids == "all" || ids == "*" {
-        return Ok(vec!["*".to_owned()]);
+    if ids == "all" || ids == ALL {
+        return Ok(vec![ALL.to_owned()]);
     }
     let ids: Vec<String> = ids
         .split(',')
@@ -135,6 +156,7 @@ mod tests {
             name = "Paris"
             listen_id = "paris-in"
             expect_every_secs = 60
+            listen_token = "a-long-enough-listen-token"
             "#,
         )
         .expect("config")
@@ -189,5 +211,24 @@ mod tests {
             Some(MAX_SILENCE_REASON_CHARS)
         );
         assert!(db::is_silenced(&store, "api", now).await.unwrap());
+    }
+
+    #[test]
+    fn a_silence_error_says_what_went_wrong() {
+        assert_eq!(SilenceError::InvalidDuration.message(), INVALID_DURATION);
+        assert_eq!(SilenceError::InvalidDuration.to_string(), INVALID_DURATION);
+        assert_eq!(SilenceError::NoIds.message(), "no monitor ids given");
+        assert_eq!(
+            SilenceError::UnknownId("x".to_owned()).message(),
+            "unknown monitor id"
+        );
+        assert_eq!(
+            SilenceError::UnknownId("x".to_owned()).to_string(),
+            "unknown monitor id \"x\""
+        );
+        assert!(std::error::Error::source(&SilenceError::NoIds).is_none());
+        let database = SilenceError::Database(sqlx::Error::PoolClosed);
+        assert!(std::error::Error::source(&database).is_some());
+        assert_eq!(database.message(), "recording the silence failed");
     }
 }

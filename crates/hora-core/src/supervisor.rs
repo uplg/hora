@@ -1,12 +1,24 @@
 //! Supervises monitor tasks and hot-reloads the configuration.
 //!
 //! The live config is shared through a [`watch`] channel every component reads.
-//! On SIGHUP or a change to the config file, the file is re-read and the running
+//! On SIGHUP or a change to the config file (how one is noticed is
+//! [`config_watch`]'s business), the file is re-read and the running
 //! monitor tasks are reconciled: new monitors start, removed ones stop, changed
 //! ones restart - unchanged monitors keep running, so a reload never interrupts
 //! existing checks. Each monitor's (and peer's) alert state lives here, outside
 //! its task, so a restarted task neither re-announces an outage nor loses its
-//! recovery; a task that died (a panic) is noticed, logged and restarted.
+//! recovery; a task that stopped on its own is noticed, logged and restarted.
+//!
+//! That last net does not catch a panic in a release build: the release
+//! profile is `panic = "abort"` (binary size), so a panic anywhere ends the
+//! whole process, and it is the container runtime or the service manager
+//! (`restart: unless-stopped`, `Restart=on-failure`) that brings Hora back. The
+//! in-memory alert state is lost with the process; what the next start
+//! rebuilds it from is in the database: an open incident says the monitor was
+//! down (so its down is not announced twice and its recovery is), and
+//! `incidents.notified` says whether that down alert had gone out (if not, the
+//! start confirms and announces it). Only a debug build, which unwinds, sees a
+//! panicked task here.
 //!
 //! `server.bind` is read once at startup; changing it still requires a restart.
 //! Everything else - monitors, peers (the surveillance mesh), notification
@@ -15,14 +27,12 @@
 //! heartbeat reads `[health]` on every cycle.
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::db::Store;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::Client;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -30,6 +40,7 @@ use tracing::{error, info, warn};
 
 use crate::coalesce::{self, AlertMsg};
 use crate::config::{self, Config, Monitor, Peer};
+use crate::config_watch;
 use crate::mesh::peer::spawn_watch;
 use crate::notifications::{self, Notifiers};
 use crate::scheduler::{self, AlertCell};
@@ -78,9 +89,12 @@ impl<T: PartialEq> Fleet<T> {
         self.alert_states.entry(id.to_owned()).or_default().clone()
     }
 
-    /// Remove (and log) every task that finished on its own - only a panic
-    /// does that before shutdown - so the next reconcile restarts it with its
-    /// alert state. Returns whether any was found.
+    /// Remove (and log) every task that finished on its own, so the next
+    /// reconcile restarts it with its alert state. Returns whether any was
+    /// found. Before shutdown a task has no reason to return, so this is a net
+    /// for a loop that ended by mistake; a panic reaches it only in a build
+    /// that unwinds (debug, tests) - in a release build it has already aborted
+    /// the process (see the module docs).
     async fn reap_dead(&mut self, what: &str) -> bool {
         let dead: Vec<String> = self
             .running
@@ -90,7 +104,8 @@ impl<T: PartialEq> Fleet<T> {
             .collect();
         for id in &dead {
             if let Some(run) = self.running.remove(id) {
-                // A JoinError's Display carries the panic message.
+                // A JoinError's Display carries the panic message (builds
+                // that unwind only).
                 let cause = run
                     .task
                     .await
@@ -110,9 +125,9 @@ impl<T: PartialEq> Fleet<T> {
     }
 }
 
-/// How often the supervisor checks for tasks that died (a panic in a probe or
-/// in the timer, which nothing else would notice: a monitor would silently
-/// stop being checked).
+/// How often the supervisor checks for tasks that stopped on their own, which
+/// nothing else would notice: a monitor would silently stop being checked.
+/// (A panic is not one of them in a release build: it aborts the process.)
 const LIVENESS_CHECK: Duration = Duration::from_secs(30);
 
 /// The shared handles threaded from [`start`] through the reload loop into each
@@ -157,6 +172,7 @@ pub fn start(
     let coalescer = coalesce::spawn(
         rx.clone(),
         Arc::clone(&notifier),
+        store.clone(),
         alerts_rx,
         shutdown.clone(),
     );
@@ -196,18 +212,16 @@ async fn supervise(
     reconcile(&mut monitors, &rx, &deps, &shutdown);
     reconcile_peers(&mut peers, &rx, &deps, &shutdown);
 
-    // The raw text last applied: a file event whose content is unchanged (a touch,
-    // or a spurious event from some filesystems) is ignored, so a flapping watcher
-    // can never spin the supervisor.
-    let mut last_raw = std::fs::read_to_string(&config_path).unwrap_or_default();
-
-    let mut reloads = reload_signals(&config_path);
+    // Everything that can ask for a reload, debounced and reduced to "the file
+    // now holds a text that was not seen before"; dropped (and so stopped) when
+    // this function returns.
+    let mut reloads = config_watch::start(&config_path);
     let mut liveness = tokio::time::interval(LIVENESS_CHECK);
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut coalescer_dead_logged = false;
     loop {
-        let signal = tokio::select! {
-            signal = reloads.recv() => signal,
+        let changed = tokio::select! {
+            changed = reloads.next_change() => changed,
             _ = liveness.tick() => {
                 // A task finishing because shutdown began is not a death.
                 if *shutdown.borrow() {
@@ -221,70 +235,75 @@ async fn supervise(
                 }
                 if coalescer.is_finished() && !coalescer_dead_logged {
                     coalescer_dead_logged = true;
-                    error!("the alert coalescer stopped: down and recovered alerts can no longer be delivered until restart");
+                    error!("the alert coalescer stopped: down and recovered alerts can no longer be delivered until Hora is restarted");
                 }
                 continue;
             }
             _ = shutdown.changed() => break,
         };
-        if signal.is_none() {
+        let Some(raw) = changed else {
             break;
-        }
-        // Debounce: let a burst settle, then drain everything that piled up, so one
-        // edit (which fires several events) becomes a single reload.
-        tokio::time::sleep(RELOAD_DEBOUNCE).await;
-        while reloads.try_recv().is_ok() {}
-
-        let raw = match std::fs::read_to_string(&config_path) {
-            Ok(raw) => raw,
-            Err(err) => {
-                warn!("config reload skipped, cannot read file: {err:#}");
-                continue;
-            }
         };
-        if raw == last_raw {
-            continue; // Content unchanged: nothing to do.
-        }
 
-        match config::parse(&raw) {
-            Ok(config) => {
-                last_raw = raw;
-                let config = Arc::new(config);
-                // Rebuild the channels too, so credential/channel changes
-                // apply live. The per-channel failure counters are carried over
-                // so a channel that has been failing survives the reload.
-                let health = deps.notifier.load().health();
-                deps.notifier.store(Arc::new(notifications::build(
-                    &config,
-                    &deps.client,
-                    Some(health),
-                )));
-                if tx.send(Arc::clone(&config)).is_err() {
-                    break;
-                }
-                reconcile(&mut monitors, &rx, &deps, &shutdown);
-                reconcile_peers(&mut peers, &rx, &deps, &shutdown);
-                info!(
-                    "configuration reloaded ({} monitors, {} peers, {} channels)",
-                    config.monitors.len(),
-                    config.peers.iter().filter(|peer| peer.is_watched()).count(),
-                    deps.notifier.load().len(),
-                );
-            }
-            Err(err) => warn!("config reload failed, keeping current config: {err:#}"),
-        }
+        let Some(config) = apply_reload(&raw, &config_path, &tx, &deps.notifier, &deps.client)
+        else {
+            continue;
+        };
+        reconcile(&mut monitors, &rx, &deps, &shutdown);
+        reconcile_peers(&mut peers, &rx, &deps, &shutdown);
+        info!(
+            "configuration reloaded ({} monitors, {} peers, {} channels)",
+            config.monitors.len(),
+            config.peers.iter().filter(|peer| peer.is_watched()).count(),
+            deps.notifier.load().len(),
+        );
     }
 
     // On shutdown the monitor and peer-watch tasks observe the same signal and
-    // break; await them, then the coalescer (which drains its queue).
+    // break; await them, then close the coalescer's inbox (the last sender is
+    // ours) so it handles every alert they sent on their way out, releases its
+    // grouping window and empties the delivery lanes.
     monitors.drain().await;
     peers.drain().await;
+    drop(deps);
     let _ = coalescer.await;
 }
 
-/// How long to wait after the first file event before reloading, so a burst of
-/// events (and any self-triggered ones) collapse into a single reload.
-const RELOAD_DEBOUNCE: Duration = Duration::from_millis(500);
+/// Parse the re-read config text and, if it loads, put it in force: the
+/// channels are rebuilt (so credential and channel changes apply live, with
+/// the per-channel failure counters carried over so a channel that has been
+/// failing survives the reload) and the new config is published. A text that
+/// does not load - a syntax error, a value validation refuses - changes
+/// nothing: the node keeps watching and alerting on the config it had, and
+/// says so. What the loader only warns about (a `${VAR}` that is not set, a
+/// channel it leaves disabled) applies, with its warning.
+fn apply_reload(
+    raw: &str,
+    config_path: &Path,
+    tx: &watch::Sender<Arc<Config>>,
+    notifier: &Notifiers,
+    client: &Client,
+) -> Option<Arc<Config>> {
+    match config::parse_at(raw, config_path) {
+        Ok(config) => {
+            let config = Arc::new(config);
+            let health = notifier.load().health();
+            notifier.store(Arc::new(notifications::build(
+                &config,
+                client,
+                Some(health),
+            )));
+            // The supervisor holds a receiver of its own, so nobody is ever
+            // missing to hear this.
+            tx.send_replace(Arc::clone(&config));
+            Some(config)
+        }
+        Err(err) => {
+            warn!("config reload failed, keeping current config: {err:#}");
+            None
+        }
+    }
+}
 
 /// Diff running tasks against the latest config: stop removed or changed
 /// monitors, start new or changed ones, leave unchanged ones untouched. A
@@ -327,6 +346,7 @@ fn reconcile(
                     alerts: deps.alerts.clone(),
                     last_tick: Arc::clone(&deps.last_tick),
                     alert_state: fleet.alert_state(&monitor.id),
+                    reannounce_secs: scheduler::REANNOUNCE_SECS,
                 },
                 shutdown.clone(),
             );
@@ -418,85 +438,102 @@ fn reconcile_peers(
     }
 }
 
-/// A channel that fires whenever the config should be reloaded: on SIGHUP, and
-/// whenever the config file changes on disk.
-fn reload_signals(config_path: &Path) -> mpsc::Receiver<()> {
-    let (tx, rx) = mpsc::channel(8);
-
-    spawn_sighup(tx.clone());
-
-    match file_watcher(config_path, tx) {
-        Ok(watcher) => {
-            // The watcher stops once dropped, so keep it alive for the process.
-            tokio::spawn(async move {
-                let _watcher = watcher;
-                std::future::pending::<()>().await;
-            });
-        }
-        Err(err) => warn!("config file watching disabled: {err}"),
-    }
-
-    rx
-}
-
-#[cfg(unix)]
-fn spawn_sighup(tx: mpsc::Sender<()>) {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    tokio::spawn(async move {
-        let mut hangup = match signal(SignalKind::hangup()) {
-            Ok(hangup) => hangup,
-            Err(err) => {
-                warn!("cannot listen for SIGHUP: {err}");
-                return;
-            }
-        };
-        while hangup.recv().await.is_some() {
-            if tx.send(()).await.is_err() {
-                break;
-            }
-        }
-    });
-}
-
-#[cfg(not(unix))]
-fn spawn_sighup(_tx: mpsc::Sender<()>) {}
-
-fn file_watcher(config_path: &Path, tx: mpsc::Sender<()>) -> notify::Result<RecommendedWatcher> {
-    // Resolve symlinks so we watch the real file's directory: a symlinked config
-    // would otherwise point the watcher at the link's directory and miss edits to
-    // the target. (Reads still go through the original path.)
-    let resolved = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
-    let watched_name = resolved.file_name().map(OsStr::to_owned);
-    let directory = resolved
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        let Ok(event) = event else { return };
-        // Ignore access (read) events: reading the file - including our own reload
-        // read - must never trigger a reload, or the watcher feeds itself forever.
-        if matches!(event.kind, EventKind::Access(_)) {
-            return;
-        }
-        let touches_config = event
-            .paths
-            .iter()
-            .any(|path| path.file_name().map(OsStr::to_owned) == watched_name);
-        if touches_config {
-            // Non-blocking: a dropped redundant event is harmless (the next one
-            // triggers a reload), and this avoids any off-runtime blocking_send.
-            let _ = tx.try_send(());
-        }
-    })?;
-    watcher.watch(&directory, RecursiveMode::NonRecursive)?;
-    Ok(watcher)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `reap_dead` is still for: a task that returned on its own.
+    #[tokio::test]
+    async fn a_task_that_returned_is_reaped_once() {
+        let mut fleet: Fleet<u8> = Fleet::default();
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        fleet
+            .running
+            .insert("api".to_owned(), Running { spec: 1, task });
+        assert!(fleet.reap_dead("monitor").await);
+        assert!(fleet.running.is_empty());
+        assert!(!fleet.reap_dead("monitor").await);
+    }
+
+    /// The docs of this module, of `AlertCell` and of the status refresher say
+    /// a panic aborts a release build. They are wrong the day this changes.
+    #[test]
+    fn the_release_profile_aborts_on_panic() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let release = manifest
+            .split("[profile.release]")
+            .nth(1)
+            .expect("a release profile");
+        let release = release.split("\n[").next().unwrap_or(release);
+        assert!(release.contains("panic = \"abort\""), "{release}");
+    }
+
+    const RELOAD_BEFORE: &str = "[page]\n[server]\n[[channels]]\nname = \"ops\"\n\
+         type = \"discord\"\nwebhook_url = \"https://discord.example/hook\"\n";
+
+    /// A reload that does not load (here: a duplicate channel name, then text
+    /// that is not TOML) leaves the config and the channels in force exactly
+    /// as they were; the next good one applies.
+    #[test]
+    fn a_failed_reload_keeps_the_config_and_the_channels() {
+        let path = Path::new("config.toml");
+        let client = Client::new();
+        let initial = Arc::new(config::parse(RELOAD_BEFORE).unwrap());
+        let notifier = notifications::shared(&initial, &client);
+        let (tx, rx) = watch::channel(Arc::clone(&initial));
+
+        let broken = format!(
+            "{RELOAD_BEFORE}[[channels]]\nname = \"ops\"\ntype = \"slack\"\n\
+             webhook_url = \"https://slack.example/hook\"\n"
+        );
+        assert!(apply_reload(&broken, path, &tx, &notifier, &client).is_none());
+        assert!(Arc::ptr_eq(&rx.borrow(), &initial));
+        assert_eq!(notifier.load().names().collect::<Vec<_>>(), ["ops"]);
+        // Not TOML at all: the same.
+        assert!(apply_reload("[page", path, &tx, &notifier, &client).is_none());
+        assert!(Arc::ptr_eq(&rx.borrow(), &initial));
+
+        let renamed = RELOAD_BEFORE.replace("\"ops\"", "\"oncall\"");
+        let applied = apply_reload(&renamed, path, &tx, &notifier, &client).expect("loads");
+        assert!(Arc::ptr_eq(&rx.borrow(), &applied));
+        assert_eq!(notifier.load().names().collect::<Vec<_>>(), ["oncall"]);
+    }
+
+    /// A variable that is not set is no reason to refuse a reload: the config
+    /// applies, the channel left without its secret is disabled while the
+    /// other keeps delivering, and both facts are warned about by name.
+    #[test]
+    fn a_reload_with_an_unset_variable_applies_with_its_warnings() {
+        let path = Path::new("config.toml");
+        let client = Client::new();
+        let initial = Arc::new(config::parse(RELOAD_BEFORE).unwrap());
+        let notifier = notifications::shared(&initial, &client);
+        let (tx, rx) = watch::channel(Arc::clone(&initial));
+
+        let edited = format!(
+            "{RELOAD_BEFORE}[[channels]]\nname = \"phone\"\ntype = \"gotify\"\n\
+             url = \"https://gotify.example\"\n\
+             token = \"${{HORA_TEST_A_VARIABLE_NOBODY_SETS}}\"\n"
+        );
+        let (applied, warnings) =
+            config::captured_warnings(|| apply_reload(&edited, path, &tx, &notifier, &client));
+        let applied = applied.expect("the reload applies");
+        assert!(Arc::ptr_eq(&rx.borrow(), &applied));
+        assert_eq!(applied.channels.len(), 2);
+        assert_eq!(notifier.load().names().collect::<Vec<_>>(), ["ops"]);
+        assert_eq!(
+            warnings,
+            [
+                "channels[1].token: environment variable HORA_TEST_A_VARIABLE_NOBODY_SETS is \
+                 not set (write ${HORA_TEST_A_VARIABLE_NOBODY_SETS:-} if it is optional, or \
+                 ${HORA_TEST_A_VARIABLE_NOBODY_SETS:-fallback} for a default)",
+                "channel phone: token is empty, the channel is disabled until it is set",
+            ]
+        );
+    }
 
     #[test]
     fn monitors_share_a_probe_client_per_proxy() {

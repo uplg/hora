@@ -106,7 +106,7 @@ pages, and no em-dashes.
 | All Systems Operational | Everything is running. |
 | Major outage on payments-api | Card payments are down since 14:02. |
 | Vantage disagreement 1/3 | Our Paris checkpoint can't reach it; the others can. Not an outage. |
-| Resolved | Up again at 19:53. Down for 41 minutes. |
+| Resolved | Up again at 19:53. Down for 41 min. |
 
 ## Using the brand
 

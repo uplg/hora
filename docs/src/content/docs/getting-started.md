@@ -26,6 +26,12 @@ about who consumes it.
 
 Your history lives on the `hora-data` volume and survives upgrades.
 
+Mount the config's directory, as above, not `config.toml` alone: a file
+mounted on its own stays the file it was when the container started, so the
+first editor or deploy tool that replaces it by renaming would leave Hora on
+the old one until a restart (see
+[Live reload](../configuration/#live-reload---no-blind-window)).
+
 ## A first config
 
 ```toml
@@ -56,7 +62,9 @@ timeout_secs = 10
 
 Any `${VAR}` in the file is replaced from the environment at load, so secrets
 stay out of the config: pass `-e HORA_TELEGRAM_TOKEN=123:abc` to the
-container. Validate with `hora check` (non-zero exit on error, CI-friendly),
+container. A variable that is not set is warned about, with the key that
+uses it. Validate with `hora check` (non-zero exit on error, CI-friendly;
+`--strict` also fails on warnings),
 and verify your notification chain with `hora test-alert` *before* the first
 real incident.
 
@@ -116,6 +124,8 @@ Four are read directly (everything else lives in the config file):
 | `HORA_EXEC_DIR` | Enables [exec probes](../guides/monitors/#exec) and confines them to this directory |
 
 Plus `HORA_LOG` for log filtering (a `tracing` filter string, default `info`).
+Logs are coloured only when standard output is a terminal, and never when
+`NO_COLOR` is set.
 
 ## Next steps
 

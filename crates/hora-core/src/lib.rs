@@ -1,12 +1,15 @@
 //! Core of Hora: configuration, probing, storage, TLS-expiry and scheduling.
 
+mod alert_once;
 pub mod announce;
 pub mod cert;
 pub mod coalesce;
 pub mod config;
+pub mod config_watch;
 mod connect;
 pub mod db;
 pub mod digest;
+pub mod display;
 pub mod doctor;
 mod domain_expiry;
 mod exec;
@@ -18,6 +21,7 @@ pub mod import;
 pub mod maintenance;
 pub mod mesh;
 pub mod notifications;
+pub mod planned;
 pub mod postmortem;
 pub mod probe;
 mod rdap;
@@ -35,6 +39,21 @@ pub mod topology;
 pub mod tune;
 mod tunnel;
 pub mod updates;
+
+/// The ways into private modules for the fuzz targets in `fuzz/` at the
+/// repository root. Built with `--cfg fuzzing` only, which `cargo fuzz` sets:
+/// no ordinary build has it. The public modules carry their own `fuzz`
+/// submodule (`planned::fuzz`, `probe::fuzz`, `cert::fuzz`, `config::fuzz`,
+/// `updates::fuzz`).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::exec::fuzz as exec;
+    pub use crate::heartbeat::fuzz as heartbeat;
+    pub use crate::rdap::fuzz as rdap;
+    pub use crate::release::fuzz as release;
+    pub use crate::tunnel::fuzz as tunnel;
+}
 
 /// Seconds in a day (UTC), shared across the time-bucketing logic.
 pub const SECONDS_PER_DAY: i64 = 86_400;

@@ -42,6 +42,27 @@ pub(crate) async fn webhook_sink() -> (String, Posts) {
     (format!("http://{addr}/hook"), posts)
 }
 
+/// A webhook receiver that refuses every post with a 400: a permanent failure,
+/// so the channel reports it without retrying. Returns its URL.
+pub(crate) async fn webhook_refusing() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut socket = BufReader::new(socket);
+                while read_request(&mut socket).await.is_some() {
+                    let reply = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                    if socket.get_mut().write_all(reply).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    format!("http://{addr}/hook")
+}
+
 /// One HTTP/1.1 request's body (`Content-Length` framed); `None` at EOF.
 async fn read_request(socket: &mut BufReader<TcpStream>) -> Option<Vec<u8>> {
     let mut length = 0;

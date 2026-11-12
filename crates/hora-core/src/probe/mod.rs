@@ -8,11 +8,41 @@ mod dns;
 mod family;
 mod http;
 mod icmp;
+pub mod local;
 mod reason;
 mod snapshot;
 mod tcp;
 #[cfg(test)]
 mod tests;
+
+/// What a probe does with a monitored server's answer, for the fuzz targets
+/// in `fuzz/` (built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use crate::config::HttpSpec;
+
+    /// The body assertions of `spec` against `body`: the failure, if any.
+    #[must_use]
+    pub fn check_assertions(spec: &HttpSpec, body: &[u8]) -> Option<String> {
+        super::http::check_assertions(spec, body)
+    }
+
+    /// The failure snapshot of an answer with these headers and this body,
+    /// and the one-line snippet of the body.
+    #[must_use]
+    pub fn snapshot(headers: &reqwest::header::HeaderMap, body: &[u8]) -> (String, String) {
+        let head = super::snapshot::render_head(
+            reqwest::Version::HTTP_11,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            headers,
+        );
+        (
+            super::snapshot::render_snapshot(&head, body),
+            super::snapshot::snippet(body),
+        )
+    }
+}
 
 pub use reason::{FailureKind, public_reason};
 
@@ -59,6 +89,26 @@ impl Outcome {
         self.status == CheckStatus::Degraded
     }
 
+    /// Whether the check could not run for lack of resources on this host:
+    /// no verdict on the target, to be skipped rather than recorded.
+    #[must_use]
+    pub fn is_local_fault(&self) -> bool {
+        self.reason == Some(FailureKind::Local)
+    }
+
+    /// A failed check that is this host's own exhaustion becomes a local
+    /// fault: by the cause its error names when it names one, else by asking
+    /// whether a socket can still be opened at all.
+    pub(crate) fn excusing_exhaustion(self) -> Self {
+        if self.is_up() || self.is_local_fault() {
+            return self;
+        }
+        match local::exhausted_now() {
+            Some(detail) => Self::down(FailureKind::Local, detail),
+            None => self,
+        }
+    }
+
     pub(crate) fn down(kind: FailureKind, error: String) -> Self {
         Self {
             status: CheckStatus::Down,
@@ -101,7 +151,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 pub async fn run(client: &Client, monitor: &Monitor, probe: NetworkProbe<'_>) -> Outcome {
     let mut outcome = probe_once(client, monitor, probe).await;
     for attempt in 1..=monitor.probe_retries() {
-        if outcome.is_up() {
+        if outcome.is_up() || outcome.is_local_fault() {
             break;
         }
         tracing::info!(
@@ -113,7 +163,7 @@ pub async fn run(client: &Client, monitor: &Monitor, probe: NetworkProbe<'_>) ->
         tokio::time::sleep(RETRY_DELAY).await;
         outcome = probe_once(client, monitor, probe).await;
     }
-    outcome
+    outcome.excusing_exhaustion()
 }
 
 async fn probe_once(client: &Client, monitor: &Monitor, probe: NetworkProbe<'_>) -> Outcome {

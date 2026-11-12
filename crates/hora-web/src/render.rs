@@ -6,9 +6,10 @@ use std::fmt::Write as _;
 use axum::http::header;
 use axum::response::IntoResponse;
 use badgelib::{Badge, Color, Style};
+use chrono::DateTime;
 
 use hora_core::db::{EventMarker, Point};
-use hora_core::fmt::xml_escape;
+use maud::{Markup, PreEscaped, html};
 
 // --- The owl ------------------------------------------------------------
 // HoraFace: outlined (surface fill, ink line) so it follows the theme; its
@@ -36,45 +37,96 @@ pub(crate) const OWL_PARTS: &str = concat!(
 
 /// The owl in the pose of `state` (`up`, `degraded`, `down`, `maint`,
 /// `none`), `size` CSS pixels square. One per page, beside its sentence.
-pub(crate) fn owl(state: &str, size: u32) -> String {
-    format!(
-        "<svg class=\"owl\" data-state=\"{state}\" viewBox=\"6 6 40 40\" width=\"{size}\" \
-         height=\"{size}\" aria-hidden=\"true\" focusable=\"false\">{OWL_PARTS}</svg>"
-    )
+pub(crate) fn owl(state: &str, size: u32) -> Markup {
+    html! {
+        svg.owl data-state=(state) viewBox="6 6 40 40" width=(size) height=(size)
+            aria-hidden="true" focusable="false" { (PreEscaped(OWL_PARTS)) }
+    }
+}
+
+/// A service's answer times over the last 24 hours as a bare line, to sit
+/// beside its state on the status page: the shape only (a flat line, a
+/// step, a spike), each point at its own time so a hole stays a hole in
+/// width. Empty with fewer than two points. Decorative: the figures are on
+/// the monitor's page.
+pub(crate) fn mini_spark(points: &[Point]) -> Markup {
+    const W: f64 = 88.0;
+    const H: f64 = 18.0;
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return html! {};
+    };
+    if points.len() < 2 {
+        return html! {};
+    }
+    let low = points
+        .iter()
+        .map(|point| point.latency_ms)
+        .min()
+        .unwrap_or(0);
+    let high = points
+        .iter()
+        .map(|point| point.latency_ms)
+        .max()
+        .unwrap_or(0);
+    let span = coord(last.t - first.t).max(1.0);
+    // A steady service draws a flat line in the middle, not noise blown up
+    // to the full height: the scale never spans less than 20 ms.
+    let range = coord(high - low).max(20.0);
+    let mid = coord(low + high) / 2.0;
+    let mut path = String::with_capacity(points.len() * 12);
+    for (index, point) in points.iter().enumerate() {
+        let x = coord(point.t - first.t) / span * W;
+        let y = H / 2.0 - (coord(point.latency_ms) - mid) / range * (H - 2.0);
+        let _ = write!(path, "{}{x:.1} {y:.1}", if index == 0 { 'M' } else { 'L' });
+    }
+    html! {
+        svg.mini-spark viewBox={ "0 0 " (format!("{W:.0} {H:.0}")) } preserveAspectRatio="none"
+            aria-hidden="true" focusable="false" { path d=(path) {} }
+    }
 }
 
 /// Several owls on one branch, one per place, each in its own pose: the mesh
 /// drawn (the watchers page and the vantage panels only). `label` is the
 /// sentence the picture says, for assistive tech.
-pub(crate) fn owls(places: &[(&str, &str)], label: &str) -> String {
+pub(crate) fn owls(places: &[(&str, &str)], label: &str) -> Markup {
     const STEP: usize = 46;
+    // Drawn at one and a half CSS pixels a unit, so the 8-unit names read at
+    // 12 px; the stylesheet only ever shrinks it to fit a narrow screen.
     let width = STEP * places.len() + 8;
-    let mut out = format!(
-        "<svg class=\"owls\" viewBox=\"0 0 {width} 62\" role=\"img\" aria-label=\"{}\">\
-         <path class=\"branch\" d=\"M0 45.5C{:.0} 43.5 {:.0} 47.5 {width} 44.5\"/>",
-        xml_escape(label),
+    let branch = format!(
+        "M0 45.5C{:.0} 43.5 {:.0} 47.5 {width} 44.5",
         coord(width) * 0.3,
         coord(width) * 0.7,
     );
-    for (index, (state, _)) in places.iter().enumerate() {
-        let x = 4 + index * STEP;
-        let _ = write!(
-            out,
-            "<svg class=\"owl\" data-state=\"{state}\" x=\"{x}\" y=\"0\" width=\"46\" height=\"46\" \
-             viewBox=\"6 6 40 40\">{OWL_PARTS}</svg>"
-        );
+    // A perch is 46 units wide: a long name is cut here (it is whole in the
+    // list beside the picture, and in the picture's label).
+    let short = |name: &str| -> String {
+        if name.chars().count() > OWL_NAME {
+            name.chars()
+                .take(OWL_NAME - 1)
+                .chain(['\u{2026}'])
+                .collect()
+        } else {
+            name.to_owned()
+        }
+    };
+    html! {
+        svg.owls viewBox={ "0 0 " (width) " 62" } width=(width * 3 / 2) height="93" role="img"
+            aria-label=(label) {
+            path.branch d=(branch) {}
+            @for (index, (state, _)) in places.iter().enumerate() {
+                svg.owl data-state=(state) x=(4 + index * STEP) y="0" width="46" height="46"
+                    viewBox="6 6 40 40" { (PreEscaped(OWL_PARTS)) }
+            }
+            @for (index, (_, name)) in places.iter().enumerate() {
+                text.olab x=(4 + index * STEP + 23) y="58" text-anchor="middle" { (short(name)) }
+            }
+        }
     }
-    for (index, (_, name)) in places.iter().enumerate() {
-        let _ = write!(
-            out,
-            "<text class=\"olab\" x=\"{}\" y=\"58\" text-anchor=\"middle\">{}</text>",
-            4 + index * STEP + 23,
-            xml_escape(name),
-        );
-    }
-    out.push_str("</svg>");
-    out
 }
+
+/// The longest name written whole under an owl, in characters.
+const OWL_NAME: usize = 10;
 
 // --- The daily bar ------------------------------------------------------
 // ONE svg per monitor with a few run-length rects; the gaps between days are
@@ -94,171 +146,390 @@ pub(crate) fn day_class(state: &str) -> u8 {
     }
 }
 
-/// Render the daily bar, oldest day first, from day cell classes.
-pub(crate) fn day_bar(days: &[u8]) -> String {
-    let mut rects = String::new();
+/// The runs of a row of day classes: each `(class, first day, length)`.
+fn runs(days: &[u8]) -> Vec<(u8, usize, usize)> {
+    let mut out = Vec::new();
     let mut start = 0;
     while let Some(&class) = days.get(start) {
         let run = days[start..]
             .iter()
             .take_while(|day| **day == class)
             .count();
-        let (y, height) = match class {
-            b'u' => (0, 22),
-            b'd' => (7, 15),
-            b'x' => (0, 29),
-            b'm' => (11, 11),
-            _ => (18, 4),
-        };
-        let _ = write!(
-            rects,
-            "<rect class=\"{}\" x=\"{start}\" y=\"{y}\" width=\"{run}\" height=\"{height}\"/>",
-            char::from(class)
-        );
+        out.push((class, start, run));
         start += run;
     }
-    format!(
-        "<svg viewBox=\"0 0 {} 29\" preserveAspectRatio=\"none\" aria-hidden=\"true\" \
-         focusable=\"false\"><g mask=\"url(#gaps)\">{rects}</g></svg>",
-        days.len().max(1)
-    )
+    out
+}
+
+/// Render the daily bar, oldest day first, from day cell classes.
+pub(crate) fn day_bar(days: &[u8]) -> Markup {
+    let shape = |class: u8| match class {
+        b'u' => (0, 22),
+        b'd' => (7, 15),
+        b'x' => (0, 29),
+        b'm' => (11, 11),
+        _ => (18, 4),
+    };
+    html! {
+        svg viewBox={ "0 0 " (days.len().max(1)) " 29" } preserveAspectRatio="none"
+            aria-hidden="true" focusable="false" {
+            g mask="url(#gaps)" {
+                @for (class, start, run) in runs(days) {
+                    @let (y, height) = shape(class);
+                    rect class=(char::from(class)) x=(start) y=(y) width=(run) height=(height) {}
+                }
+            }
+        }
+    }
 }
 
 /// A month's day strip for the report, first day first, from day cell
 /// classes: run-length rects like [`day_bar`], on a 16-unit height (down
-/// fills it, up stops short). The gaps between days are the stylesheet's
-/// mask for the month's length (`d31`): a running month's strip keeps the
+/// fills it, up stops short). The gaps between days are the page's shared
+/// mask (`#gaps`, as for the bar: a drawn mask prints as it shows, where a
+/// stylesheet one lost its gaps on paper). The svg's class says the month's
+/// length (`d31`), which sets its width: a running month's strip keeps the
 /// whole month's width, its days to come left empty.
-pub(crate) fn day_strip(days: &[u8], month_days: usize) -> String {
-    let mut rects = String::new();
-    let mut start = 0;
-    while let Some(&class) = days.get(start) {
-        let run = days[start..]
-            .iter()
-            .take_while(|day| **day == class)
-            .count();
-        let (y, height) = match class {
-            b'u' => (4, 12),
-            b'd' => (8, 8),
-            b'x' => (0, 16),
-            b'm' => (10, 6),
-            _ => (14, 2),
-        };
-        let _ = write!(
-            rects,
-            "<rect class=\"{}\" x=\"{start}\" y=\"{y}\" width=\"{run}\" height=\"{height}\"/>",
-            char::from(class)
-        );
-        start += run;
-    }
+pub(crate) fn day_strip(days: &[u8], month_days: usize) -> Markup {
+    let shape = |class: u8| match class {
+        b'u' => (4, 12),
+        b'd' => (8, 8),
+        b'x' => (0, 16),
+        b'm' => (10, 6),
+        _ => (14, 2),
+    };
     let width = month_days.max(days.len()).max(1);
-    format!(
-        "<svg class=\"d{width}\" viewBox=\"0 0 {width} 16\" preserveAspectRatio=\"none\" \
-         aria-hidden=\"true\" focusable=\"false\">{rects}</svg>"
-    )
+    html! {
+        svg class={ "d" (width) } viewBox={ "0 0 " (width) " 16" } preserveAspectRatio="none"
+            aria-hidden="true" focusable="false" {
+            g mask="url(#gaps)" {
+                @for (class, start, run) in runs(days) {
+                    @let (y, height) = shape(class);
+                    rect class=(char::from(class)) x=(start) y=(y) width=(run) height=(height) {}
+                }
+            }
+        }
+    }
 }
 
 /// A thin horizontal meter (`value` of `max`), drawn as an svg so its width is
 /// an attribute, not an inline style the CSP would refuse.
-pub(crate) fn meter(value: i64, max: i64, class: &str) -> String {
+pub(crate) fn meter(value: i64, max: i64, class: &str) -> Markup {
     let filled = if max > 0 {
         (value.clamp(0, max) * 100) / max
     } else {
         0
     };
-    format!(
-        "<svg class=\"{class}\" viewBox=\"0 0 100 8\" preserveAspectRatio=\"none\" aria-hidden=\"true\" \
-         focusable=\"false\"><rect class=\"track\" width=\"100\" height=\"8\"/>\
-         <rect class=\"fill\" width=\"{filled}\" height=\"8\"/></svg>"
-    )
+    html! {
+        svg class=(class) viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true"
+            focusable="false" {
+            rect.track width="100" height="8" {}
+            rect.fill width=(filled) height="8" {}
+        }
+    }
 }
 
 // --- Server-rendered latency chart --------------------------------------
 // Colours come from CSS (the `status` class on the <svg>), not inline here.
+// The svg is stretched to its box (`preserveAspectRatio="none"`), so it holds
+// shapes only: every label is HTML around it, never distorted text inside.
 
 pub(crate) const CHART_W: f64 = 680.0;
 pub(crate) const CHART_H: f64 = 120.0;
-pub(crate) const CHART_PAD: f64 = 8.0;
 
 /// Saturating conversion of any integer to an SVG coordinate (`f64`).
 pub(crate) fn coord<T: TryInto<i32>>(value: T) -> f64 {
     f64::from(value.try_into().unwrap_or(i32::MAX))
 }
 
-/// Render the last-24h latency series as a self-contained inline SVG
-/// sparkline. `events` overlays operator-recorded markers ("deploy api
-/// v2.3") as vertical lines, positioned by time within the series' span -
-/// empty for the public view, where deploy titles must not leak.
-pub(crate) fn sparkline(points: &[Point], status: &str, events: &[EventMarker]) -> String {
-    if points.is_empty() {
+/// The response-time chart, and what it shows said in words: nothing on it
+/// is carried by the drawing (or by a hover tooltip) alone.
+pub(crate) struct Chart {
+    /// The scale's labels, the svg and the time labels.
+    pub(crate) html: Markup,
+    /// "between 58 ms and 212 ms, typically 64 ms"; empty without data.
+    pub(crate) summary: String,
+    /// The markers drawn, oldest first, for the list under the chart.
+    pub(crate) events: Vec<ChartEvent>,
+    /// The monitor's "slow above" threshold, when it has one.
+    pub(crate) limit: Option<ChartLimit>,
+}
+
+/// One marker of the chart ("deploy api v2.3"), with when it was recorded.
+pub(crate) struct ChartEvent {
+    /// "Thu 14:02 UTC".
+    pub(crate) at: String,
+    /// The same instant for `<time datetime>`.
+    pub(crate) iso: String,
+    pub(crate) title: String,
+}
+
+/// The threshold above which an answer counts as slow.
+pub(crate) struct ChartLimit {
+    /// "800 ms".
+    pub(crate) text: String,
+    /// Whether its line is on the chart (it is left out when it sits far
+    /// above every answer: drawing it would flatten the curve).
+    pub(crate) drawn: bool,
+}
+
+/// The top of the scale for a series peaking at `max` ms: the next "nice"
+/// number (1, 2, 4, 5 or 10 times a power of ten) whose half is a whole
+/// number too, so the three gridlines read 0, half and top.
+pub(crate) fn nice_top(max: i64) -> i64 {
+    let max = max.max(1);
+    for half in [1, 2, 5] {
+        if half * 2 >= max {
+            return half * 2;
+        }
+    }
+    let mut decade: i64 = 10;
+    while decade < i64::MAX / 100 {
+        for half in [decade, decade * 2, decade / 2 * 5, decade * 5] {
+            if half * 2 >= max {
+                return half * 2;
+            }
+        }
+        decade *= 10;
+    }
+    max
+}
+
+/// A latency as an axis label: `0`, `150 ms`, `2.5 s`.
+fn axis_label(latency: i64) -> String {
+    if latency == 0 {
+        "0".to_owned()
+    } else {
+        crate::layout::ms(latency)
+    }
+}
+
+/// The chart's scale: time from the first sample over `span` seconds, answer
+/// time from zero to `top` ms.
+struct Scale {
+    first: i64,
+    span: i64,
+    top: i64,
+}
+
+impl Scale {
+    fn x(&self, t: i64) -> f64 {
+        CHART_W * coord(t - self.first) / coord(self.span)
+    }
+
+    fn y(&self, latency: i64) -> f64 {
+        CHART_H * (1.0 - coord(latency.clamp(0, self.top)) / coord(self.top))
+    }
+}
+
+/// The line and its area, as path data. A hole (a step well over the series'
+/// usual one) stops both: the line is not drawn across checks that never ran.
+fn series_paths(points: &[Point], scale: &Scale) -> (String, String) {
+    // The series' own step is the median one: a lone short step (the
+    // newest bucket, still filling) must not make every other one a hole.
+    let mut steps: Vec<i64> = points
+        .windows(2)
+        .map(|pair| pair[1].t - pair[0].t)
+        .filter(|delta| *delta > 0)
+        .collect();
+    steps.sort_unstable();
+    let step = steps
+        .get(steps.len().saturating_sub(1) / 2)
+        .copied()
+        .unwrap_or(scale.span);
+    let mut line = String::new();
+    let mut area = String::new();
+    let mut start = 0;
+    while start < points.len() {
+        let mut end = start + 1;
+        while end < points.len() && (points[end].t - points[end - 1].t) * 2 <= step * 5 {
+            end += 1;
+        }
+        let run = &points[start..end];
+        let mut path = String::new();
+        for (index, point) in run.iter().enumerate() {
+            let _ = write!(
+                path,
+                "{}{:.1} {:.1}",
+                if index == 0 { 'M' } else { 'L' },
+                scale.x(point.t),
+                scale.y(point.latency_ms)
+            );
+        }
+        if let ([from, _, ..], Some(to)) = (run, run.last()) {
+            let _ = write!(
+                area,
+                "{path}L{:.1} {CHART_H:.0}L{:.1} {CHART_H:.0}Z",
+                scale.x(to.t),
+                scale.x(from.t)
+            );
+            line.push_str(&path);
+        } else {
+            // One sample alone: a dot (a zero-length stroke, round caps).
+            let _ = write!(line, "{path}h0");
+        }
+        start = end;
+    }
+    (line, area)
+}
+
+/// What lies over the chart's line: the "slow above" line, a recorded event.
+struct Overlay {
+    class: &'static str,
+    x: (String, String),
+    y: (String, String),
+    title: Option<String>,
+}
+
+/// The chart's svg: the three gridlines, the four time ticks, the area and
+/// the line, then what lies over them.
+fn chart_svg(status: &str, line: &str, area: &str, over: &[Overlay]) -> Markup {
+    let whole = |value: f64| format!("{value:.0}");
+    html! {
+        svg viewBox={ "0 0 " (CHART_W) " " (CHART_H) } class={ "spark " (status) }
+            preserveAspectRatio="none" aria-hidden="true" focusable="false" {
+            @for y in [0.0, CHART_H / 2.0, CHART_H] {
+                line.spark-grid x1="0" x2=(CHART_W) y1=(whole(y)) y2=(whole(y)) {}
+            }
+            @for third in 0..4_i32 {
+                @let x = format!("{:.1}", CHART_W * f64::from(third) / 3.0);
+                line.spark-tick x1=(x) x2=(x) y1=(whole(CHART_H)) y2=(whole(CHART_H + 4.0)) {}
+            }
+            @if !area.is_empty() { path.spark-area d=(area) {} }
+            path.spark-line d=(line) {}
+            @for mark in over {
+                line class=(mark.class) x1=(mark.x.0) x2=(mark.x.1) y1=(mark.y.0) y2=(mark.y.1) {
+                    @if let Some(title) = &mark.title { title { (title) } }
+                }
+            }
+        }
+    }
+}
+
+/// The labels, as HTML around the svg: the scale on its left (top, half,
+/// zero), four times under it (a lone sample has one).
+fn chart_labels(svg: &Markup, top: i64, first: i64, last: i64) -> Markup {
+    let ticks = if last > first { 4 } else { 1 };
+    let times = (0..ticks).filter_map(|third| {
+        DateTime::from_timestamp(first + (last - first) * third / 3, 0).map(|at| (third, at))
+    });
+    html! {
+        div.chart {
+            div.chart-y {
+                span { (axis_label(top)) } span { (axis_label(top / 2)) } span { (axis_label(0)) }
+            }
+            (svg)
+            div.chart-x {
+                @for (third, at) in times { span class={ "x" (third) } { (at.format("%H:%M")) } }
+            }
+        }
+    }
+}
+
+/// Render the last-24h latency series: a line and its area on a scale from
+/// zero to a round maximum, three labelled gridlines, four time labels, and
+/// the monitor's "slow above" line (`limit_ms`) when it has one. Each point
+/// sits at its own time, so a hole in the series is a hole in the line and
+/// the event markers (placed by time too) stay where they happened.
+/// `events` overlays operator-recorded markers ("deploy api v2.3") as
+/// vertical lines - empty for the public view, where deploy titles must not
+/// leak.
+pub(crate) fn sparkline(
+    points: &[Point],
+    status: &str,
+    events: &[EventMarker],
+    limit_ms: Option<i64>,
+) -> Chart {
+    let limit = limit_ms.filter(|limit| *limit > 0);
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
         // No viewBox: the stretched (`preserveAspectRatio="none"`) chart
         // coordinates would squash the text too. Without one, user units are
         // CSS pixels and the label is centred undistorted at any card width.
-        return format!(
-            "<svg class=\"spark {status}\">\
-             <text x=\"50%\" y=\"50%\" class=\"spark-empty\" text-anchor=\"middle\" \
-             dominant-baseline=\"middle\">no data yet</text></svg>"
-        );
-    }
-
-    let count = points.len();
-    let max = points
-        .iter()
-        .map(|p| p.latency_ms)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let min = points.iter().map(|p| p.latency_ms).min().unwrap_or(0);
-    let span = coord((max - min).max(1));
-    let plot_h = CHART_H - 2.0 * CHART_PAD;
-    let step = if count > 1 {
-        (CHART_W - 2.0 * CHART_PAD) / (coord(count) - 1.0)
-    } else {
-        0.0
+        return Chart {
+            html: html! {
+                svg class={ "spark " (status) } {
+                    text x="50%" y="50%" class="spark-empty" text-anchor="middle"
+                        dominant-baseline="middle" { "no data yet" }
+                }
+            },
+            summary: String::new(),
+            events: Vec::new(),
+            limit: limit.map(|limit| ChartLimit {
+                text: crate::layout::ms(limit),
+                drawn: false,
+            }),
+        };
     };
 
-    let mut line = String::new();
-    for (index, point) in points.iter().enumerate() {
-        let x = CHART_PAD + step * coord(index);
-        let y = CHART_PAD + plot_h * (1.0 - coord(point.latency_ms - min) / span);
-        let _ = write!(line, "{}{x:.1} {y:.1} ", if index == 0 { 'M' } else { 'L' });
-    }
+    let mut sorted: Vec<i64> = points.iter().map(|point| point.latency_ms).collect();
+    sorted.sort_unstable();
+    let low = sorted.first().copied().unwrap_or(0);
+    let high = sorted.last().copied().unwrap_or(0);
+    let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0);
 
-    let last_x = CHART_PAD + step * (coord(count) - 1.0);
-    let baseline = CHART_H - CHART_PAD;
-    let markers = event_markers(points, events);
-    format!(
-        "<svg viewBox=\"0 0 {CHART_W} {CHART_H}\" class=\"spark {status}\" preserveAspectRatio=\"none\">\
-         <path class=\"spark-area\" d=\"{line}L{last_x:.1} {baseline:.1} L{CHART_PAD:.1} {baseline:.1} Z\"/>\
-         <path class=\"spark-line\" d=\"{line}\"/>\
-         {markers}</svg>"
-    )
-}
-
-/// Vertical marker lines for the events falling inside the series' time span,
-/// each carrying its title as a hover tooltip. The x position interpolates the
-/// event's time between the first and last sample.
-fn event_markers(points: &[Point], events: &[EventMarker]) -> String {
-    let (Some(first), Some(last)) = (points.first(), points.last()) else {
-        return String::new();
+    // The threshold joins the scale unless it is far above every answer.
+    let limit_drawn = limit.filter(|limit| *limit <= high.max(1).saturating_mul(2));
+    let scale = Scale {
+        first: first.t,
+        span: (last.t - first.t).max(1),
+        top: nice_top(high.max(limit_drawn.unwrap_or(0))),
     };
-    let span = coord((last.t - first.t).max(1));
-    let plot_w = CHART_W - 2.0 * CHART_PAD;
-    let mut out = String::new();
+    let top = scale.top;
+    let (line, area) = series_paths(points, &scale);
+
+    let mut over = Vec::new();
+    if let Some(limit) = limit_drawn {
+        let y = format!("{:.1}", scale.y(limit));
+        over.push(Overlay {
+            class: "spark-limit",
+            x: ("0".to_owned(), CHART_W.to_string()),
+            y: (y.clone(), y),
+            title: None,
+        });
+    }
+    let mut listed = Vec::new();
     for event in events
         .iter()
         .filter(|event| event.created_at >= first.t && event.created_at <= last.t)
     {
-        let x = CHART_PAD + plot_w * (coord(event.created_at - first.t) / span);
-        let _ = write!(
-            out,
-            "<line class=\"spark-event\" x1=\"{x:.1}\" x2=\"{x:.1}\" y1=\"{CHART_PAD:.1}\" \
-             y2=\"{:.1}\"><title>{}</title></line>",
-            CHART_H - CHART_PAD,
-            xml_escape(&event.title),
-        );
+        let x = format!("{:.1}", scale.x(event.created_at));
+        over.push(Overlay {
+            class: "spark-event",
+            x: (x.clone(), x),
+            y: ("0".to_owned(), format!("{CHART_H:.0}")),
+            title: Some(event.title.clone()),
+        });
+        if let Some(at) = DateTime::from_timestamp(event.created_at, 0) {
+            listed.push(ChartEvent {
+                at: at.format("%a %H:%M UTC").to_string(),
+                iso: at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                title: event.title.clone(),
+            });
+        }
     }
-    out
+    listed.sort_by(|a, b| a.iso.cmp(&b.iso));
+
+    let svg = chart_svg(status, &line, &area, &over);
+    let html = chart_labels(&svg, top, first.t, last.t);
+
+    Chart {
+        html,
+        summary: if low == high {
+            format!("steady at {}", crate::layout::ms(median))
+        } else {
+            format!(
+                "between {} and {}, typically {}",
+                crate::layout::ms(low),
+                crate::layout::ms(high),
+                crate::layout::ms(median)
+            )
+        },
+        events: listed,
+        limit: limit.map(|limit| ChartLimit {
+            text: crate::layout::ms(limit),
+            drawn: limit_drawn.is_some(),
+        }),
+    }
 }
 
 // --- SVG status / uptime badges -----------------------------------------
@@ -317,39 +588,120 @@ pub(crate) fn badge(label: &str, message: &str, color: &str, style: Style) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn points(series: &[(i64, i64)]) -> Vec<Point> {
+        series
+            .iter()
+            .map(|&(t, latency_ms)| Point { t, latency_ms })
+            .collect()
+    }
+
     #[test]
     fn sparkline_renders_svg_with_status_class() {
-        let empty = sparkline(&[], "up", &[]);
-        assert!(empty.contains("no data"));
+        let empty = sparkline(&[], "up", &[], None);
+        assert!(empty.html.0.contains("no data"));
+        assert_eq!(empty.summary, "");
         // The placeholder text must not be stretched with the chart.
-        assert!(!empty.contains("preserveAspectRatio") && !empty.contains("viewBox"));
-        let points = vec![
-            Point {
-                t: 1,
-                latency_ms: 10,
-            },
-            Point {
-                t: 2,
-                latency_ms: 20,
-            },
-        ];
-        let svg = sparkline(&points, "degraded", &[]);
-        assert!(svg.contains("class=\"spark degraded\""));
-        assert!(svg.contains("spark-line"));
+        assert!(!empty.html.0.contains("preserveAspectRatio") && !empty.html.0.contains("viewBox"));
+        let chart = sparkline(&points(&[(1, 10), (2, 20)]), "degraded", &[], None);
+        assert!(chart.html.0.contains("class=\"spark degraded\""));
+        assert!(chart.html.0.contains("spark-line"));
+        // No text inside the stretched svg: the labels are HTML around it.
+        assert!(!chart.html.0.contains("<text"), "{}", chart.html.0);
+        assert_eq!(chart.summary, "between 10 ms and 20 ms, typically 20 ms");
+    }
+
+    #[test]
+    fn scale_starts_at_zero_and_ends_on_a_round_number() {
+        for (max, top) in [
+            (0, 2),
+            (1, 2),
+            (3, 4),
+            (7, 10),
+            (64, 100),
+            (101, 200),
+            (212, 400),
+            (450, 500),
+            (900, 1000),
+            (1849, 2000),
+            (4200, 5000),
+        ] {
+            assert_eq!(nice_top(max), top, "{max}");
+            assert_eq!(nice_top(max) % 2, 0);
+        }
+        // A 60 to 64 ms jitter no longer fills the height: on a 0 to 100 ms
+        // scale it sits flat, a little over the half line.
+        let chart = sparkline(&points(&[(0, 60), (60, 64), (120, 62)]), "up", &[], None);
+        assert!(
+            chart.html.0.contains(
+                "<div class=\"chart-y\"><span>100 ms</span><span>50 ms</span><span>0</span></div>"
+            ),
+            "{}",
+            chart.html.0
+        );
+        assert!(
+            chart.html.0.contains("M0.0 48.0L340.0 43.2L680.0 45.6"),
+            "{}",
+            chart.html.0
+        );
+        assert_eq!(chart.html.0.matches("spark-grid").count(), 3);
+        assert_eq!(chart.html.0.matches("<span class=\"x").count(), 4);
+    }
+
+    #[test]
+    fn points_sit_at_their_time_and_a_hole_breaks_the_line() {
+        // Samples every 10 s, then nothing for 60 s: placed by index the
+        // last two would sit at 50 % and 100 %; by time they are at the end.
+        let series = points(&[(0, 5), (10, 5), (20, 5), (80, 5), (100, 5)]);
+        let chart = sparkline(&series, "up", &[], None);
+        assert!(
+            chart.html.0.contains("L136.0 60.0M544.0 60.0L680.0 60.0"),
+            "{}",
+            chart.html.0
+        );
+        assert_eq!(chart.summary, "steady at 5 ms");
+        // A short last step (the newest bucket) makes no hole of the others.
+        let fresh = sparkline(
+            &points(&[(0, 5), (10, 5), (20, 5), (30, 5), (31, 5)]),
+            "up",
+            &[],
+            None,
+        );
+        assert_eq!(fresh.html.0.matches('M').count(), 2, "{}", fresh.html.0);
+        // A sample alone between two holes is a dot, not nothing.
+        let lone = sparkline(
+            &points(&[(0, 5), (10, 5), (100, 5), (200, 5), (210, 5)]),
+            "up",
+            &[],
+            None,
+        );
+        assert!(lone.html.0.contains("M323.8 60.0h0"), "{}", lone.html.0);
+    }
+
+    #[test]
+    fn threshold_is_drawn_when_it_is_near_and_said_either_way() {
+        let series = points(&[(0, 300), (60, 420)]);
+        let near = sparkline(&series, "up", &[], Some(800));
+        assert!(near.html.0.contains("spark-limit"), "{}", near.html.0);
+        // The scale makes room for it: 0 to 1 s, the line at 800 ms.
+        assert!(
+            near.html
+                .0
+                .contains("<span>1.0 s</span><span>500 ms</span>"),
+            "{}",
+            near.html.0
+        );
+        assert!(near.html.0.contains("y1=\"24.0\""), "{}", near.html.0);
+        let limit = near.limit.unwrap();
+        assert!(limit.drawn && limit.text == "800 ms");
+        let far = sparkline(&series, "up", &[], Some(5000));
+        assert!(!far.html.0.contains("spark-limit"));
+        assert!(!far.limit.unwrap().drawn);
+        assert!(sparkline(&series, "up", &[], None).limit.is_none());
     }
 
     #[test]
     fn sparkline_overlays_events_inside_the_span_only() {
-        let points = vec![
-            Point {
-                t: 100,
-                latency_ms: 10,
-            },
-            Point {
-                t: 200,
-                latency_ms: 20,
-            },
-        ];
+        let series = points(&[(100, 10), (200, 20)]);
         let events = vec![
             EventMarker {
                 id: 1,
@@ -362,14 +714,21 @@ mod tests {
                 created_at: 50,
             },
         ];
-        let svg = sparkline(&points, "up", &events);
+        let chart = sparkline(&series, "up", &events, None);
+        let svg = &chart.html.0;
         // In-span marker drawn at the interpolated midpoint, title escaped.
         assert!(svg.contains("spark-event"), "{svg}");
         assert!(svg.contains("<title>deploy &lt;v2&gt;</title>"), "{svg}");
-        let mid = CHART_PAD + (CHART_W - 2.0 * CHART_PAD) / 2.0;
+        let mid = CHART_W / 2.0;
         assert!(svg.contains(&format!("x1=\"{mid:.1}\"")), "{svg}");
         // Out-of-span events never render.
         assert!(!svg.contains("too old"), "{svg}");
+        // The marker is listed too (raw: the template escapes it), with its
+        // time: a hover tooltip alone reaches neither touch nor keyboard.
+        assert_eq!(chart.events.len(), 1);
+        assert_eq!(chart.events[0].title, "deploy <v2>");
+        assert_eq!(chart.events[0].at, "Thu 00:02 UTC");
+        assert_eq!(chart.events[0].iso, "1970-01-01T00:02:30Z");
     }
 
     #[test]
@@ -406,7 +765,7 @@ mod tests {
         days[40] = b'x';
         days[88] = b'd';
         days[89] = b'd';
-        let svg = day_bar(&days);
+        let svg = day_bar(&days).into_string();
         assert!(svg.starts_with("<svg viewBox=\"0 0 90 29\""), "{svg}");
         // up, down, up, slow: four runs, not ninety nodes.
         assert_eq!(svg.matches("<rect").count(), 4, "{svg}");
@@ -420,26 +779,31 @@ mod tests {
         );
         assert!(svg.contains("mask=\"url(#gaps)\""));
         // An empty bar still renders a valid (blank) svg.
-        assert!(day_bar(&[]).contains("viewBox=\"0 0 1 29\""));
+        assert!(day_bar(&[]).0.contains("viewBox=\"0 0 1 29\""));
     }
 
     #[test]
     fn owl_is_decorative_and_posed_by_state() {
-        let svg = owl("degraded", 96);
+        let svg = owl("degraded", 96).into_string();
         assert!(svg.contains("data-state=\"degraded\"") && svg.contains("aria-hidden=\"true\""));
         let many = owls(
             &[("down", "Paris <1>"), ("up", "Frankfurt")],
             "Paris sees it down",
-        );
+        )
+        .into_string();
         assert_eq!(many.matches("class=\"owl\"").count(), 2);
         assert!(many.contains("Paris &lt;1&gt;") && many.contains("role=\"img\""));
+        // Sized so the names read at 12 px; a long one is cut, not overlapping.
+        assert!(many.contains("viewBox=\"0 0 100 62\" width=\"150\" height=\"93\""));
+        let long = owls(&[("up", "Johannesburg")], "one place").into_string();
+        assert!(long.contains(">Johannesb\u{2026}</text>"), "{long}");
     }
 
     #[test]
     fn meter_width_is_an_attribute() {
-        let svg = meter(31, 43, "meter");
+        let svg = meter(31, 43, "meter").into_string();
         assert!(svg.contains("class=\"fill\" width=\"72\""), "{svg}");
         assert!(!svg.contains("style"));
-        assert!(meter(5, 0, "meter").contains("width=\"0\""));
+        assert!(meter(5, 0, "meter").0.contains("width=\"0\""));
     }
 }

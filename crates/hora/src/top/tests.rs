@@ -1,7 +1,7 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Color;
 
-use super::app::{Input, announce_action, input_key, silence_action};
+use super::app::{Input, announce_action, follow_up, input_key, silence_action};
 use super::fetch::{FetchError, Fetched, Summary};
 use super::ui::overall_style;
 use super::*;
@@ -129,6 +129,95 @@ async fn a_late_sparkline_for_another_monitor_is_dropped() {
         },
     );
     assert_eq!(app.spark, vec![4, 5]);
+}
+
+/// A sparkline whose fetch failed used to be an empty chart and nothing
+/// else; the header now says why, until the selection moves or it loads.
+#[tokio::test]
+async fn a_failed_sparkline_says_so() {
+    let mut app = App::new("http://x".to_owned());
+    apply(&mut app, Fetched::Summary(Ok(summary_of(&["a", "b"]))));
+    assert_eq!(app.status_error(), None);
+    apply(
+        &mut app,
+        Fetched::Spark {
+            monitor_id: "a".to_owned(),
+            result: Err(FetchError::Status {
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                detail: String::new(),
+            }),
+        },
+    );
+    assert_eq!(
+        app.status_error(),
+        Some("latency history: server answered HTTP 502 Bad Gateway")
+    );
+    assert!(!app.cooling_down());
+    // The summary's own error comes first; a fresh summary does not hide the
+    // sparkline's, a loaded sparkline clears it.
+    apply(&mut app, Fetched::Summary(Ok(summary_of(&["a", "b"]))));
+    assert!(app.status_error().is_some());
+    apply(
+        &mut app,
+        Fetched::Spark {
+            monitor_id: "a".to_owned(),
+            result: Ok(vec![1]),
+        },
+    );
+    assert_eq!(app.status_error(), None);
+
+    // A rate-limited sparkline backs off like a rate-limited summary.
+    apply(
+        &mut app,
+        Fetched::Spark {
+            monitor_id: "a".to_owned(),
+            result: Err(FetchError::Status {
+                status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                detail: String::new(),
+            }),
+        },
+    );
+    assert!(app.cooling_down());
+}
+
+/// While the server's 429 back-off runs, nothing goes out: not the refresh
+/// an action asks for, not the sparkline a summary asks for.
+#[tokio::test]
+async fn follow_ups_wait_out_the_rate_limit() {
+    // A server that accepts and never answers: a started fetch stays in flight.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let (tx, _results) = mpsc::channel(8);
+    let mut fetcher = Fetcher::new(api_at(url), tx);
+
+    let mut app = App::new("http://x".to_owned());
+    let refused = FetchError::Status {
+        status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+        detail: String::new(),
+    };
+    apply(&mut app, Fetched::Summary(Err(refused)));
+    assert!(app.cooling_down());
+
+    let next = apply(&mut app, Fetched::Action(Ok("silenced web".to_owned())));
+    assert_eq!(next, FollowUp::Refresh);
+    follow_up(&mut app, &mut fetcher, next);
+    assert!(
+        fetcher.summary(),
+        "no refresh went out during the back-off (none was in flight)"
+    );
+
+    // Without a back-off the same follow-up starts the refresh.
+    let (tx, _results) = mpsc::channel(8);
+    let mut fetcher = Fetcher::new(
+        api_at(format!("http://{}", listener.local_addr().expect("addr"))),
+        tx,
+    );
+    let mut app = App::new("http://x".to_owned());
+    follow_up(&mut app, &mut fetcher, FollowUp::Refresh);
+    assert!(!fetcher.summary(), "the refresh is in flight");
+    drop(listener);
 }
 
 #[tokio::test]
@@ -293,6 +382,30 @@ async fn fetch_errors_carry_the_http_status() {
     assert!(refused.contains("needs a token"));
 }
 
+/// A monitor that is down inside a maintenance window is in maintenance,
+/// here as on the status page: not a trouble, and not a red header when it
+/// is all there is.
+#[test]
+fn a_down_inside_maintenance_reads_as_maintenance() {
+    use hora_core::display::DisplayState;
+    let summary = |other: &str| -> Summary {
+        serde_json::from_str(&format!(
+            r#"{{"title":"t","overall":"down","overall_label":"Major outage","monitors":[
+                {{"id":"web","name":"Web","status":"down","maintenance":"kernel reboot"}},
+                {{"id":"api","name":"API","status":"{other}"}}]}}"#
+        ))
+        .unwrap()
+    };
+    let planned = summary("up");
+    assert_eq!(planned.monitors[0].shown(), DisplayState::Maint);
+    assert_eq!(planned.monitors[1].shown(), DisplayState::Up);
+    assert_eq!(super::ui::header_badge(&planned).0, "Maintenance");
+    // Something else is really down: the outage is the news.
+    let outage = summary("down");
+    assert_eq!(outage.monitors[1].shown(), DisplayState::Down);
+    assert_eq!(super::ui::header_badge(&outage).0, "Major outage");
+}
+
 #[test]
 fn the_compact_hint_shows_past_a_fifth_of_free_pages() {
     use super::fetch::Storage;
@@ -307,4 +420,170 @@ fn the_compact_hint_shows_past_a_fifth_of_free_pages() {
     let summary: Summary =
         serde_json::from_str(r#"{"title":"t","overall_label":"ok","monitors":[]}"#).unwrap();
     assert!(summary.storage.is_none());
+}
+
+/// `hora top` declares the shapes it reads from the API by hand, every
+/// optional field defaulted: a field renamed on the server would not fail
+/// anything, it would show "-" for ever. So read a real `/api/summary` (and
+/// a real latency series) from the real router, through top's own client,
+/// and check that everything top displays arrived.
+#[tokio::test]
+async fn top_reads_what_the_real_api_serves() {
+    let url = real_api().await;
+    let (tx, mut results) = mpsc::channel(8);
+    let mut fetcher = Fetcher::new(
+        Api {
+            token: Some(REAL_API_TOKEN.to_owned()),
+            ..api_at(url)
+        },
+        tx,
+    );
+    fetcher.summary();
+    let summary = match results.recv().await {
+        Some(Fetched::Summary(Ok(summary))) => summary,
+        Some(Fetched::Summary(Err(err))) => panic!("summary: {err}"),
+        _ => panic!("expected a summary"),
+    };
+
+    // The header.
+    assert_eq!(summary.title, "Acme status");
+    assert_eq!(summary.overall, "degraded");
+    assert_eq!(summary.overall_label, "Degraded performance");
+    let storage = summary.storage.as_ref().expect("the operator's storage");
+    assert!(storage.db_bytes > 0);
+    assert!(storage.reclaimable_bytes <= storage.db_bytes);
+
+    // The table: every column of a monitor that has data.
+    let web = summary
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == "web")
+        .expect("web");
+    assert_eq!(web.name, "Web");
+    assert_eq!(web.status, "up");
+    assert_eq!(web.group.as_deref(), Some("Front"));
+    assert_eq!(web.uptime_permille, Some(1000));
+    let (p50, p95, p99) = (
+        web.p50.expect("p50"),
+        web.p95.expect("p95"),
+        web.p99.expect("p99"),
+    );
+    assert!((40..=80).contains(&p50), "{p50}");
+    assert!(p50 <= p95 && p95 <= p99 && p99 <= 80, "{p50} {p95} {p99}");
+    // The trouble panel: why a monitor is not up.
+    let api = summary
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == "api")
+        .expect("api");
+    assert_eq!(api.status, "degraded");
+    assert_eq!(api.last_error.as_deref(), Some("timed out after 10s"));
+    assert_eq!(api.uptime_permille, Some(0));
+
+    // The banners and the channels' health.
+    assert_eq!(summary.incidents.len(), 1);
+    assert_eq!(summary.incidents[0].title, "Fiber cut");
+    assert_eq!(summary.incidents[0].severity, "critical");
+    assert_eq!(summary.channels.len(), 1);
+    assert_eq!(summary.channels[0].name, "pager");
+    assert!(!summary.channels[0].failing);
+    assert_eq!(summary.channels[0].consecutive_failures, 0);
+    assert_eq!(summary.channels[0].failing_for_secs, None);
+
+    // The sparkline: the selected monitor's latency series.
+    fetcher.spark("web".to_owned());
+    match results.recv().await {
+        Some(Fetched::Spark { monitor_id, result }) => {
+            assert_eq!(monitor_id, "web");
+            let points = result.expect("latency series");
+            assert_ne!(points, Vec::<u64>::new());
+            assert!(points.iter().all(|&ms| (40..=80).contains(&ms)));
+        }
+        _ => panic!("expected a sparkline"),
+    }
+}
+
+/// The operator token of [`real_api`].
+const REAL_API_TOKEN: &str = "0123456789abcdef";
+
+/// The real router on a local port, over a database with something of
+/// everything `hora top` shows: two monitors with checks (one failing, with
+/// its reason), a group, a pinned announcement, a channel. Returns its URL.
+async fn real_api() -> String {
+    use hora_core::probe::{FailureKind, Outcome};
+    use hora_core::status::CheckStatus;
+
+    const TOKEN: &str = REAL_API_TOKEN;
+    let config = hora_core::config::parse(&format!(
+        r#"
+        [page]
+        title = "Acme status"
+        [server]
+        auth_token = "{TOKEN}"
+        [[channels]]
+        name = "pager"
+        type = "webhook"
+        url = "https://example.com/hook"
+        [[monitors]]
+        id = "web"
+        name = "Web"
+        group = "Front"
+        target = "https://example.com"
+        interval_secs = 60
+        [[monitors]]
+        id = "api"
+        name = "Api"
+        target = "https://api.example.com"
+        interval_secs = 60
+        "#
+    ))
+    .expect("config");
+    let store = hora_core::db::Store::in_memory().await;
+    let check = |status, latency_ms, error: Option<&str>| Outcome {
+        status,
+        latency_ms: Some(latency_ms),
+        status_code: None,
+        error: error.map(str::to_owned),
+        reason: error.map(|_| FailureKind::Timeout),
+        snapshot: None,
+    };
+    for latency in [40, 60, 80] {
+        hora_core::db::insert_check(&store, "web", &check(CheckStatus::Up, latency, None))
+            .await
+            .expect("check");
+    }
+    hora_core::db::insert_check(
+        &store,
+        "api",
+        &check(CheckStatus::Down, 900, Some("timed out after 10s")),
+    )
+    .await
+    .expect("check");
+    hora_core::db::insert_announcement(
+        &store,
+        "Fiber cut",
+        "",
+        hora_core::announce::Severity::Critical,
+        None,
+    )
+    .await
+    .expect("announcement");
+
+    let config = std::sync::Arc::new(config);
+    let client = hora_core::http::client(None).expect("client");
+    let notifier = hora_core::notifications::shared(&config, &client);
+    let (_reload, config_rx) = tokio::sync::watch::channel(config);
+    let app = hora_web::router(hora_web::AppState::new(
+        store,
+        config_rx,
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        notifier,
+    ))
+    .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    url
 }

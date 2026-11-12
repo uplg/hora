@@ -6,4 +6,6 @@
 !Cargo.toml
 !Cargo.lock
 !crates/
+# The build settings (SQLite compile flags).
+!.cargo/config.toml
 **/.DS_Store

@@ -119,21 +119,24 @@ impl Notifier for MatrixNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    crate::fuzz::Sent {
+        channel: "matrix",
+        title: None,
+        body: MatrixNotifier::render(event),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn renders_each_event() {
-        let down = MatrixNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = MatrixNotifier::render(Event::down("API", Some("boom")));
         assert!(down.contains("is DOWN") && down.contains("boom"));
 
         let recovered = MatrixNotifier::render(Event::Recovered {
@@ -146,7 +149,7 @@ mod tests {
             monitor: "API",
             secs_left: 3 * 86_400,
         });
-        assert!(cert.contains("expires in 3 days"));
+        assert!(cert.contains("expires in 3 d"));
 
         // Same line structure as every other channel (was "degraded: unreachable…").
         let partition = MatrixNotifier::render(Event::PeerLinkDegraded {

@@ -33,7 +33,8 @@ pub(crate) async fn heatmap_svg(
 ) -> Result<impl IntoResponse, AppError> {
     let config = &viewer.config;
     // Same visibility rule as the latency endpoint.
-    let visibility = Visibility::new(config, &viewer.audience);
+    let audience = super::pages::audience_for_monitor(&viewer, &id);
+    let visibility = Visibility::new(config, &audience);
     let monitor = visible_monitor(config, &visibility, &id)?;
     // The image does not depend on who asks (visibility is settled above), and
     // it groups 28 days of checks: one render per monitor serves everyone for
@@ -42,7 +43,7 @@ pub(crate) async fn heatmap_svg(
         .heatmaps
         .get_or_build(&id, config, async {
             let now = Utc::now().timestamp();
-            let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
+            let since = crate::heatmap::since(now);
             let cells = db::latency_hourly(&state.store, &id, since).await?;
             Ok::<_, hora_core::db::Error>(crate::heatmap::render(&cells, now, &monitor.name, true))
         })
@@ -84,7 +85,7 @@ pub(crate) async fn status_badge(
     // not pay for, or wait on, a full status-page rebuild.
     let config = state.config.borrow().clone();
     badge_monitor(&config, &id)?;
-    let threshold = i64::from(config.alerts.fail_threshold.max(1));
+    let threshold = i64::from(config.fail_threshold(&id));
     let recent = db::recent_checks(&state.store, &id, threshold).await?;
     let status = db::derive_status(&recent, threshold).as_str();
     Ok(svg_response(badge(
@@ -103,7 +104,7 @@ pub(crate) async fn status_badge(
         ("style" = Option<String>, Query, description = "Badge style: flat, flat-square, or for-the-badge")
     ),
     responses(
-        (status = 200, description = "24h uptime badge (SVG)"),
+        (status = 200, description = "24 h uptime badge (SVG)"),
         (status = 404, description = "Unknown monitor")
     )
 )]
@@ -118,7 +119,7 @@ pub(crate) async fn uptime_badge(
     badge_monitor(&config, &id)?;
     let since = Utc::now().timestamp() - hora_core::SECONDS_PER_DAY;
     let (available, total) = db::availability(&state.store, &id, since).await?;
-    let permille = (total > 0).then(|| available.saturating_mul(1000) / total);
+    let permille = hora_core::fmt::permille_of(available, total);
     let (message, color) = match permille {
         Some(permille) => (hora_core::fmt::permille(permille), uptime_color(permille)),
         None => ("n/a".to_owned(), crate::render::BADGE_NONE),

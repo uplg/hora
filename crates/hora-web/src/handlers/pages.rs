@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use askama::Template;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, header};
@@ -76,7 +75,8 @@ async fn status_response(
                     };
                     Ok::<_, AppError>(Some(Bytes::from(body)))
                 },
-            )?
+            )
+            .await?
             .ok_or(AppError::NotFound("unknown group"))?;
         return Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response());
     }
@@ -111,10 +111,11 @@ async fn status_response(
                     page: status_page::build(summary, config, &ask),
                     chrome: chrome.cached().at("status").operator(operator),
                 }
-                .render()?;
+                .render();
                 Ok::<_, AppError>(Some(html))
             },
-        )?
+        )
+        .await?
         .ok_or(AppError::NotFound("unknown group"))?;
     Ok(Html(page.serve(&req)).into_response())
 }
@@ -147,6 +148,24 @@ pub(crate) async fn group_page(
     status_response(&state, &viewer, &audience, Some(&group), chrome, &headers).await
 }
 
+/// The audience for one monitor's own resources: its page, and everything
+/// that page links to or embeds (its incidents, its latency series, its
+/// heatmap). A group token opens its group's monitors there, exactly as on
+/// `/status/{group}`; without that, the pages a group token can open would
+/// link to ones that answer 404 to the same token.
+pub(super) fn audience_for_monitor(viewer: &Viewer, monitor_id: &str) -> Audience {
+    let group = viewer
+        .config
+        .monitors
+        .iter()
+        .find(|monitor| monitor.id == monitor_id)
+        .and_then(|monitor| monitor.group.as_deref());
+    match group {
+        Some(group) => viewer.audience_for_group(group),
+        None => viewer.audience.clone(),
+    }
+}
+
 /// One monitor's page (`/monitor/{id}`): its figures, its days, where it is
 /// checked from, its incidents. Visibility follows the status pages: a
 /// private monitor answers 404 unless the operator token, or its group's
@@ -163,10 +182,7 @@ pub(crate) async fn monitor_page(
         .iter()
         .find(|monitor| monitor.id == id)
         .ok_or(AppError::NotFound("unknown monitor"))?;
-    let audience = match &monitor.group {
-        Some(group) => viewer.audience_for_group(group),
-        None => viewer.audience.clone(),
-    };
+    let audience = audience_for_monitor(&viewer, &id);
     let visibility = Visibility::new(config, &audience);
     if !visibility.can_see_monitor(monitor) {
         return Err(AppError::NotFound("unknown monitor"));
@@ -197,7 +213,7 @@ pub(crate) async fn monitor_page(
             .heatmaps
             .get_or_build(&key, config, async {
                 let now = Utc::now().timestamp();
-                let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
+                let since = crate::heatmap::since(now);
                 let cells = db::latency_hourly(&state.store, &id, since).await?;
                 Ok::<_, hora_core::db::Error>(crate::heatmap::render(
                     &cells,
@@ -211,7 +227,7 @@ pub(crate) async fn monitor_page(
     };
 
     let operator = viewer.is_operator();
-    let group_view = matches!(audience, crate::visibility::Audience::Group(_));
+    let group_view = matches!(audience, Audience::Group(_) | Audience::Reader);
     let page = crate::monitor_page::build(
         view,
         config,
@@ -226,7 +242,7 @@ pub(crate) async fn monitor_page(
         chrome: chrome.at("status").operator(operator),
         page,
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 
@@ -249,7 +265,7 @@ pub(crate) async fn watchers_page(
         chrome: chrome.at("watchers").operator(true),
         page: crate::watchers::build(config, &health, &summary, &incidents),
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 
@@ -373,7 +389,7 @@ fn render_report(
     let shown = |row: &hora_core::report::MonitorMonth| {
         visibility.can_see(&row.id) && group.is_none_or(|group| row.group.as_deref() == Some(group))
     };
-    let groups = crate::report::group_rows(report, &config.maintenance, shown);
+    let groups = crate::report::group_rows(report, shown);
     let kpis = crate::report::kpis(report, shown);
     // A scoped report with nothing visible answers like the group page: 404,
     // revealing neither the group's existence nor its members.
@@ -409,10 +425,9 @@ fn render_report(
         prev,
         next,
         group_query: group
-            .map(|group| format!("?group={}", hora_core::fmt::percent_encode(group)))
-            .unwrap_or_default(),
+            .map_or_default(|group| format!("?group={}", hora_core::fmt::percent_encode(group))),
     }
-    .render()?;
+    .render();
     Ok(html)
 }
 
@@ -490,10 +505,11 @@ pub(crate) async fn incident_page(
     chrome: Chrome,
 ) -> Result<Html<String>, AppError> {
     let config = &viewer.config;
-    let visibility = Visibility::new(config, &viewer.audience);
     let mut incident = db::incident_by_id(&state.store, id)
         .await?
         .ok_or(AppError::NotFound("unknown incident"))?;
+    let audience = audience_for_monitor(&viewer, &incident.monitor_id);
+    let visibility = Visibility::new(config, &audience);
     if !visibility.can_see(&incident.monitor_id) {
         return Err(AppError::NotFound("unknown incident"));
     }
@@ -517,7 +533,7 @@ pub(crate) async fn incident_page(
         ),
         operator,
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 
@@ -553,7 +569,7 @@ pub(crate) async fn history_page(
         pushed_alerts: history::alert_rows(&pushed_alerts, &names),
         events: history::event_rows(&events),
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 
@@ -562,10 +578,11 @@ const TIMELINE_DAYS: i64 = 7;
 const TIMELINE_LIMIT: usize = 200;
 
 /// The unified chronology (`/timeline`): downs/recoveries, operator events,
-/// pushed alerts, announcements and silences merged newest-first. The
-/// operator view gets everything; anyone else gets the same subset they may
-/// see elsewhere - sanitized visible incidents and announcements - and never
-/// the operator streams (events, silences, alert detail).
+/// pushed alerts, announcements, silences and planned maintenance merged
+/// newest-first. The operator view gets everything; anyone else gets the
+/// same subset they may see elsewhere - sanitized visible incidents and
+/// announcements - and never the operator streams (events, silences, alert
+/// detail, who planned which maintenance for which host).
 pub(crate) async fn timeline_page(
     State(state): State<AppState>,
     viewer: Viewer,
@@ -588,14 +605,21 @@ pub(crate) async fn timeline_page(
             ..Default::default()
         }
     };
-    let entries =
-        hora_core::timeline::merge(&sources, &monitor_names(config), since, TIMELINE_LIMIT);
+    // A planned window names the peer that announced it: peers by id, the
+    // monitors on top (an id is a monitor's first).
+    let mut names: std::collections::HashMap<String, String> = config
+        .peers
+        .iter()
+        .map(|peer| (peer.id.clone(), peer.name.clone()))
+        .collect();
+    names.extend(monitor_names(config));
+    let entries = hora_core::timeline::merge(&sources, &names, since, TIMELINE_LIMIT);
 
     let html = history::TimelineTemplate {
         chrome: chrome.at("timeline").operator(viewer.is_operator()),
         entries: history::timeline_rows(&entries),
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 

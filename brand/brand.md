@@ -143,7 +143,7 @@ Calm, plain, factual, a little warm. The time, the state, what you will notice. 
 | Local only | Vantage disagreement 1/3 | Our Paris checkpoint can't reach it; the others can. Not an outage. | Notre point de contrôle de Paris ne le joint plus ; les autres oui. Pas une panne. |
 | Confirmed | Confirmed 3/3 vantages | Seen down from Paris, Frankfurt and Montréal. | Vu en panne depuis Paris, Francfort et Montréal. |
 | Budget | Error budget 31m (72 %) | 31 min of allowed downtime left this month. | Encore 31 min d'interruption possible ce mois-ci. |
-| Recovered | Resolved | Up again at 19:53. Down for 41 minutes. | De retour à 19 h 53, après 41 minutes de panne. |
+| Recovered | Resolved | Up again at 19:53. Down for 41 min. | De retour à 19 h 53, après 41 min de panne. |
 | Empty | No monitors configured | Nothing to watch yet. | Rien à surveiller pour l'instant. |
 | Private | 401 Unauthorized | This page is private. | Cette page est privée. |
 
@@ -195,114 +195,79 @@ Hora's difference: only what is wrong up front, shapes in the bar, several watch
 
 ## 12. Docs theme (Starlight)
 
-The docs carry the same brand on every page (see `docs-page.html`). Paste the block below into `docs/src/styles/custom.css`, copy the four woff2 files to `docs/public/fonts/`, and point `logo` at the wordmark (`logo: { src: './src/assets/wordmark.svg', replacesTitle: true }`) and `favicon` at `favicon.svg`. Variable names are Starlight's own (`@astrojs/starlight/dist/style/props.css`): `:root` is the dark side, `[data-theme='light']` the light one; in light, Starlight's grey ramp runs the other way (`white` is the darkest).
+The docs carry the same brand on every page (see `docs-page.html`). The theme is `docs/src/styles/custom.css`, with the four woff2 files in `docs/public/fonts/`, `logo` pointed at the wordmark (`logo: { src: './src/assets/wordmark.svg', replacesTitle: true }`) and `favicon` at `favicon.svg`.
 
-Contrast of the new pairs: body text (gray-2) 12.04:1 dark, 10.84:1 light; links (accent-high dark) 11.77:1; aside titles 5.4:1 or more on their washes; gray-4 (borders, icons only) 3.3 to 3.7:1.
+**No value is written here by hand.** Every token lives once, in [`tokens.json`](tokens.json); `python3 brand/src/tokens.py` writes it into the product stylesheet, the gallery, the docs theme and its syntax themes, the Rust constants, and the table below. To change a colour or a size, change it there (see the README).
 
-```css
-/* Hora theme for Starlight: the synthe.se tokens, mapped. Fonts self-hosted under /hora/fonts/. */
-@font-face { font-family: 'Fraunces Variable'; src: url('/hora/fonts/Fraunces-VF.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
-@font-face { font-family: 'Cal Sans'; src: url('/hora/fonts/CalSansVF.woff2') format('woff2'); font-weight: 400 700; font-display: swap; }
-@font-face { font-family: 'Borel Display'; src: url('/hora/fonts/BorelDisplay-Regular.woff2') format('woff2'); font-display: swap; }
-@font-face { font-family: 'Mona Sans Mono'; src: url('/hora/fonts/MonaSansMono.woff2') format('woff2'); font-weight: 200 900; font-display: swap; }
+The mapping. Variable names are Starlight's own (`@astrojs/starlight/dist/style/props.css`): `:root` is the dark side, `[data-theme='light']` the light one, which only overrides; in light, Starlight's grey ramp runs the other way (`white` is the darkest). The `docs-*` tokens are the few the docs need beyond the product's set (a body grey between ink and ink-muted, the links, the aside titles).
 
-:root {
-	/* dark: night ground, paper ink, bright petrol */
-	--sl-color-white: #f2f0ea;
-	--sl-color-gray-1: #eae7e0;   /* ink */
-	--sl-color-gray-2: #d9d6cf;   /* body text, 12.04:1 */
-	--sl-color-gray-3: #a8aeb8;   /* ink-muted, 7.83:1 */
-	--sl-color-gray-4: #6b7380;   /* icons, borders */
-	--sl-color-gray-5: #2e3744;   /* line */
-	--sl-color-gray-6: #1a2029;   /* surface: nav, sidebar */
-	--sl-color-black: #151a21;    /* ground */
+<!-- tokens:begin - generated from brand/tokens.json by brand/src/tokens.py, do not edit -->
+| Starlight variable | Dark (`:root`) | Light (`[data-theme='light']`) | Token |
+|---|---|---|---|
+| `--sl-color-white` | `#f2f0ea` | `#1b222c` | `raw-cloud` / `ink` |
+| `--sl-color-gray-1` | `#eae7e0` | `#1b222c` | `ink` |
+| `--sl-color-gray-2` | `#d9d6cf` | `#2e3540` | `docs-text` |
+| `--sl-color-gray-3` | `#a8aeb8` | `#525a66` | `ink-muted` |
+| `--sl-color-gray-4` | `#6b7380` | `#87837a` | `docs-icon` |
+| `--sl-color-gray-5` | `#2e3744` | `#d6d2c6` | `line` |
+| `--sl-color-gray-6` | `#1a2029` | `#e7e4db` | `surface` / `ground-raised` |
+| `--sl-color-gray-7` | (unset) | `#faf9f5` | `surface` |
+| `--sl-color-black` | `#151a21` | `#f2f0ea` | `ground` |
+| `--sl-color-accent-low` | `#1d2a31` | `#d8e4e2` | `accent-wash` |
+| `--sl-color-accent` | `#63c0cb` | `#0e5e68` | `accent` |
+| `--sl-color-accent-high` | `#a9dde3` | `#0a4a52` | `docs-link` |
+| `--sl-color-blue-low` | `#1d2a31` | `#d8e4e2` | `accent-wash` |
+| `--sl-color-blue` | `#63c0cb` | `#4e8a92` | `accent` / `accent-soft` |
+| `--sl-color-blue-high` | `#a9dde3` | `#0e5e68` | `docs-link` / `accent` |
+| `--sl-color-purple-low` | `#1d2a31` | `#d8e4e2` | `accent-wash` |
+| `--sl-color-purple` | `#63c0cb` | `#4e8a92` | `accent` / `accent-soft` |
+| `--sl-color-purple-high` | `#a9dde3` | `#0e5e68` | `docs-link` / `accent` |
+| `--sl-color-green-low` | `#1d2a31` | `#d8e4e2` | `accent-wash` |
+| `--sl-color-green` | `#63c0cb` | `#4e8a92` | `accent` / `accent-soft` |
+| `--sl-color-green-high` | `#a9dde3` | `#0e5e68` | `docs-link` / `accent` |
+| `--sl-color-orange-low` | `#30261e` | `#f5e7da` | `wash-degraded` |
+| `--sl-color-orange` | `#d89372` | `#b4633f` | `st-degraded` |
+| `--sl-color-orange-high` | `#ebc2ae` | `#8f4b22` | `docs-caution-high` |
+| `--sl-color-red-low` | `#33211f` | `#f3e2dc` | `wash-down` |
+| `--sl-color-red` | `#e07a63` | `#a5372a` | `st-down` |
+| `--sl-color-red-high` | `#f0b3a6` | `#a5372a` | `docs-danger-high` |
+| `--sl-color-bg-nav` | `#151a21` | `#f2f0ea` | `ground` |
+| `--sl-color-bg-sidebar` | `#151a21` | `#f2f0ea` | `ground` |
+| `--sl-color-bg-inline-code` | `#1e2530` | `#e7e4db` | `ground-raised` |
+| `--sl-color-hairline-light` | `#2e3744` | `#d6d2c6` | `line` |
+| `--sl-color-hairline` | `#2e3744` | `#d6d2c6` | `line` |
+| `--sl-color-hairline-shade` | `#151a21` | `#c9c4b6` | `docs-hairline-shade` |
+| `--sl-color-backdrop-overlay` | `rgb(21 26 33 / 66%)` | `rgb(27 34 44 / 45%)` | `docs-backdrop` |
+| `--sl-font` | `'Cal Sans', system-ui, sans-serif` | (same) | `font-text` |
+| `--sl-font-mono` | `'Mona Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace` | (same) | `font-mono` |
+| `--sl-line-height` | `1.75` | (same) | `docs-line-height` |
+| `--sl-line-height-headings` | `1.15` | (same) | `docs-line-height-headings` |
+| `--sl-content-width` | `46rem` | (same) | `docs-content-width` |
+| `--hora-display` | `'Fraunces Variable', Georgia, serif` | (same) | `font-display` |
+| `--hora-brand` | `'Borel Display', var(--hora-display)` | (same) | `font-brand` |
+| `--hora-radius` | `10px` | (same) | `radius-l` |
+| `--hora-surface` | `#1a2029` | `#faf9f5` | `surface` |
+| `--hora-raised` | `#1e2530` | `#e7e4db` | `ground-raised` |
+| `--hora-accent-soft` | `#3e7a84` | `#4e8a92` | `accent-soft` |
+| `--hora-on-accent` | `#151a21` | `#f2f0ea` | `on-accent` |
+| `--hora-owl-fill` | `#1a2029` | `#faf9f5` | `owl-fill` |
+| `--hora-owl-line` | `#eae7e0` | `#1b222c` | `owl-line` |
+| `--hora-blush` | `#b8776e` | `#e6a49a` | `blush` |
+| `--sl-text-h1` | `2.75rem` from 50em | (same) | `docs-h1` |
+| `--sl-text-h2` | `1.75rem` from 50em | (same) | `docs-h2` |
+| `--sl-text-h3` | `1.3125rem` from 50em | (same) | `docs-h3` |
+| `--sl-text-h4` | `1.125rem` from 50em | (same) | `docs-h4` |
+<!-- tokens:end -->
 
-	--sl-color-accent-low: #1d2a31;   /* petrol wash */
-	--sl-color-accent: #63c0cb;       /* petrol bright */
-	--sl-color-accent-high: #a9dde3;  /* links, 11.77:1 */
+Contrast of the docs' own pairs: body text (gray-2) 12.04:1 dark, 10.84:1 light; links (accent-high dark) 11.77:1; aside titles 5.4:1 or more on their washes; gray-4 (borders, icons only) 3.3 to 3.7:1.
 
-	/* asides on the state system: note and tip = petrol (info, up), caution = amber, danger = brick */
-	--sl-color-blue-low: #1d2a31;   --sl-color-blue: #63c0cb;   --sl-color-blue-high: #a9dde3;
-	--sl-color-purple-low: #1d2a31; --sl-color-purple: #63c0cb; --sl-color-purple-high: #a9dde3;
-	--sl-color-green-low: #1d2a31;  --sl-color-green: #63c0cb;  --sl-color-green-high: #a9dde3;
-	--sl-color-orange-low: #30261e; --sl-color-orange: #d89372; --sl-color-orange-high: #ebc2ae;
-	--sl-color-red-low: #33211f;    --sl-color-red: #e07a63;    --sl-color-red-high: #f0b3a6;
+The rules that are not values (they live in `custom.css`, below the generated block):
 
-	--sl-color-bg-nav: #151a21;
-	--sl-color-bg-sidebar: #151a21;
-	--sl-color-bg-inline-code: #1e2530;
-	--sl-color-hairline-light: #2e3744;
-	--sl-color-hairline: #2e3744;
-	--sl-color-hairline-shade: #151a21;
-	--sl-color-backdrop-overlay: rgb(21 26 33 / 66%);
-
-	--sl-font: 'Cal Sans', system-ui, sans-serif;
-	--sl-font-mono: 'Mona Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-	--sl-line-height: 1.75;
-	--sl-line-height-headings: 1.15;
-	--sl-text-h1: 2.5rem;
-	--sl-text-h2: 1.75rem;
-	--sl-text-h3: 1.3125rem;
-	--sl-content-width: 46rem;
-	--sl-nav-height: 3.5rem;
-
-	/* Hora's own, for the rules below */
-	--hora-display: 'Fraunces Variable', Georgia, serif;
-	--hora-brand: 'Borel Display', var(--hora-display);
-	--hora-radius: 10px;
-}
-
-:root[data-theme='light'] {
-	/* light: cloud ground, ink, petrol (the ramp is inverted: white = darkest) */
-	--sl-color-white: #1b222c;
-	--sl-color-gray-1: #1b222c;   /* ink, 14.05:1 */
-	--sl-color-gray-2: #2e3540;   /* body text, 10.84:1 */
-	--sl-color-gray-3: #525a66;   /* ink-muted, 6.12:1 */
-	--sl-color-gray-4: #87837a;   /* icons, borders */
-	--sl-color-gray-5: #d6d2c6;   /* line */
-	--sl-color-gray-6: #e7e4db;   /* raised */
-	--sl-color-gray-7: #faf9f5;   /* surface */
-	--sl-color-black: #f2f0ea;    /* ground */
-
-	--sl-color-accent-low: #d8e4e2;
-	--sl-color-accent: #0e5e68;
-	--sl-color-accent-high: #0a4a52;
-
-	--sl-color-blue-low: #d8e4e2;   --sl-color-blue: #4e8a92;   --sl-color-blue-high: #0e5e68;
-	--sl-color-purple-low: #d8e4e2; --sl-color-purple: #4e8a92; --sl-color-purple-high: #0e5e68;
-	--sl-color-green-low: #d8e4e2;  --sl-color-green: #4e8a92;  --sl-color-green-high: #0e5e68;
-	--sl-color-orange-low: #f5e7da; --sl-color-orange: #b4633f; --sl-color-orange-high: #8f4b22;
-	--sl-color-red-low: #f3e2dc;    --sl-color-red: #a5372a;    --sl-color-red-high: #a5372a;
-
-	--sl-color-bg-nav: #f2f0ea;
-	--sl-color-bg-sidebar: #f2f0ea;
-	--sl-color-bg-inline-code: #e7e4db;
-	--sl-color-hairline-light: #d6d2c6;
-	--sl-color-hairline: #d6d2c6;
-	--sl-color-hairline-shade: #c9c4b6;
-	--sl-color-backdrop-overlay: rgb(27 34 44 / 45%);
-}
-
-/* type: Fraunces for what you read first */
-h1#_top, .sl-markdown-content :is(h1, h2, h3, h4), .hero h1, .card .title { font-family: var(--hora-display); font-weight: 500; letter-spacing: -0.01em; }
-.site-title span { font-family: var(--hora-brand); font-weight: 400; transform: translateY(0.16em); }
-body { font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
-
-/* the current page in the sidebar: wash, petrol text, a 3 px rule (not a solid accent block) */
-.sidebar-content a[aria-current='page'] { background: var(--sl-color-accent-low); color: var(--sl-color-accent); font-weight: 500; box-shadow: inset 3px 0 0 var(--sl-color-accent); }
-
-/* asides: the state washes, no coloured side border alone */
-.starlight-aside { border: 0; border-radius: var(--hora-radius); }
-
-/* code: Expressive Code frames on the family's surfaces */
-.expressive-code .frame { border-radius: var(--hora-radius); }
-.sl-markdown-content :not(pre) > code { border: 1px solid var(--sl-color-hairline-light); border-radius: 4px; padding: 0.12em 0.36em; }
-
-/* one focus ring everywhere (WCAG 2.4.7) */
-:focus-visible { outline: 3px solid var(--sl-color-accent); outline-offset: 2px; }
-```
-
-Expressive Code keeps its own syntax theme; set `expressiveCode: { themes: ['github-dark-dimmed', 'github-light'], styleOverrides: { borderRadius: '10px', codeFontFamily: "'Mona Sans Mono', monospace", frames: { frameBoxShadowCssValue: 'none' } } }` in `astro.config.mjs`, or keep its defaults: the frame colours follow the variables above.
+- **Type.** Fraunces 500, tracked -0.01em, for what you read first: the page title, the headings in the content, card titles. Cal Sans for everything else, `tabular-nums`. The name beside the mark is Borel, nudged down 0.16 em. Starlight raises its headings at 50em; the theme holds them to the calmer scale in the table.
+- **Sidebar.** The current page is a wash, petrol text and a 3 px inset rule, never a solid accent block.
+- **Asides** sit on the state system: note and tip are petrol (info, up), caution is amber, danger is brick. A wash and a rounded corner, never a coloured side border alone.
+- **Code.** Expressive Code frames take the family's surfaces and the 10 px radius, with no shadow; the syntax themes (`docs/src/code-themes.mjs`) use one hue for structure (petrol), one warm hue for values (the slow amber) and muted ink for comments. Inline code has a hairline and a 4 px radius.
+- **Focus.** One ring everywhere (WCAG 2.4.7): 3 px accent, 2 px offset.
 
 ## 13. Open questions
 

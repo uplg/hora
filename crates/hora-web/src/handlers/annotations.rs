@@ -44,14 +44,13 @@ pub(crate) struct AnnounceResponse {
         ("title" = String, Query, description = "Banner title"),
         ("body" = Option<String>, Query, description = "Banner body"),
         ("severity" = Option<String>, Query, description = "info (default), warning, critical or resolved"),
-        ("until" = Option<String>, Query, description = "Auto-expiry: a duration (e.g. 4h) or the next occurrence of a UTC time (HH:MM, e.g. 18:00)"),
-        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
+        ("until" = Option<String>, Query, description = "Auto-expiry: a duration (e.g. 4h) or the next occurrence of a UTC time (HH:MM, e.g. 18:00)")
     ),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Announcement pinned to the status page", body = AnnounceResponse),
         (status = 400, description = "Empty title, unknown severity or unparseable duration"),
-        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+        (status = 401, description = "Missing or wrong Bearer token, no auth_token configured, or a `?token=` in the URL (refused on writes)")
     )
 )]
 pub(crate) async fn announce(
@@ -79,7 +78,7 @@ pub(crate) async fn announce(
         until,
     )
     .map_err(|err| AppError::BadRequest(err.message()))?;
-    let id = announcement.pin(&state.store).await?;
+    let id = announcement.pin(&state.core).await?;
     // Visitors should see the banner on their next view, not a refresh later.
     state.refresh_now().await;
     tracing::info!(
@@ -99,18 +98,17 @@ pub(crate) struct AnnounceClearResponse {
 #[utoipa::path(
     delete,
     path = "/api/announce",
-    params(("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Every ad-hoc announcement removed", body = AnnounceClearResponse),
-        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+        (status = 401, description = "Missing or wrong Bearer token, no auth_token configured, or a `?token=` in the URL (refused on writes)")
     )
 )]
 pub(crate) async fn announce_clear(
     State(state): State<AppState>,
     _operator: Operator,
 ) -> Result<Json<AnnounceClearResponse>, AppError> {
-    let cleared = db::clear_announcements(&state.store, Utc::now().timestamp()).await?;
+    let cleared = db::clear_announcements(&state.core, Utc::now().timestamp()).await?;
     state.refresh_now().await;
     tracing::info!(cleared, "announcements cleared via API");
     Ok(Json(AnnounceClearResponse { cleared }))
@@ -131,14 +129,13 @@ pub(crate) struct EventResponse {
     post,
     path = "/api/event",
     params(
-        ("title" = String, Query, description = "Event title, e.g. `deploy api v2.3`"),
-        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
+        ("title" = String, Query, description = "Event title, e.g. `deploy api v2.3`")
     ),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Event marker recorded", body = EventResponse),
         (status = 400, description = "Empty title"),
-        (status = 401, description = "Missing or wrong token, or no auth_token configured")
+        (status = 401, description = "Missing or wrong Bearer token, no auth_token configured, or a `?token=` in the URL (refused on writes)")
     )
 )]
 pub(crate) async fn post_event(
@@ -152,7 +149,7 @@ pub(crate) async fn post_event(
     if title.is_empty() {
         return Err(AppError::BadRequest("title must not be empty"));
     }
-    let id = db::insert_event(&state.store, &title).await?;
+    let id = db::insert_event(&state.core, &title).await?;
     // The marker should appear on the operator's sparklines on the next view,
     // not a refresh later.
     state.refresh_now().await;
@@ -184,26 +181,25 @@ pub(crate) struct SilenceResponse {
     params(
         ("monitors" = String, Query, description = "Comma-separated monitor ids, or `all`"),
         ("duration" = String, Query, description = "How long to mute (e.g. 10m, 1h30m; max 7d)"),
-        ("reason" = Option<String>, Query, description = "Optional note recorded with the silence"),
-        ("token" = Option<String>, Query, deprecated, description = "Viewer token; deprecated on this endpoint (answered with a Deprecation header): use Authorization: Bearer")
+        ("reason" = Option<String>, Query, description = "Optional note recorded with the silence")
     ),
     security(("bearer" = [])),
     responses(
         (status = 200, description = "Alerts muted until the returned time", body = SilenceResponse),
         (status = 400, description = "Unparseable duration or empty monitor list"),
-        (status = 401, description = "Missing or wrong token, or no auth_token configured"),
+        (status = 401, description = "Missing or wrong Bearer token, no auth_token configured, or a `?token=` in the URL (refused on writes)"),
         (status = 404, description = "Unknown monitor id")
     )
 )]
 pub(crate) async fn silence(
     State(state): State<AppState>,
     // Muting alerts is an operator action: it strictly requires the
-    // configured viewer token.
+    // configured operator token.
     Operator { config }: Operator,
     Query(query): Query<SilenceQuery>,
 ) -> Result<Json<SilenceResponse>, AppError> {
     let silenced = silence::apply(
-        &state.store,
+        &state.core,
         &config,
         &query.monitors,
         &query.duration,
@@ -211,12 +207,9 @@ pub(crate) async fn silence(
     )
     .await
     .map_err(|err| match err {
-        SilenceError::InvalidDuration => {
-            AppError::BadRequest("invalid duration (use e.g. 10m, 1h30m; max 7d)")
-        }
-        SilenceError::NoIds => AppError::BadRequest("no monitor ids given"),
-        SilenceError::UnknownId(_) => AppError::NotFound("unknown monitor id"),
+        SilenceError::UnknownId(_) => AppError::NotFound(err.message()),
         SilenceError::Database(err) => AppError::Internal(err.into()),
+        other => AppError::BadRequest(other.message()),
     })?;
     let (monitors, until) = (silenced.ids, silenced.until);
     tracing::info!(monitors = ?monitors, until, "alerts silenced via API");

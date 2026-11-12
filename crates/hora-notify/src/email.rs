@@ -123,21 +123,42 @@ impl Notifier for EmailNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    let (subject, body) = EmailNotifier::render(event);
+    // The message as the relay would get it: lettre encodes the subject and
+    // the body, which is where a hostile one would hurt.
+    let mailbox = || {
+        lettre::Address::new("hora", "example.com")
+            .ok()
+            .map(|address| Mailbox::new(None, address))
+    };
+    let built = mailbox().zip(mailbox()).and_then(|(from, to)| {
+        Mail::builder()
+            .from(from)
+            .to(to)
+            .subject(subject.clone())
+            .body(body)
+            .ok()
+    });
+    crate::fuzz::Sent {
+        channel: "email",
+        title: Some(subject),
+        body: built.map_or_else(String::new, |mail| {
+            String::from_utf8_lossy(&mail.formatted()).into_owned()
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn renders_subject_and_body() {
-        let (subject, body) = EmailNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let (subject, body) = EmailNotifier::render(Event::down("API", Some("boom")));
         assert!(subject.contains("[DOWN]") && subject.contains("API"));
         assert!(body.contains("boom"));
 
@@ -145,7 +166,7 @@ mod tests {
             monitor: "API",
             secs_left: 3 * 86_400,
         });
-        assert!(subject.contains("expires in 3 days"));
+        assert!(subject.contains("expires in 3 d"));
 
         let (subject, body) = EmailNotifier::render(Event::Alert {
             monitor: "API",

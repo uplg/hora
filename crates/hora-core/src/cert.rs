@@ -2,8 +2,10 @@
 //!
 //! A periodic task opens a TLS connection to each HTTPS monitor, reads the leaf
 //! certificate's `notAfter`, stores it, and emits a [`hora_notify::Event`] once
-//! expiry is within the configured window. Verification is intentionally
-//! skipped: we only read the validity dates, independent of chain trust.
+//! expiry is within the configured window - once per expiry, restarts
+//! included, and again until a channel accepted it (see [`crate::alert_once`]).
+//! Verification is intentionally skipped: we only read the validity dates,
+//! independent of chain trust.
 //!
 //! Additionally, if a monitor has a `cert_pin` configured, the SHA-256
 //! fingerprint of the leaf public key is compared against it. A key that does
@@ -13,7 +15,6 @@
 //! so it alerts once per new key rather than every 12 hours. Presenting the
 //! pinned key again re-arms the alert.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,7 @@ use tracing::{error, info, warn};
 use x509_parser::prelude::FromDer;
 
 use crate::SECONDS_PER_DAY;
+use crate::alert_once::{self, STAGE_WARNING, Watch};
 use crate::config::Config;
 use crate::db;
 use crate::notifications::Notifiers;
@@ -283,12 +285,19 @@ impl CertSource {
             .peer_certificates()
             .and_then(<[CertificateDer<'_>]>::first)
             .ok_or_else(|| anyhow::anyhow!("server presented no certificate"))?;
-        let (_rest, parsed) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
-            .map_err(|err| anyhow::anyhow!("failed to parse certificate: {err}"))?;
-        let not_after = parsed.validity().not_after.timestamp();
-        let fingerprint = sha256_hex(parsed.public_key().raw);
-        Ok((not_after, fingerprint))
+        leaf_facts(leaf.as_ref())
     }
+}
+
+/// What is read from a leaf certificate (DER): its `notAfter` (unix secs) and
+/// the SHA-256 fingerprint of its public key. The bytes are whatever the
+/// server presented: trust is not verified, so nothing vouches for them.
+fn leaf_facts(der: &[u8]) -> anyhow::Result<(i64, String)> {
+    let (_rest, parsed) = x509_parser::certificate::X509Certificate::from_der(der)
+        .map_err(|err| anyhow::anyhow!("failed to parse certificate: {err}"))?;
+    let not_after = parsed.validity().not_after.timestamp();
+    let fingerprint = sha256_hex(parsed.public_key().raw);
+    Ok((not_after, fingerprint))
 }
 
 /// A one-shot read of a TLS endpoint's leaf certificate, for `hora probe`.
@@ -391,9 +400,6 @@ pub fn spawn_watcher(
             }
         };
 
-        let mut warned: HashMap<String, bool> = HashMap::new();
-        let mut domain_warned: HashMap<String, bool> = HashMap::new();
-        let mut unreadable: HashMap<String, bool> = HashMap::new();
         let mut ticker = tokio::time::interval(CHECK_INTERVAL);
 
         loop {
@@ -404,34 +410,12 @@ pub fn spawn_watcher(
             let snapshot = config.borrow().clone();
             let now = chrono::Utc::now().timestamp();
 
-            // Forget monitors that no longer exist so the alert-dedup maps stay bounded.
-            warned.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
-            domain_warned.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
-            unreadable.retain(|id, _| snapshot.monitors.iter().any(|m| &m.id == id));
-
             // A shutdown mid-sweep stops it rather than waiting out every
             // remaining lookup and handshake.
             let sweep = async {
-                domain_expiry::check_domains(
-                    &store,
-                    &snapshot,
-                    &notifier,
-                    &client,
-                    &mut domain_warned,
-                    now,
-                )
-                .await;
+                domain_expiry::check_domains(&store, &snapshot, &notifier, &client, now).await;
                 release::check_releases(&store, &snapshot, &notifier, &client, now).await;
-                check_certs(
-                    &store,
-                    &snapshot,
-                    &notifier,
-                    &tls,
-                    &mut warned,
-                    &mut unreadable,
-                    now,
-                )
-                .await;
+                check_certs(&store, &snapshot, &notifier, &tls, now).await;
             };
             tokio::select! {
                 () = sweep => {}
@@ -449,8 +433,6 @@ async fn check_certs(
     snapshot: &Config,
     notifier: &Notifiers,
     tls: &Arc<ClientConfig>,
-    warned: &mut HashMap<String, bool>,
-    unreadable: &mut HashMap<String, bool>,
     now: i64,
 ) {
     use futures_util::StreamExt as _;
@@ -498,19 +480,17 @@ async fn check_certs(
     }
     drop(fetches);
 
-    let threshold_days = i64::from(snapshot.alerts.cert_expiry_days);
     for (index, result) in results {
         let monitor = &snapshot.monitors[index];
         let (not_after, fingerprint) = match result {
             Ok(found) => {
-                if unreadable.remove(&monitor.id).is_some() {
-                    info!(monitor = %monitor.id, "TLS certificate readable again");
-                }
+                // Readable again: the next streak of failed reads alerts.
+                alert_once::rearm(store, Watch::CertUnreadable, &monitor.id).await;
                 found
             }
             Err(err) => {
                 warn!(monitor = %monitor.id, "cert check failed: {err:#}");
-                report_unreadable(store, snapshot, notifier, monitor, &err, unreadable).await;
+                report_unreadable(store, snapshot, notifier, monitor, &err).await;
                 continue;
             }
         };
@@ -520,25 +500,11 @@ async fn check_certs(
         let days_left = (not_after - now) / SECONDS_PER_DAY;
         info!(monitor = %monitor.id, days_left, "checked TLS certificate");
 
-        let expiring = days_left <= threshold_days;
-        let already_warned = warned.get(&monitor.id).copied().unwrap_or(false);
-        // Mute (and don't record the warned state) during maintenance,
-        // so the alert can still fire once the window ends.
-        let muted = snapshot.in_maintenance(&monitor.id, chrono::Utc::now());
+        // Mute (and don't record the alert) during maintenance or a silence, so it can
+        // still fire once the window ends.
+        let muted = crate::scheduler::muted_under(store, snapshot, &monitor.id).await;
         if !muted {
-            if expiring && !already_warned {
-                notifier
-                    .load_full()
-                    .dispatch(
-                        Event::CertExpiring {
-                            monitor: &monitor.name,
-                            secs_left: not_after - now,
-                        },
-                        monitor.notify.as_deref(),
-                    )
-                    .await;
-            }
-            warned.insert(monitor.id.clone(), expiring);
+            alert_expiry(store, snapshot, notifier, monitor, not_after, now).await;
         }
 
         if let Some(expected_pin) = &monitor.cert_pin {
@@ -556,22 +522,53 @@ async fn check_certs(
     }
 }
 
+/// The expiry alert of one certificate just read: once when it enters the
+/// `alerts.cert_expiry_days` window, the mark being stored (see
+/// [`alert_once`]) so a restart does not repeat it and written only once a
+/// channel accepted the alert, so one that failed everywhere is sent again at
+/// the next sweep. A certificate seen outside the window (renewed) re-arms it.
+async fn alert_expiry(
+    store: &Store,
+    snapshot: &Config,
+    notifier: &Notifiers,
+    monitor: &crate::config::Monitor,
+    not_after: i64,
+    now: i64,
+) {
+    let days_left = (not_after - now) / SECONDS_PER_DAY;
+    if days_left > i64::from(snapshot.alerts.cert_expiry_days) {
+        alert_once::rearm(store, Watch::CertExpiry, &monitor.id).await;
+        return;
+    }
+    if !alert_once::should_alert(store, Watch::CertExpiry, &monitor.id, STAGE_WARNING).await {
+        return;
+    }
+    let event = Event::CertExpiring {
+        monitor: &monitor.name,
+        secs_left: not_after - now,
+    };
+    if alert_once::dispatch(notifier, event, monitor.notify.as_deref(), &monitor.id).await {
+        alert_once::mark_delivered(store, Watch::CertExpiry, &monitor.id, STAGE_WARNING).await;
+    }
+}
+
 /// A certificate that could not be read is an expiry nobody watches any more
 /// (a STARTTLS dialogue that changed, a server down to TLS 1.0, a firewall
 /// rule): alert once per streak of failed reads, like an expiring one. Not
 /// while the monitor has an open incident - its down alert already says the
 /// server is unreachable - and not during maintenance; neither records the
-/// streak, so the alert still comes if the read keeps failing afterwards.
+/// streak, so the alert still comes if the read keeps failing afterwards. The
+/// streak is stored like the expiry alert's mark: a restart in the middle of
+/// one does not alert again, and an alert no channel accepted is retried.
 async fn report_unreadable(
     store: &Store,
     snapshot: &Config,
     notifier: &Notifiers,
     monitor: &crate::config::Monitor,
     err: &anyhow::Error,
-    unreadable: &mut HashMap<String, bool>,
 ) {
-    if unreadable.get(&monitor.id).copied().unwrap_or(false)
-        || snapshot.in_maintenance(&monitor.id, chrono::Utc::now())
+    if crate::scheduler::muted_under(store, snapshot, &monitor.id).await
+        || !alert_once::should_alert(store, Watch::CertUnreadable, &monitor.id, STAGE_WARNING).await
     {
         return;
     }
@@ -585,17 +582,13 @@ async fn report_unreadable(
     }
     // The error may quote the server (an IMAP greeting, an SMTP reply).
     let error = crate::bounded(&format!("{err:#}"), MAX_UNREADABLE_CHARS);
-    notifier
-        .load_full()
-        .dispatch(
-            Event::CertUnreadable {
-                monitor: &monitor.name,
-                error: &error,
-            },
-            monitor.notify.as_deref(),
-        )
-        .await;
-    unreadable.insert(monitor.id.clone(), true);
+    let event = Event::CertUnreadable {
+        monitor: &monitor.name,
+        error: &error,
+    };
+    if alert_once::dispatch(notifier, event, monitor.notify.as_deref(), &monitor.id).await {
+        alert_once::mark_delivered(store, Watch::CertUnreadable, &monitor.id, STAGE_WARNING).await;
+    }
 }
 
 /// The longest certificate-read error quoted in an alert.
@@ -732,6 +725,40 @@ fn pin_alert<'a>(
         Some(stored) if stored != observed => stored,
         _ => expected,
     })
+}
+
+/// What a remote server feeds the certificate watcher, for the fuzz targets
+/// in `fuzz/` (built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use super::Starttls;
+
+    /// [`super::leaf_facts`], errors dropped.
+    #[must_use]
+    pub fn leaf_facts(der: &[u8]) -> Option<(i64, String)> {
+        super::leaf_facts(der).ok()
+    }
+
+    /// [`super::host_port`].
+    #[must_use]
+    pub fn host_port(target: &str) -> Option<(String, u16)> {
+        super::host_port(target)
+    }
+
+    /// [`super::negotiate`] against a server that says `server` and then
+    /// closes; whether STARTTLS was agreed.
+    pub async fn negotiate(server: &[u8], imap: bool) -> bool {
+        let mode = if imap {
+            Starttls::Imap
+        } else {
+            Starttls::Smtp { ehlo_name: None }
+        };
+        let mut stream = tokio::io::join(server, tokio::io::sink());
+        super::negotiate(&mut stream, &mode, "[192.0.2.10]")
+            .await
+            .is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -1054,22 +1081,84 @@ mod tests {
         let store = Store::in_memory().await;
         let monitor = &config.monitors[0];
         let err = anyhow::anyhow!("starttls negotiation timed out");
-        let mut unreadable = HashMap::new();
 
         // Down (open incident): the down alert already speaks for it.
         let incident = db::insert_incident_start(&store, "api", None, None, None, &[], None, None)
             .await
             .unwrap();
-        report_unreadable(&store, &config, &notifier, monitor, &err, &mut unreadable).await;
+        report_unreadable(&store, &config, &notifier, monitor, &err).await;
         assert_eq!(crate::testing::events(&posts), Vec::<String>::new());
 
         db::update_incident_end(&store, incident).await.unwrap();
-        report_unreadable(&store, &config, &notifier, monitor, &err, &mut unreadable).await;
-        report_unreadable(&store, &config, &notifier, monitor, &err, &mut unreadable).await;
+        report_unreadable(&store, &config, &notifier, monitor, &err).await;
+        report_unreadable(&store, &config, &notifier, monitor, &err).await;
         assert_eq!(crate::testing::events(&posts), ["cert_unreadable"]);
         assert_eq!(
             posts.lock().unwrap()[0]["message"],
             "starttls negotiation timed out"
         );
+    }
+
+    fn hook_channel(url: &str) -> String {
+        format!("[[channels]]\nname = \"hook\"\ntype = \"webhook\"\nurl = \"{url}\"")
+    }
+
+    /// The expiry alert is remembered in the database, not in the watcher: a
+    /// restart (here, simply another call with nothing carried over) does not
+    /// send it again, and a renewal followed by a new expiry does.
+    #[tokio::test]
+    async fn an_expiring_certificate_alerts_once_across_restarts() {
+        let (hook, posts) = crate::testing::webhook_sink().await;
+        let config = monitor_config("https://localhost:1/", &hook_channel(&hook));
+        let client = crate::http::client(None).unwrap();
+        let notifier = crate::notifications::shared(&config, &client);
+        let store = Store::in_memory().await;
+        let monitor = &config.monitors[0];
+        let now = 1_800_000_000;
+        let soon = now + 3 * SECONDS_PER_DAY;
+        let renewed = now + 90 * SECONDS_PER_DAY;
+
+        alert_expiry(&store, &config, &notifier, monitor, soon, now).await;
+        alert_expiry(&store, &config, &notifier, monitor, soon, now).await;
+        assert_eq!(crate::testing::events(&posts), ["cert_expiring"]);
+
+        // Renewed, then inside the window again: a new alert.
+        alert_expiry(&store, &config, &notifier, monitor, renewed, now).await;
+        assert_eq!(crate::testing::events(&posts).len(), 1);
+        let later = renewed - 3 * SECONDS_PER_DAY;
+        alert_expiry(&store, &config, &notifier, monitor, renewed, later).await;
+        assert_eq!(
+            crate::testing::events(&posts),
+            ["cert_expiring", "cert_expiring"]
+        );
+    }
+
+    /// An alert that no channel accepted is not recorded as sent: the next
+    /// sweep sends it again.
+    #[tokio::test]
+    async fn an_expiry_alert_that_failed_everywhere_is_retried() {
+        let refusing = crate::testing::webhook_refusing().await;
+        let config = monitor_config("https://localhost:1/", &hook_channel(&refusing));
+        let client = crate::http::client(None).unwrap();
+        let notifier = crate::notifications::shared(&config, &client);
+        let store = Store::in_memory().await;
+        let now = 1_800_000_000;
+        let soon = now + 3 * SECONDS_PER_DAY;
+
+        alert_expiry(&store, &config, &notifier, &config.monitors[0], soon, now).await;
+        assert!(
+            alert_once::should_alert(&store, Watch::CertExpiry, "api", STAGE_WARNING).await,
+            "a failed alert must stay owed"
+        );
+
+        // The channel works again: the next sweep delivers, once.
+        let (hook, posts) = crate::testing::webhook_sink().await;
+        let config = monitor_config("https://localhost:1/", &hook_channel(&hook));
+        notifier.store(Arc::new(crate::notifications::build(
+            &config, &client, None,
+        )));
+        alert_expiry(&store, &config, &notifier, &config.monitors[0], soon, now).await;
+        alert_expiry(&store, &config, &notifier, &config.monitors[0], soon, now).await;
+        assert_eq!(crate::testing::events(&posts), ["cert_expiring"]);
     }
 }

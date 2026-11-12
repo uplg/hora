@@ -2,25 +2,30 @@
 
 use std::sync::Arc;
 
-use askama::Template;
 use chrono::{DateTime, Utc};
 use hora_core::probe::FailureKind;
 use hora_core::status::MonitorState;
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::display::DisplayState;
+
 // --- View model ----------------------------------------------------------
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct Summary {
     pub(crate) title: String,
-    pub(crate) overall: MonitorState,
+    pub(crate) overall: super::Overall,
     pub(crate) overall_label: &'static str,
     pub(crate) generated_at: String,
     #[serde(skip)]
     pub(crate) updated_utc: String,
     pub(crate) incidents: Vec<IncidentView>,
     pub(crate) maintenances: Vec<MaintenanceView>,
+    /// The windows that have not started yet and start within a week, for
+    /// the page's "Next" line: the ones this audience may be told about.
+    #[serde(skip)]
+    pub(crate) upcoming: Vec<MaintenanceView>,
     /// Shared with the groups' card lists (and the per-group pages derived
     /// from this summary), so a view - chart SVG included - is built once.
     #[serde(serialize_with = "serialize_views")]
@@ -44,6 +49,11 @@ pub(crate) struct Summary {
     /// page's "Recent incidents").
     #[serde(skip)]
     pub(crate) recent: Vec<RecentIncident>,
+    /// Every recent incident this audience may see, newest first: what
+    /// `recent` was cut from. A group's page picks its own newest from here,
+    /// rather than from a cut that other groups' incidents may have filled.
+    #[serde(skip)]
+    pub(crate) recent_pool: Vec<RecentIncident>,
     /// Whole days since the last incident this audience may see ended (or
     /// since its oldest data, without one); `None` while one is ongoing.
     #[serde(skip)]
@@ -98,6 +108,29 @@ pub(crate) struct IncidentView {
 pub(crate) struct MaintenanceView {
     pub(crate) reason: String,
     pub(crate) monitors: String,
+    /// The window's own hours, for the page's hero. Carried with the banner
+    /// so the page never has to find the window again in the config: looked
+    /// up by title, two windows with the same (or no) title were one, and a
+    /// group's page showed another group's hours.
+    #[serde(skip)]
+    pub(crate) start: DateTime<Utc>,
+    #[serde(skip)]
+    pub(crate) end: DateTime<Utc>,
+    /// The window covers everything.
+    #[serde(skip)]
+    pub(crate) all: bool,
+    /// Otherwise, the monitor ids behind `monitors`: only those this
+    /// audience may be told about, so a narrower page (a group's) can cut
+    /// the list again without learning anything.
+    #[serde(skip)]
+    pub(crate) ids: Vec<String>,
+    /// A `[[maintenance]]` window of the config.
+    #[serde(skip)]
+    pub(crate) configured: bool,
+    /// For the operator: the host it was planned for, and the peer that
+    /// announced it. Never set for another audience.
+    #[serde(skip)]
+    pub(crate) note: Option<String>,
 }
 
 /// A watched peer's view for the status page: just its current status and when it
@@ -168,7 +201,7 @@ pub(crate) struct MonitorView {
     #[serde(rename = "slo_latency_ms")]
     pub(crate) slo_latency_ms: Option<i64>,
     #[serde(skip)]
-    pub(crate) slo_state: &'static str,
+    pub(crate) slo_state: super::status::SloState,
     /// Availability SLO target, percent (e.g. 99.9).
     #[serde(rename = "slo_uptime_pct", skip_serializing_if = "Option::is_none")]
     pub(crate) slo_uptime_pct: Option<f64>,
@@ -187,7 +220,7 @@ pub(crate) struct MonitorView {
     #[serde(skip)]
     pub(crate) budget_title: String,
     #[serde(skip)]
-    pub(crate) budget_state: &'static str,
+    pub(crate) budget_state: super::status::BudgetState,
     /// Active maintenance window title (alerts muted); `None` outside a window.
     pub(crate) maintenance: Option<String>,
     /// When the open incident started (confirmed down), while it is down.
@@ -203,12 +236,18 @@ pub(crate) struct MonitorView {
     /// permille; `None` without checks.
     #[serde(skip)]
     pub(crate) uptime_long_permille: Option<i64>,
+    /// Whole days until the certificate expires: at least 1 while it is
+    /// valid, negative once it has expired (see `status::cert_days_left`).
     #[serde(rename = "cert_expiry_days")]
     pub(crate) cert_days: Option<i64>,
+    /// The same in seconds (negative once expired), when the build ran: the
+    /// last day reads in hours, and "expired" means it.
+    #[serde(skip)]
+    pub(crate) cert_secs_left: Option<i64>,
     #[serde(skip)]
     pub(crate) cert_label: Option<String>,
     #[serde(skip)]
-    pub(crate) cert_state: &'static str,
+    pub(crate) cert_state: super::status::CertState,
     #[serde(rename = "history")]
     #[schema(value_type = Vec<DayCell>)]
     pub(crate) bar: DayBar,
@@ -240,7 +279,7 @@ pub(crate) struct VantageView {
     /// That vantage's 24h median latency, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) p50_ms: Option<i64>,
-    /// The pre-formatted card label ("Hora B: 220ms" / "Hora B: down").
+    /// The pre-formatted card label ("Hora B: 220 ms" / "Hora B: down").
     #[serde(skip)]
     pub(crate) label: String,
 }
@@ -324,22 +363,11 @@ impl Summary {
 }
 
 impl MonitorView {
-    /// The state the page shows: `up`, `degraded`, `down`, `maint` (inside a
-    /// maintenance window) or `none` (no data yet). A local-only down (see
-    /// [`Self::local_only`]) shows as up: the service is up for its users.
-    pub(crate) fn display_state(&self) -> &'static str {
-        if self.maintenance.is_some() {
-            return "maint";
-        }
-        if self.local_only() {
-            return "up";
-        }
-        match self.status {
-            MonitorState::Up => "up",
-            MonitorState::Degraded => "degraded",
-            MonitorState::Down => "down",
-            MonitorState::Unknown => "none",
-        }
+    /// The state the page shows: its status, or maintenance inside a planned
+    /// window. A local-only down (see [`Self::local_only`]) shows as up: the
+    /// service is up for its users.
+    pub(crate) fn display_state(&self) -> DisplayState {
+        DisplayState::shown(self.status, self.maintenance.is_some(), self.local_only())
     }
 
     /// Down from this node only: every peer that watches the same target
@@ -350,24 +378,28 @@ impl MonitorView {
             && self
                 .vantages
                 .iter()
-                .all(|vantage| matches!(vantage.status.as_str(), "up" | "degraded"))
+                .all(|vantage| DisplayState::from(vantage.status).answers())
     }
 
-    /// The state's word on the page. "Retrying" when the last check failed
-    /// but the failure threshold is not reached yet (degraded with an error),
+    /// The last check failed but the failure threshold is not reached yet
+    /// (degraded with an error): it is being checked again, not slow.
+    pub(crate) fn retrying(&self) -> bool {
+        self.display_state() == DisplayState::Degraded && self.last_error.is_some()
+    }
+
+    /// The state's word on the page. "Retrying" for [`Self::retrying`],
     /// "Slow" when it answered above its latency threshold.
     pub(crate) fn word(&self) -> &'static str {
-        match self.display_state() {
-            "degraded" if self.last_error.is_some() => "Retrying",
-            state => crate::layout::word(state),
+        if self.retrying() {
+            "Retrying"
+        } else {
+            self.display_state().word()
         }
     }
 }
 
 /// The status page (whole, or one group's): the page chrome plus the status
 /// view built from the summary (see `crate::status_page`).
-#[derive(Template)]
-#[template(path = "status.html")]
 pub(crate) struct StatusTemplate<'a> {
     pub(crate) chrome: crate::layout::Chrome,
     pub(crate) page: crate::status_page::StatusPage<'a>,

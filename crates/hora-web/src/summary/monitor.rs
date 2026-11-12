@@ -6,16 +6,18 @@ use std::sync::Arc;
 
 use chrono::TimeDelta;
 
-use hora_core::SECONDS_PER_DAY;
 use hora_core::config::Monitor;
 use hora_core::db::{self, DayRow, Latest, Point};
 use hora_core::status::MonitorState;
 use hora_core::{slo, topology};
 
-use super::status::{build_bar, cert_label, cert_state_for, iso, slo_state};
+use super::status::{
+    BudgetState, build_bar, cert_days_left, cert_label, cert_state_for, iso, slo_state,
+};
 use super::view::{GroupView, MonitorView, VantageView};
 use super::{Percentiles, SummaryCtx};
 
+use crate::layout::minutes;
 use crate::visibility::Visibility;
 
 /// The pre-fetched batch maps a monitor's view is assembled from, keyed by
@@ -31,23 +33,22 @@ pub(crate) struct MonitorData<'a> {
     pub(super) certs: &'a HashMap<String, i64>,
     /// Each monitor's open incident and last finished one.
     pub(super) marks: &'a HashMap<String, db::IncidentMarks>,
-    /// The configured maintenance windows, to mark the days they touched.
-    pub(super) maintenance: &'a [hora_core::config::Maintenance],
+    /// Every maintenance window (the config's, the planned ones), to mark
+    /// the days they touched.
+    pub(super) maintenance: &'a [hora_core::planned::Window],
     /// The peers' view of shared targets, from the daemon's vantage poller.
     pub(super) vantage: &'a HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
 }
 
-/// Mark the bar's days a configured maintenance window covering `id` touched
-/// (the windows stay in the config after they end, so past ones show too).
+/// Mark the bar's days a maintenance window covering `id` touched (the
+/// windows stay in the config, and a year in the database, after they end:
+/// past ones show too).
 fn mark_maintenance(
     bar: &mut [super::view::DayCell],
-    windows: &[hora_core::config::Maintenance],
+    windows: &[hora_core::planned::Window],
     id: &str,
 ) {
-    for window in windows
-        .iter()
-        .filter(|window| window.monitors.is_empty() || window.monitors.iter().any(|m| m == id))
-    {
+    for window in windows.iter().filter(|window| window.covers(id)) {
         // ISO dates compare as strings.
         let first = window.start.format("%Y-%m-%d").to_string();
         let last = window.end.format("%Y-%m-%d").to_string();
@@ -72,7 +73,7 @@ fn long_uptime(daily: &[DayRow], bar: &[super::view::DayCell]) -> Option<i64> {
             )
         },
     );
-    (total > 0).then(|| available.saturating_mul(1000) / total)
+    hora_core::fmt::permille_of(available, total)
 }
 
 /// Build a monitor's view from the pre-fetched batch maps. Pure: a monitor with
@@ -84,25 +85,15 @@ pub(crate) fn build_monitor_view(
     all_monitors: &[Monitor],
     visibility: &Visibility<'_>,
 ) -> MonitorView {
-    let recent = data
-        .recent
-        .get(&monitor.id)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let status = db::derive_status(recent, ctx.threshold);
+    let recent = data.recent.get(&monitor.id).map_or_default(Vec::as_slice);
+    let status = ctx.status_of(monitor, data.recent);
 
     let uptime_permille = data
         .availability
         .get(&monitor.id)
-        .and_then(|&(available, total)| {
-            (total > 0).then(|| available.saturating_mul(1000) / total)
-        });
+        .and_then(|&(available, total)| hora_core::fmt::permille_of(available, total));
 
-    let daily = data
-        .daily
-        .get(&monitor.id)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+    let daily = data.daily.get(&monitor.id).map_or_default(Vec::as_slice);
     let mut bar = build_bar(daily, ctx.now, ctx.history_days);
     mark_maintenance(&mut bar, data.maintenance, &monitor.id);
     let uptime_long_permille = long_uptime(daily, &bar);
@@ -116,10 +107,10 @@ pub(crate) fn build_monitor_view(
     let pct = data.percentiles.get(&monitor.id).copied();
     let slo_state = slo_state(monitor.slo_latency_ms, pct.map(|p| p.p95));
 
-    let cert_days = data
+    let cert_secs_left = data
         .certs
         .get(&monitor.id)
-        .map(|&not_after| (not_after - ctx.timestamp) / SECONDS_PER_DAY);
+        .map(|&not_after| not_after - ctx.timestamp);
 
     let latest = recent.first();
     let (cause, impacted) = if status == MonitorState::Down {
@@ -156,8 +147,8 @@ pub(crate) fn build_monitor_view(
         budget_minutes_total: budget.as_ref().map(|b| b.total),
         budget_minutes_left: budget.as_ref().map(|b| b.left),
         budget_label: budget.as_ref().map(|b| b.label.clone()),
-        budget_title: budget.as_ref().map(|b| b.title.clone()).unwrap_or_default(),
-        budget_state: budget.as_ref().map_or("none", |b| b.state),
+        budget_title: budget.as_ref().map_or_default(|b| b.title.clone()),
+        budget_state: budget.as_ref().map_or(BudgetState::None, |b| b.state),
         maintenance: None,
         slow_over_ms: monitor.degraded_over_ms,
         down_since: (status == MonitorState::Down)
@@ -169,9 +160,10 @@ pub(crate) fn build_monitor_view(
             .flatten(),
         marks: data.marks.get(&monitor.id).copied().unwrap_or_default(),
         uptime_long_permille,
-        cert_days,
-        cert_label: cert_days.map(cert_label),
-        cert_state: cert_state_for(cert_days, ctx.cert_threshold),
+        cert_days: cert_secs_left.map(cert_days_left),
+        cert_secs_left,
+        cert_label: cert_secs_left.map(cert_label),
+        cert_state: cert_state_for(cert_secs_left, ctx.cert_threshold),
         bar: bar.into(),
         spark,
         group: monitor.group.clone(),
@@ -182,7 +174,7 @@ pub(crate) fn build_monitor_view(
 }
 
 /// The per-vantage line of a card: each peer's view of this target, with a
-/// pre-formatted label ("Hora B: 220ms", "Hora C: down").
+/// pre-formatted label ("Hora B: 220 ms", "Hora C: down").
 fn vantage_views(
     map: &HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
     monitor: &Monitor,
@@ -191,7 +183,7 @@ fn vantage_views(
         .into_iter()
         .map(|view| {
             let label = match (view.status.as_str(), view.p50_ms) {
-                ("up" | "degraded", Some(ms)) => format!("{}: {ms}ms", view.peer),
+                ("up" | "degraded", Some(ms)) => format!("{}: {ms} ms", view.peer),
                 (status, _) => format!("{}: {status}", view.peer),
             };
             VantageView {
@@ -283,7 +275,7 @@ struct BudgetView {
     left: i64,
     label: String,
     title: String,
-    state: &'static str,
+    state: BudgetState,
 }
 
 /// Compute the error budget over the monitor's SLO window from the merged
@@ -293,7 +285,10 @@ struct BudgetView {
 fn budget_view(monitor: &Monitor, ctx: &SummaryCtx, daily: &[DayRow]) -> Option<BudgetView> {
     let slo_bp = monitor.slo_uptime?;
     let window = monitor.slo_window_days();
-    let cutoff = (ctx.now - TimeDelta::days(i64::from(window)))
+    // The window is `window` calendar days ending today, so its first day is
+    // `window - 1` days back: counting from `window` days back summed one day
+    // more than the budget and the coverage are sized for.
+    let cutoff = (ctx.now - TimeDelta::days(i64::from(window).saturating_sub(1)))
         .format("%Y-%m-%d")
         .to_string();
     let mut available = 0_i64;
@@ -309,35 +304,24 @@ fn budget_view(monitor: &Monitor, ctx: &SummaryCtx, daily: &[DayRow]) -> Option<
     let budget_total = slo::budget_minutes(window, slo_bp);
     let left = (budget_total - slo::consumed_minutes(available, total, covered_minutes)).max(0);
     let state = if left == 0 {
-        "breached"
+        BudgetState::Breached
     } else if left.saturating_mul(4) <= budget_total {
-        "low"
+        BudgetState::Low
     } else {
-        "met"
+        BudgetState::Met
     };
     Some(BudgetView {
         total: budget_total,
         left,
-        label: format!("budget {}", format_minutes(left)),
+        label: format!("budget {}", minutes(left)),
         title: format!(
-            "error budget: {} of {} left ({}% over {window}d)",
-            format_minutes(left),
-            format_minutes(budget_total),
+            "error budget: {} of {} left ({} % over {window} d)",
+            minutes(left),
+            minutes(budget_total),
             format_slo_pct(slo_bp),
         ),
         state,
     })
-}
-
-/// `"43m"`, `"3h07m"`, `"3d2h"` - budget durations at a human size.
-pub(super) fn format_minutes(minutes: i64) -> String {
-    if minutes >= 2 * 1440 {
-        format!("{}d{}h", minutes / 1440, (minutes % 1440) / 60)
-    } else if minutes >= 120 {
-        format!("{}h{:02}m", minutes / 60, minutes % 60)
-    } else {
-        format!("{minutes}m")
-    }
 }
 
 /// Basis points back to a percent string without trailing zeros: 9990 → "99.9".
@@ -348,5 +332,66 @@ pub(super) fn format_slo_pct(basis_points: u32) -> String {
         format!("{}.{}", basis_points / 100, (basis_points % 100) / 10)
     } else {
         format!("{}.{:02}", basis_points / 100, basis_points % 100)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, TimeDelta, Utc};
+    use hora_core::db::DayRow;
+
+    use super::super::SummaryCtx;
+    use super::super::status::BudgetState;
+    use super::budget_view;
+
+    fn day(now: DateTime<Utc>, days_ago: i64, up: i64, down: i64) -> DayRow {
+        DayRow {
+            day: (now - TimeDelta::days(days_ago))
+                .format("%Y-%m-%d")
+                .to_string(),
+            up,
+            down,
+            degraded: 0,
+        }
+    }
+
+    /// A 7-day window is today and the six days before it. The day seven days
+    /// back used to be summed too (eight days of checks against a seven-day
+    /// budget and coverage), so an outage that had left the window still
+    /// spent the budget.
+    #[test]
+    fn the_budget_window_is_exactly_its_days() {
+        let config = hora_core::config::parse(
+            "[page]\n[server]\n[[monitors]]\nid = \"web\"\nname = \"Web\"\n\
+             target = \"https://example.com\"\ninterval_secs = 60\n\
+             slo_uptime = 99\nslo_window_days = 7\n",
+        )
+        .expect("config");
+        let monitor = &config.monitors[0];
+        let now = DateTime::from_timestamp(1_780_000_000, 0).expect("date");
+        let ctx = SummaryCtx {
+            now,
+            timestamp: now.timestamp(),
+            alerts: hora_core::config::Alerts::default(),
+            cert_threshold: 14,
+            history_days: 90,
+        };
+        // 1 % of 7 days.
+        let whole = 7 * 1440 / 100;
+
+        // Seven clean days in the window, and a day-long outage just out of it.
+        let mut daily: Vec<DayRow> = (0..7).map(|ago| day(now, ago, 100, 0)).collect();
+        daily.push(day(now, 7, 0, 100));
+        let budget = budget_view(monitor, &ctx, &daily).expect("an SLO is set");
+        assert_eq!(budget.total, whole);
+        assert_eq!(budget.left, whole, "a day out of the window spent budget");
+        assert_eq!(budget.state, BudgetState::Met);
+
+        // The same outage on the window's first day counts.
+        let mut daily: Vec<DayRow> = (0..6).map(|ago| day(now, ago, 100, 0)).collect();
+        daily.push(day(now, 6, 0, 100));
+        let budget = budget_view(monitor, &ctx, &daily).expect("an SLO is set");
+        assert_eq!(budget.left, 0);
+        assert_eq!(budget.state, BudgetState::Breached);
     }
 }

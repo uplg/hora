@@ -6,9 +6,11 @@
 //! config actually needs the capability, so a failure is actionable, not
 //! noise.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::config::{Config, Kind};
+use crate::config_watch::{self, Caveat};
 
 /// Severity of one finding. `Fail` means a capability the *current config
 /// needs* is missing - `hora doctor` exits non-zero on any of these.
@@ -50,9 +52,10 @@ impl Finding {
     }
 }
 
-/// Run every diagnostic against `config`'s requirements.
-pub async fn run(config: &Config) -> Vec<Finding> {
-    vec![
+/// Run every diagnostic against `config`'s requirements; `config_path` is
+/// the file it was loaded from.
+pub async fn run(config: &Config, config_path: &Path) -> Vec<Finding> {
+    let mut findings = vec![
         database(config).await,
         listen_port(config).await,
         ip_route("ipv4", "8.8.8.8:53", true, config),
@@ -66,7 +69,35 @@ pub async fn run(config: &Config) -> Vec<Finding> {
         dns_resolver().await,
         exec_dir(config),
         notification_channels(config),
-    ]
+    ];
+    findings.extend(live_reload(
+        config_path,
+        &config_watch::caveats(config_path),
+    ));
+    findings
+}
+
+/// Live reload: whether the way the config file is mounted lets a change
+/// reach the daemon. The same findings the daemon logs once at startup. A
+/// file mounted on its own is a warning, not a failure - the config in force
+/// is fine, it is the next deploy that will not arrive. Nothing is said
+/// where nothing was checked: the mount table is read on Linux only.
+fn live_reload(config_path: &Path, caveats: &[Caveat]) -> Option<Finding> {
+    if caveats.is_empty() {
+        return cfg!(target_os = "linux").then(|| {
+            Finding::new(
+                "reload",
+                Status::Ok,
+                format!(
+                    "{} is watched through its directory, and re-read every {} s",
+                    config_path.display(),
+                    config_watch::RECHECK.as_secs()
+                ),
+            )
+        });
+    }
+    let detail: Vec<String> = caveats.iter().map(ToString::to_string).collect();
+    Some(Finding::new("reload", Status::Warn, detail.join("; ")))
 }
 
 /// The exec-probe gate: with exec monitors configured, `HORA_EXEC_DIR` must
@@ -294,12 +325,12 @@ async fn dns_resolver() -> Finding {
             "dns",
             Status::Ok,
             format!(
-                "system resolver answered in {}ms",
+                "system resolver answered in {} ms",
                 started.elapsed().as_millis()
             ),
         ),
         Ok(Err(err)) => Finding::new("dns", Status::Fail, format!("lookup failed: {err}")),
-        Err(_elapsed) => Finding::new("dns", Status::Fail, "lookup timed out (5s)".to_owned()),
+        Err(_elapsed) => Finding::new("dns", Status::Fail, "lookup timed out (5 s)".to_owned()),
     }
 }
 
@@ -325,6 +356,59 @@ mod tests {
         assert!(finding.detail.contains("created on first start"));
         // Doctor must be side-effect free.
         assert!(!std::path::Path::new("/tmp/hora-doctor-test-does-not-exist.db").exists());
+    }
+
+    /// A channel left without its secret is disabled, and doctor says which.
+    #[test]
+    fn a_channel_with_an_empty_secret_is_reported_disabled() {
+        const OPS: &str = "[page]\n[server]\n[[channels]]\nname = \"ops\"\n\
+             type = \"discord\"\nwebhook_url = \"https://discord.example/hook\"\n";
+        const PHONE: &str = "[[channels]]\nname = \"phone\"\ntype = \"gotify\"\n\
+             url = \"https://gotify.example\"\ntoken = \"\"\n";
+
+        let finding = notification_channels(&config(&format!("{OPS}{PHONE}")));
+        assert_eq!(finding.status, Status::Ok);
+        assert!(
+            finding.detail.contains("1 active channel (ops)")
+                && finding
+                    .detail
+                    .contains("1 disabled by empty secret (phone)"),
+            "{}",
+            finding.detail
+        );
+
+        let finding = notification_channels(&config(&format!("[page]\n[server]\n{PHONE}")));
+        assert_eq!(finding.status, Status::Warn);
+        assert!(
+            finding.detail.contains("disabled by empty secret (phone)"),
+            "{}",
+            finding.detail
+        );
+
+        let finding = notification_channels(&config(OPS));
+        assert_eq!(finding.status, Status::Ok);
+        assert!(!finding.detail.contains("disabled"), "{}", finding.detail);
+    }
+
+    /// What the mount table says against live reload is a warning, with the
+    /// remedy in it; a clean table is not a line of noise off Linux.
+    #[test]
+    fn a_single_file_mount_is_a_live_reload_warning() {
+        let path = Path::new("/etc/hora/config.toml");
+        let caveats = [Caveat::SingleFileMount {
+            file: path.to_path_buf(),
+        }];
+        let finding = live_reload(path, &caveats).expect("a finding");
+        assert_eq!((finding.name, finding.status), ("reload", Status::Warn));
+        assert!(
+            finding.detail.contains("Mount the directory instead"),
+            "{}",
+            finding.detail
+        );
+
+        let clean = live_reload(path, &[]);
+        assert_eq!(clean.is_some(), cfg!(target_os = "linux"));
+        assert!(clean.is_none_or(|finding| finding.status == Status::Ok));
     }
 
     #[test]

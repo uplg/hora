@@ -10,9 +10,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
-askama.workspace = true
+maud.workspace = true
 axum.workspace = true
-badgelib = "0.5.2"
+badgelib = "0.5.4"
 chrono.workspace = true
 futures-util.workspace = true
 hora-core.workspace = true

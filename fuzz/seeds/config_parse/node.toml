@@ -1,0 +1,70 @@
+[page]
+title = "Fuzz"
+[server]
+auth_token = "${TOKEN:-0123456789abcdef}"
+view_token = "viewviewviewview"
+client_ip_header = "x-forwarded-for"
+trusted_proxies = 2
+[server.group_tokens]
+App = "appappappappapp1"
+[health]
+id = "test-node"
+host = "alpha"
+[alerts]
+fail_threshold = 2
+[digest]
+schedule = "0 8 * * 1"
+[[maintenance]]
+title = "Upgrade"
+start = "2026-11-13T05:00:00Z"
+end = "2026-11-13T06:00:00Z"
+monitors = ["web"]
+[[peers]]
+id = "peer-x"
+name = "Peer X"
+host = "beta"
+expect_every_secs = 60
+listen_token = "peertok-peertok-1"
+accept_maintenance_secs = 900
+ping_url = "https://peer.example/api/push/test-node"
+ping_token = "$${literal}-tok-1234567"
+[[channels]]
+name = "ops"
+type = "webhook"
+url = "${HOOK}"
+[[monitors]]
+id = "web"
+name = "Web"
+target = "https://user:pass@example.com/health?key=${KEY:-none}"
+interval_secs = 60
+expected_status = ["2xx", 401]
+method = "GET"
+keyword = "ok"
+json_query = "$.status"
+json_expected = "ok"
+number_regex = "load (\\d+)"
+number_max = 10
+headers = { Authorization = "Bearer ${API}" }
+slo_uptime = 99.9
+release = { github = "owner/repo", current_url = "https://example.com/v", current_query = "$.version" }
+[[monitors]]
+id = "smtp"
+name = "SMTP"
+kind = "tcp"
+target = "[2001:db8::1]:25"
+starttls = "smtp"
+depends_on = ["web"]
+[[monitors]]
+id = "dns"
+name = "DNS"
+kind = "dns"
+target = "example.com"
+dns_record = "AAAA"
+dns_resolver = "9.9.9.9:53"
+[[monitors]]
+id = "cron"
+name = "Cron"
+kind = "push"
+schedule = "*/5 * * * *"
+grace_secs = 120
+push_token = "s3cret-s3cret-16"

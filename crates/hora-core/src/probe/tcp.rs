@@ -24,7 +24,13 @@ pub(super) async fn tcp(monitor: &Monitor, spec: &TcpSpec) -> Outcome {
 /// connect to the addresses of that family.
 pub(super) async fn tcp_family(monitor: &Monitor, spec: &TcpSpec, family: Family) -> Outcome {
     let start = Instant::now();
-    let Ok(addrs) = tokio::net::lookup_host(spec.target.as_str()).await else {
+    // Bounded like the connect below: an unanswered resolver is a failed
+    // probe, not a monitor loop parked for good.
+    let lookup = tokio::time::timeout(
+        monitor.timeout(),
+        tokio::net::lookup_host(spec.target.as_str()),
+    );
+    let Ok(Ok(addrs)) = lookup.await else {
         return Outcome::down(
             FailureKind::Unresolvable,
             "could not resolve host".to_owned(),
@@ -66,6 +72,9 @@ fn connected(
             FailureKind::ConnectionTimedOut,
             "connection timed out".to_owned(),
         ),
+        Err(err) if super::local::is_exhaustion(&err) => {
+            Outcome::down(FailureKind::Local, err.to_string())
+        }
         Err(err) => Outcome::down(FailureKind::Other, err.to_string()),
     }
 }

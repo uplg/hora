@@ -27,10 +27,11 @@ impl GotifyNotifier {
 
     fn payload(event: Event<'_>) -> Payload {
         let message = Message::render(event).fit(HEAD_MAX, BODY_MAX, Unit::Chars);
+        let (title, text) = message.titled();
         Payload {
-            title: "Hora Alert".to_owned(),
+            title,
             priority: priority(message.urgency()),
-            message: message.plain(),
+            message: text,
         }
     }
 }
@@ -74,6 +75,18 @@ impl Notifier for GotifyNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    let payload = GotifyNotifier::payload(event);
+    crate::fuzz::Sent {
+        channel: "gotify",
+        title: Some(payload.title),
+        body: payload.message,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,17 +94,20 @@ mod tests {
 
     #[test]
     fn maps_events_to_text_and_priority() {
-        let down = GotifyNotifier::payload(Event::Down {
+        let down = GotifyNotifier::payload(Event::down("API", None));
+        // The headline is the title, so the body does not say it again.
+        assert_eq!(down.title, "API is DOWN");
+        assert_eq!(down.message, "no response");
+        assert_eq!(down.priority, 8);
+
+        // Gotify refuses an empty message: an event without detail says its
+        // headline twice.
+        let recovered = GotifyNotifier::payload(Event::Recovered {
             monitor: "API",
-            error: None,
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
             local_only: false,
         });
-        assert_eq!(down.message, "API is DOWN\nno response");
-        assert_eq!(down.priority, 8);
+        assert_eq!(recovered.title, "API recovered");
+        assert_eq!(recovered.message, "API recovered");
 
         let release = GotifyNotifier::payload(Event::ReleaseAvailable(crate::Release {
             monitor: "Chat",

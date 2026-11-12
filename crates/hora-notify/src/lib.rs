@@ -15,6 +15,9 @@
 pub mod discord;
 pub mod email;
 pub mod freemobile;
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz;
 pub mod gotify;
 pub mod matrix;
 mod message;
@@ -27,7 +30,7 @@ pub mod webhook;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
@@ -42,6 +45,8 @@ pub use ntfy::NtfyNotifier;
 pub use pushover::PushoverNotifier;
 pub use slack::SlackNotifier;
 pub use telegram::TelegramNotifier;
+#[doc(hidden)]
+pub use util::human_duration;
 pub use webhook::WebhookNotifier;
 
 /// Severity of an externally-pushed alert (`POST /api/monitors/{id}/alert`),
@@ -145,11 +150,11 @@ pub enum Event<'a> {
         /// 3/3 vantage points" / "seen UP by hora-b ...").
         vantage: Option<&'a str>,
         /// The correlated event marker, when one was recorded shortly before
-        /// the down ("deploy api v2.3, 3m before") - the "what changed?" line.
+        /// the down ("deploy api v2.3, 3 min before") - the "what changed?" line.
         event: Option<&'a str>,
         /// Down from this node only: every peer that answered sees it up.
-        /// Such a down goes to `alerts.notify_unconfirmed` (or nowhere), not
-        /// to the monitor's usual channels.
+        /// Such a down is flagged; it goes to the monitor's channels, or to
+        /// `alerts.notify_unconfirmed` when that is set.
         local_only: bool,
     },
     /// A monitor is up but degraded: slower than its `degraded_over_ms` budget.
@@ -223,6 +228,23 @@ pub enum Event<'a> {
     },
 }
 
+impl<'a> Event<'a> {
+    /// A plain down: no known cause, nothing downstream, no peer's verdict,
+    /// no event before it, seen as any down is.
+    #[must_use]
+    pub fn down(monitor: &'a str, error: Option<&'a str>) -> Self {
+        Self::Down {
+            monitor,
+            error,
+            cause: None,
+            impacted: &[],
+            vantage: None,
+            event: None,
+            local_only: false,
+        }
+    }
+}
+
 /// A delivery channel for [`Event`]s.
 #[async_trait]
 pub trait Notifier: Send + Sync {
@@ -263,10 +285,29 @@ impl Default for Dispatcher {
     }
 }
 
+/// How long one channel gets to deliver one event, retries included. Without
+/// it a channel that accepts the connection and never answers holds its caller
+/// (the alert coalescer, a monitor loop) for every attempt's full client
+/// timeout, and the alerts queued behind it wait on healthy channels too.
+const CHANNEL_DEADLINE: Duration = Duration::from_secs(20);
+
+/// One channel's delivery of `event`, bounded by [`CHANNEL_DEADLINE`]. Running
+/// out of time is a delivery failure like any other, counted by the watchdog.
+async fn deliver(channel: &Channel, event: Event<'_>) -> anyhow::Result<()> {
+    let attempt = tokio::time::timeout(CHANNEL_DEADLINE, channel.notifier.notify(event));
+    let Ok(outcome) = attempt.await else {
+        let deadline = util::human_duration(CHANNEL_DEADLINE.as_secs());
+        warn!(channel = %channel.name, "notification abandoned after {deadline} without an answer");
+        anyhow::bail!("no answer within {deadline}")
+    };
+    outcome
+}
+
 /// Default watchdog threshold: 3 consecutive delivery failures. Each
-/// `send_retrying` call already retries 3 times internally, so this represents
-/// 9 total failed HTTP/SMTP attempts — enough to ride through a transient blip.
-const DEFAULT_CHANNEL_FAIL_THRESHOLD: u32 = 3;
+/// `send_retrying` call already retries 3 times internally, so for the HTTP
+/// channels this represents 9 failed attempts — enough to ride through a
+/// transient blip. (E-mail does not retry: 3 failed SMTP sends.)
+pub const DEFAULT_CHANNEL_FAIL_THRESHOLD: u32 = 3;
 
 impl Dispatcher {
     #[must_use]
@@ -360,7 +401,7 @@ impl Dispatcher {
     /// In addition, consecutive failures per channel are tracked: when a
     /// channel reaches the configured threshold, a watchdog `Event::Alert` is
     /// dispatched to the *other* channels ("channel 'telegram' is failing — 3
-    /// consecutive failures since 2h"), once per failure streak. A successful
+    /// consecutive failures since 2 h"), once per failure streak. A successful
     /// delivery resets the counter.
     pub async fn dispatch(&self, event: Event<'_>, only: Option<&[String]>) -> Vec<&str> {
         let targets: Vec<&Channel> = self
@@ -370,7 +411,7 @@ impl Dispatcher {
                 only.is_none_or(|names| names.iter().any(|name| name == &channel.name))
             })
             .collect();
-        let outcomes = join_all(targets.iter().map(|channel| channel.notifier.notify(event))).await;
+        let outcomes = join_all(targets.iter().map(|channel| deliver(channel, event))).await;
 
         // Update the health map under a scoped lock, collecting any channels
         // that just crossed the threshold and need a watchdog alert.
@@ -384,10 +425,9 @@ impl Dispatcher {
                 // A payload the API refused as too large (413) says nothing about the
                 // channel's health - the channel answered - so it neither
                 // extends nor forgives the current streak.
-                if outcome
-                    .as_ref()
-                    .is_err_and(anyhow::Error::is::<util::PayloadRejected>)
-                {
+                // Nor does a rate limit (429): the channel is alive and
+                // asking for less, usually in the middle of a cascade.
+                if outcome.as_ref().is_err_and(util::spares_health) {
                     continue;
                 }
                 let entry = map.entry(channel.name.clone()).or_default();
@@ -476,7 +516,7 @@ impl Dispatcher {
         if targets.is_empty() {
             return;
         }
-        join_all(targets.iter().map(|channel| channel.notifier.notify(event))).await;
+        join_all(targets.iter().map(|channel| deliver(channel, event))).await;
     }
 }
 
@@ -526,6 +566,40 @@ mod tests {
         monitor: "x",
         local_only: false,
     };
+
+    /// A channel that takes the event and never answers.
+    struct Silent;
+
+    #[async_trait]
+    impl Notifier for Silent {
+        fn name(&self) -> &'static str {
+            "silent"
+        }
+
+        async fn notify(&self, _event: Event<'_>) -> anyhow::Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    /// One silent channel costs its caller the deadline, not forever, and is
+    /// counted as failing; the channel beside it is delivered regardless.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_channel_fails_at_the_deadline() {
+        let d = Dispatcher::new(
+            vec![
+                ("silent".to_owned(), Box::new(Silent) as Box<dyn Notifier>),
+                channel("ok", false),
+            ],
+            3,
+        );
+        let started = tokio::time::Instant::now();
+        let failed = d.dispatch(RECOVERED, None).await;
+        assert_eq!(failed, ["silent"]);
+        assert_eq!(started.elapsed(), CHANNEL_DEADLINE);
+        let map = d.health.lock().unwrap();
+        assert_eq!(map["silent"].consecutive_failures, 1);
+        assert_eq!(map["ok"].consecutive_failures, 0);
+    }
 
     fn channel(name: &'static str, fail: bool) -> (String, Box<dyn Notifier>) {
         (name.to_owned(), Box::new(MockNotifier::new(name, fail)))

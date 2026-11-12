@@ -58,6 +58,58 @@ docker run --rm -v "$PWD/hora-config:/etc/hora" ghcr.io/uplg/hora:latest check
 As a rule, deploy a new binary before a config that uses its new keys: an
 older binary refuses keys it does not know.
 
+## 0.11 to 0.12
+
+0.12 closes doors that 0.11 only warned about. Three schema migrations run
+on the first start; one rewrites the `checks` table to about half its size,
+which takes a moment on a large history and needs free disk space of about
+the database's size (back up `hora.db` first: 0.11 cannot open it
+afterwards). There are new optional config keys (`server.view_token`,
+`allow_unauthenticated` among them, the full list is in the
+[upgrade notes](https://github.com/uplg/hora/blob/main/UPGRADES.md)), and a few
+configs and scripts that stop working until they are fixed. Run `hora check`
+with the new binary first, in the daemon's own environment: it now prints the
+warnings too, and `hora check --strict` fails on them.
+
+- **Unset variables are named.** A `${VAR}` missing from the environment
+  still expands to nothing and a channel left without its secret is still
+  disabled, but both are now warned about by name at load, shown by
+  `hora check`, and failed on by `hora check --strict`. Write `${VAR:-}` for
+  a value that is optional, `${VAR:-fallback}` for a default.
+- **Push monitors and watched peers need a token.** A push monitor without
+  `push_token`, or a peer with `expect_every_secs` and no `listen_token`, no
+  longer loads, unless it sets `allow_unauthenticated = true`. See
+  [push monitors](../guides/monitors/#push-heartbeat) and
+  [peers](../guides/peers/).
+- **Tokens under 16 characters are refused**: `auth_token`, `view_token`,
+  group tokens, `push_token`, `listen_token`.
+- **`?token=` is refused on write endpoints** (401), valid or not. Send
+  `X-Push-Token` or `Authorization: Bearer`. Read-only pages keep it. See
+  [Authentication](../reference/api/#authentication).
+- **A read-only token, `server.view_token`.** Put it in kiosk URLs instead
+  of the operator token: it shows private monitors and cannot write.
+- **Local-only downs page again, flagged**, when `alerts.notify_unconfirmed`
+  is not set. `notify_unconfirmed = []` keeps them silent. See
+  [local-only downs](../guides/peers/#local-only-downs).
+- **`confirm_with_peers` requires an https `ping_url`** on every peer
+  (loopback excepted).
+- **Planned maintenance, announced to peers**: new optional keys (`host` on
+  a monitor, on `[health]` and on a peer; `accept_maintenance_secs` on a
+  peer) and one more migration, an empty table. In a mesh with a 0.11 node
+  nothing breaks, and nothing is muted on the 0.11 side: upgrade both
+  before relying on it. See
+  [planned maintenance of a host](../guides/peers/#planned-maintenance-of-a-host).
+
+- **Connections are bounded and timed**: a new optional key,
+  `server.max_connections` (default 1024, fewer in a small container), and
+  a stalled connection is closed. JSON request bodies are limited to
+  64 KiB. See [Connections and memory](../configuration/#connections-and-memory).
+- **`/healthz` gains `probes_ok`** and answers 503 when the host is out of
+  file descriptors or memory: checks are then skipped, not failed.
+
+The exact error messages and what to change are in
+[UPGRADES.md](https://github.com/uplg/hora/blob/main/UPGRADES.md).
+
 ## 0.10 to 0.11
 
 0.11 brings the new status page and a hardening pass. Four

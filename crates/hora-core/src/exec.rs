@@ -130,7 +130,10 @@ pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor, spec: &ExecSpec) -> 
             let _ = child.kill().await;
             Outcome::down(
                 FailureKind::Plugin,
-                format!("plugin timed out after {}s", monitor.timeout().as_secs()),
+                format!(
+                    "plugin timed out after {}",
+                    crate::fmt::elapsed(monitor.timeout().as_secs())
+                ),
             )
         }
     }
@@ -240,6 +243,18 @@ fn outcome_for(code: Option<i32>, message: Option<String>, latency_ms: i64) -> O
             snapshot: None,
         },
         None => Outcome::down(FailureKind::Plugin, "plugin killed by a signal".to_owned()),
+    }
+}
+
+/// The output parsing for the fuzz targets in `fuzz/` (built with
+/// `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    /// [`super::first_line`].
+    #[must_use]
+    pub fn first_line(output: &[u8]) -> Option<String> {
+        super::first_line(output)
     }
 }
 

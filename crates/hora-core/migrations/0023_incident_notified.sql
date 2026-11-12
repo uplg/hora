@@ -1,0 +1,13 @@
+-- Whether an incident's down alert was announced: 1 once a channel accepted it,
+-- or once it was settled without a notification by design (folded into its
+-- root cause, local-only with no `alerts.notify_unconfirmed`, no channel
+-- configured). 0 from the moment the incident is recorded until then: the
+-- record is written before the peers are asked and before the grouping window,
+-- so a daemon stopped in between used to find an open incident on its next
+-- start, take the down for already announced, and send only its recovery.
+-- A start that finds an open incident still at 0 confirms and announces it.
+--
+-- DEFAULT 1: every incident written before this column was announced, or is
+-- treated as such exactly as before. A constant default keeps ADD COLUMN a
+-- schema-only change, O(1) however large `incidents` is.
+ALTER TABLE incidents ADD COLUMN notified INTEGER NOT NULL DEFAULT 1;

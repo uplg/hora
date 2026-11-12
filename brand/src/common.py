@@ -18,16 +18,16 @@ TOKENS = r"""
 :root[data-theme='light'] { color-scheme: light; }
 :root[data-theme='dark'] { color-scheme: dark; }
 
+/* tokens:begin - generated from brand/tokens.json by brand/src/tokens.py, do not edit */
 :root {
   /* raw palette: synthe.se (2026-08-17), unchanged */
   --raw-cloud: #f2f0ea; --raw-cloud-deep: #e7e4db; --raw-ink: #1b222c; --raw-ink-soft: #525a66;
   --raw-night: #151a21; --raw-night-raised: #1e2530; --raw-paper-dark: #eae7e0; --raw-muted-dark: #a8aeb8;
-  --raw-petrol: #0e5e68; --raw-petrol-soft: #4e8a92; --raw-petrol-wash: #d8e4e2;
-  --raw-petrol-bright: #63c0cb; --raw-petrol-dim: #3e7a84; --raw-petrol-wash-dark: #1d2a31;
-  --raw-warn: #b4633f; --raw-warn-dark: #d89372; --raw-down: #a5372a; --raw-down-dark: #e07a63;
-  --raw-blush: #e6a49a;
+  --raw-petrol: #0e5e68; --raw-petrol-soft: #4e8a92; --raw-petrol-wash: #d8e4e2; --raw-petrol-bright: #63c0cb;
+  --raw-petrol-dim: #3e7a84; --raw-petrol-wash-dark: #1d2a31; --raw-warn: #b4633f; --raw-warn-dark: #d89372;
+  --raw-down: #a5372a; --raw-down-dark: #e07a63; --raw-blush: #e6a49a;
 
-  /* semantic (Maison's tokens.css) */
+  /* semantic: what the rules use, one declaration per colour (as Maison's tokens.css) */
   --ground: light-dark(var(--raw-cloud), var(--raw-night));
   --ground-raised: light-dark(var(--raw-cloud-deep), var(--raw-night-raised));
   --surface: light-dark(#faf9f5, #1a2029);
@@ -41,8 +41,14 @@ TOKENS = r"""
   --warn-text: light-dark(#8f4b22, var(--raw-warn-dark));
   --blocked-wash: light-dark(#f3e2dc, #33211f);
 
-  /* Hora: five states, each colour + shape + word (the colour is the least of the three) */
-  --st-up: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim));      /* graphics, 3:1+ */
+  /* heatmap: one hue, each step further from the surface (1.5:1 or more between neighbours in both
+     themes), so the tiers still read in greyscale and none borrows the colour that means "down" */
+  --heat-0: light-dark(#d5e3e2, #27383f); --heat-1: light-dark(#9fc0c2, #2f5f69);
+  --heat-2: light-dark(#5a959c, #4d8f99); --heat-3: light-dark(#0e5e68, #8cc4cb);
+  --heat-4: light-dark(#1b222c, #e6f4f5);
+
+  /* five states, each colour + shape + word (the colour is the least of the three) */
+  --st-up: light-dark(var(--raw-petrol-soft), var(--raw-petrol-dim)); /* graphics, 3:1+ */
   --st-up-text: var(--accent);
   --st-degraded: light-dark(var(--raw-warn), var(--raw-warn-dark));
   --st-degraded-text: var(--warn-text);
@@ -55,47 +61,56 @@ TOKENS = r"""
   --wash-down: var(--blocked-wash);
   --wash-maint: var(--ground-raised);
   --blush: light-dark(var(--raw-blush), #b8776e);
-  /* the owl's body: surface, outlined in ink (ArianeFace's recipe) */
-  --owl-fill: var(--surface);
+  --owl-fill: var(--surface); /* the owl's body: surface, outlined in ink */
   --owl-line: var(--ink);
 
   --shadow-near: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 30%));
   --shadow-far: light-dark(rgb(27 34 44 / 6%), rgb(0 0 0 / 25%));
   --shadow: 0 1px 2px var(--shadow-near), 0 4px 14px var(--shadow-far);
-  --shadow-pop: 0 10px 30px rgb(27 34 44 / 18%);
 
   --focus-ring: 3px solid var(--accent);
   --focus-offset: 2px;
 
   --font-display: 'Fraunces Variable', Georgia, serif;
   --font-text: 'Cal Sans', system-ui, sans-serif;
-  --font-brand: 'Borel Display', var(--font-display);
   --font-mono: 'Mona Sans Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --t-hero: 500 clamp(1.75rem, 1.35rem + 1.8vw, 2.6rem)/1.15 var(--font-display);
-  --t-page: 500 1.75rem/2.125rem var(--font-display);
+  --t-page: 500 clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem)/1.15 var(--font-display);
+  --t-section: 500 1.375rem/1.625rem var(--font-display);
   --t-group: 500 1.1875rem/1.625rem var(--font-display);
   --t-body: 400 1rem/1.5rem var(--font-text);
   --t-secondary: 400 0.875rem/1.25rem var(--font-text);
   --t-label: 500 0.875rem/1.25rem var(--font-text);
   --t-meta: 500 0.8125rem/1rem var(--font-text);
   --t-tiny: 500 0.75rem/1rem var(--font-text);
-  --t-brand: 400 1.35rem/1 var(--font-brand);
 
   --page-max: 2400px; --page-margin: 16px; --measure: 42rem; --measure-wide: 64rem;
-  --s-half: 2px; --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+
   --control-h: 44px; --control-h-s: 36px; --control-h-xs: 32px; --control-h-l: 52px;
-  --radius-xs: 2px; --radius-s: 4px; --radius: 6px; --radius-m: 8px; --radius-l: 10px;
-  --radius-xl: 12px; --radius-2xl: 16px; --radius-pill: 999px;
+
+  --radius-s: 4px; --radius: 6px; --radius-m: 8px; --radius-l: 10px; --radius-xl: 12px; --radius-2xl: 16px;
+  --radius-pill: 999px;
+
   --row-min: 48px; --header-h: 56px;
-  --glyph: 16px;          /* a state's shape beside its word */
-  --bar-day-h: 22px;      /* the 90-day bar */
-  --group-col: 26rem;     /* a group's column on wide screens */
+  --glyph: 16px; /* a state's shape beside its word */
+  --bar-day-h: 22px; /* the 90-day bar */
+  --group-col: 26rem; /* a group's column on wide screens */
+
+  /* the gallery's own: the name in Borel beside the mark, a popover shadow, the half steps */
+  --shadow-pop: 0 10px 30px rgb(27 34 44 / 18%);
+  --font-brand: 'Borel Display', var(--font-display);
+  --t-brand: 400 1.35rem/1 var(--font-brand);
+  --s-half: 2px;
+  --radius-xs: 2px;
 }
 @media (min-width: 600px) { :root { --page-margin: 24px; } }
 @media (min-width: 1600px) { :root { --page-margin: 32px; } }
 @media (max-width: 599px) { :root { --row-min: 56px; } }
 @media (pointer: coarse) { :root { --control-h-s: 44px; --control-h-xs: 44px; } }
+/* tokens:end */
 """
 
 BASE = r"""

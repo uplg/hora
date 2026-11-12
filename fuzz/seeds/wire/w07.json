@@ -1,0 +1,1 @@
+{"monitors":[{"kind":"http","target":"https://example.com/","status":"up","p50_ms":42,"check":"f"},{"kind":"dns","target":"example.com","status":"down"}]}

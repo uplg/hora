@@ -10,6 +10,8 @@ pub enum AppError {
     Unauthorized(&'static str),
     /// The request itself is malformed (e.g. an unparseable duration).
     BadRequest(&'static str),
+    /// This node cannot answer for now (e.g. out of file descriptors).
+    Unavailable(&'static str),
     /// Any other failure; logged and surfaced as a 500.
     Internal(anyhow::Error),
 }
@@ -20,6 +22,7 @@ impl IntoResponse for AppError {
             Self::NotFound(what) => (StatusCode::NOT_FOUND, what).into_response(),
             Self::Unauthorized(what) => (StatusCode::UNAUTHORIZED, what).into_response(),
             Self::BadRequest(what) => (StatusCode::BAD_REQUEST, what).into_response(),
+            Self::Unavailable(what) => (StatusCode::SERVICE_UNAVAILABLE, what).into_response(),
             Self::Internal(err) => {
                 tracing::error!("request failed: {err:#}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()

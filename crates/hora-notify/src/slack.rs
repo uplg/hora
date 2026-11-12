@@ -74,21 +74,24 @@ impl Notifier for SlackNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    crate::fuzz::Sent {
+        channel: "slack",
+        title: None,
+        body: SlackNotifier::render(event),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn renders_each_event() {
-        let down = SlackNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = SlackNotifier::render(Event::down("API", Some("boom")));
         assert_eq!(down, "\u{1F534} *API* is DOWN\n```boom```");
 
         let recovered = SlackNotifier::render(Event::Recovered {
@@ -101,7 +104,7 @@ mod tests {
             monitor: "API",
             secs_left: 3 * 86_400,
         });
-        assert!(cert.contains("expires in 3 days"));
+        assert!(cert.contains("expires in 3 d"));
     }
 
     #[test]

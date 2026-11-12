@@ -1,9 +1,11 @@
 //! `hora top`: a live terminal dashboard over the JSON API - statuses,
 //! uptime, latency percentiles, a sparkline for the selected monitor, and
 //! the current trouble, refreshed in place. Self-hosters live in SSH; this
-//! is the status page for them. Read-only: it consumes `/api/summary` and
+//! is the status page for them. It reads `/api/summary` and
 //! `/api/monitors/{id}/latency` exactly like any other API client, local or
-//! remote (`--url https://status.example --token ...`).
+//! remote (`--url https://status.example --token ...`), and with a token it
+//! also writes: `a` pins an announcement, `C` clears them, `s` silences the
+//! selected monitor (`/api/announce`, `/api/silence`).
 //!
 //! The UI never waits on the network: every request runs as a background
 //! task that reports through a channel, so a slow or unreachable server
@@ -22,7 +24,7 @@ use anyhow::Context as _;
 use futures_util::StreamExt as _;
 use tokio::sync::mpsc;
 
-use app::{App, KeyOutcome, apply, on_key};
+use app::{App, KeyOutcome, apply, follow_up, on_key};
 use fetch::{Api, Fetcher, FollowUp};
 use ui::draw;
 
@@ -84,23 +86,20 @@ async fn event_loop(
             () = spark_timer => {
                 spark_due = None;
                 if let Some(id) = app.selected_id() {
-                    fetcher.spark(id);
+                    follow_up(&mut app, &mut fetcher, FollowUp::Spark(id));
                 }
             }
             // The fetcher holds a sender, so the channel never closes.
-            Some(done) = results.recv() => match apply(&mut app, done) {
-                FollowUp::Nothing => {}
-                FollowUp::Spark(id) => fetcher.spark(id),
-                FollowUp::Refresh => {
-                    fetcher.summary();
-                }
-            },
+            Some(done) = results.recv() => {
+                let next = apply(&mut app, done);
+                follow_up(&mut app, &mut fetcher, next);
+            }
             event = events.next() => {
                 let Some(Ok(crossterm::event::Event::Key(key))) = event else { continue };
                 match on_key(&mut app, &mut fetcher, key) {
                     KeyOutcome::Quit => return Ok(()),
                     KeyOutcome::Moved => {
-                        app.spark.clear();
+                        app.clear_spark();
                         spark_due =
                             Some(tokio::time::Instant::now() + Duration::from_millis(300));
                     }

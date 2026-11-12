@@ -4,6 +4,226 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.11.5 → 0.12.0
+
+Three migrations run on the first start. One rewrites the `checks` table
+(clustered on monitor and time, about half the size): it takes a moment on a
+large history and needs free disk space of about the database's size while
+it runs. The file does not shrink by itself afterwards (the freed pages are
+reused); run `hora compact` with the daemon stopped to give the space back.
+Another adds a column to `incidents`, and the third creates an empty table,
+`maintenance_windows`. None is undone by starting 0.11 again: back up
+`hora.db` first if you may need to roll back.
+
+New optional keys - `server.view_token`, `allow_unauthenticated` (on a push
+monitor or a watched peer), `fail_threshold`, `method` and `host` on a
+monitor, `host` on `[health]`, `host` and `accept_maintenance_secs` on a
+peer - and a new form of an old one (`expected_status` as a list or a class): deploy
+the binary before a config that uses them (`deny_unknown_fields`). This release
+closes several doors that 0.11 only warned about, so **some configs no
+longer load, and some scripts are refused**. Run `hora check` against your
+config with the new binary first; a hot reload that fails validation keeps
+the previous config. `hora check` now also prints what the loader only
+warns about, with a count; `hora check --strict` exits non-zero on a
+warning, if you want your deploy to stop there too. Check these before you
+roll out:
+
+- **Unset variables and empty channel secrets: nothing breaks, more is
+  said.** A `${VAR}` that is not in the daemon's environment still expands
+  to nothing, and a channel left without its token or URL is still left out
+  while the others deliver. Both are now warned about by name at every load
+  and reload (`channels[0].webhook_url: environment variable OPS_DISCORD is
+  not set ...`, `channel ops: webhook_url is empty, the channel is disabled
+  until it is set`). `hora check` prints and counts these warnings and still
+  exits 0; **`hora check --strict` exits non-zero on them**, so a pipeline
+  that adopts `--strict` must run it in the daemon's own environment (the
+  same env file, the same container). Where a value really is optional, say
+  so with `${VAR:-}` (no warning), or give a default with
+  `${VAR:-fallback}`; the fallback also stands in for a variable that is set
+  but empty, and cannot contain `{` or `}`. One difference with 0.11: a
+  `${...}` that is not a variable name (`${not a name}`) is left as written,
+  with a warning, where it expanded to nothing; `$${` is still the way to
+  write a literal `${`.
+- **A push monitor needs a `push_token`.** Without one the config fails
+  with `monitor <id>: a push monitor requires a push_token ...`. Set
+  `push_token = "${SOME_TOKEN}"` and send it as the `X-Push-Token` header,
+  or, on a network where everyone who can reach `/api/push` is trusted, add
+  `allow_unauthenticated = true` to that monitor to keep accepting a bare
+  id.
+- **A watched peer needs a `listen_token`.** A `[[peers]]` entry with
+  `expect_every_secs` and no `listen_token` fails with `peer <id>: a
+  watched peer requires a listen_token ...`. Set it (it is the other node's
+  `ping_token` for you), or add `allow_unauthenticated = true` to that peer.
+- **Tokens of fewer than 16 characters are refused**: `server.auth_token`,
+  `server.view_token`, `[server.group_tokens]`, `push_token` and
+  `listen_token` fail with `<key> is too short: use at least 16
+  characters`. Generate longer ones (`openssl rand -hex 16`) and update the
+  jobs, peers and bookmarks that send them. Change a peer's `listen_token`
+  and the other node's `ping_token` together.
+- **`?token=` is refused on write endpoints.** Push, alert, announce,
+  silence, event and peer probe answer 401 (`?token= is not accepted on
+  write endpoints: ...`) to any request that carries a `token` query
+  parameter. It was deprecated in 0.11.0; scripts that still use it stop
+  working: a cron job pinging `/api/push/<id>?token=...` reads as a missed
+  heartbeat and the monitor goes down. Move them to
+  `-H "X-Push-Token: ..."` (push, alert) or
+  `-H "Authorization: Bearer ..."` (alert, announce, silence, event) before
+  you upgrade - both headers already work on 0.11. Read-only pages keep
+  `?token=`.
+- **`client_ip_header = "x-forwarded-for"` behind two proxies.** The
+  client's address is now taken from the right of the list, one entry per
+  proxy of yours. With a CDN in front of your own reverse proxy, both
+  appending, set `trusted_proxies = 2` under `[server]`, or every visitor is
+  keyed on the CDN's address and shares one rate-limit bucket. One proxy, or
+  a single-valued header (`x-real-ip`, `cf-connecting-ip`): nothing to do.
+- **Push monitors alert sooner.** A missed heartbeat no longer waits for
+  `fail_threshold`: it is down, and alerted, within a minute of its deadline
+  (`interval_secs` after the last heartbeat, or the scheduled run plus
+  `grace_secs`). If you relied on the threshold to absorb a late job, give
+  the job more room instead: a longer `interval_secs`, or a longer
+  `grace_secs` with a `schedule`.
+- **Local-only downs page again, flagged.** If you use `confirm_with_peers`
+  and never set `alerts.notify_unconfirmed`, a down that every peer sees up
+  was only recorded; it now goes to the monitor's own channels, marked as
+  seen from this node only. To keep it silent, set `notify_unconfirmed = []`
+  under `[alerts]`; to send it to a quiet channel, name that channel there.
+  A config that already sets `notify_unconfirmed` behaves as before.
+- **`confirm_with_peers` requires https peers.** With it on, a peer whose
+  `ping_url` starts with `http://` fails with `peer <id>:
+  confirm_with_peers requires an https ping_url ...` (`localhost` and
+  loopback addresses excepted). Put the peer behind TLS, or turn
+  `confirm_with_peers` off.
+- **A mesh on two versions and `hora peers diff`.** 0.12 lists its targets
+  to a peer with the secrets of their URLs masked (`https://***:***@host/`,
+  `?api_key=***`). Between two 0.12 nodes nothing changes: both sides are
+  compared masked. A 0.12 node asking a 0.11 peer is fine too (it masks what
+  the peer still sends verbatim). A **0.11** node asking a 0.12 peer compares
+  its own verbatim target with the masked one: for monitors whose target
+  carries a credential, `hora peers diff` run on the 0.11 node reports a
+  drift that is not one, and that node's status page loses the 0.12 peer's
+  line for them. Monitors without a secret in their target are unaffected.
+  Upgrade the nodes that run the diff first, or ignore it until all are on
+  0.12.
+- **A mesh on two versions and peer confirmation.** To confirm a down, 0.12
+  sends the target masked too, with a fingerprint of the check. A 0.11 node
+  asking a 0.12 peer is answered as before (the peer masks what it
+  receives, and without a fingerprint takes its first monitor on the
+  target). A **0.12** node asking a 0.11 peer: nothing changes for a target
+  without a secret (the 0.11 peer ignores the fingerprint); for a target
+  that carries a credential the 0.11 peer compares the masked target with
+  its verbatim one and answers that it does not watch it, so such a down is
+  alerted as before but reads "no peer watches this target, unconfirmed",
+  and is never made local-only, until that peer is on 0.12.
+- **Peers that check one target differently stop confirming each other.**
+  Between two 0.12 nodes, a monitor is confirmed only by a peer's monitor
+  with the same kind, target, expected status, assertions, headers (values
+  included), `dual_stack`, DNS record, pinned answer and resolver, and
+  STARTTLS protocol. Timeouts, intervals, thresholds and `proxy` may
+  differ. Run `hora peers diff` once the nodes are upgraded: it lists such
+  monitors as "same target, checked differently". Until they are aligned
+  their downs alert as usual, unconfirmed.
+- **HTTP monitors that redirect to an internal address.** A monitor whose
+  target resolves to a public address and redirects to a loopback,
+  link-local, private or carrier-grade-NAT one now goes down with
+  `redirected to a private address` (for instance a public name fronting a
+  login page served on `10.x`). Point the monitor at the internal URL
+  directly, or set `expected_status = 302` to assert the redirect itself.
+  Targets that are internal to begin with are not affected.
+- **Expiry alerts, once more.** The first sweep after the upgrade sends the
+  alert of every certificate and domain already inside its warning window,
+  as every restart did until now; from then on a restart is silent.
+- **Webhook consumers**: `days_left` on `cert_expiring` and
+  `domain_expiring` is rounded down, so an expired certificate reads -1
+  (and below) instead of 0. A new `secs_left` carries the exact figure.
+- **Kiosk and shared URLs**: a wall display or a bookmark that carries
+  `?token=<auth_token>` holds the operator token. Set a `server.view_token`
+  and put that one in the URL instead: it shows the same monitors and
+  cannot write.
+- **Gotify, ntfy and Pushover titles.** The title is the event's headline
+  ("API is DOWN") where it was "Hora Alert", and the message no longer
+  starts with that headline. Update a rule that matched the old title or
+  the first line of the message.
+- **A config mounted as a single file is warned about.** If your container
+  mounts `config.toml` itself rather than its directory, the daemon logs a
+  warning at startup and `hora check` counts one (so `--strict` fails):
+  such a mount stops following the file the first time it is replaced on
+  the host. Mount the directory (`./config:/etc/hora`). On a network
+  filesystem, where an edit used to wait for a SIGHUP, it is now applied by
+  itself within about a minute (the file is re-read every 60 s), and the
+  same warning says so.
+- **Logs lose their colours when not on a terminal** (`docker logs`,
+  journald, a file): a filter that matched the escape codes around a level
+  no longer does.
+- **Text that a filter or a script may match.** Durations are written
+  "3 h 7 min" where they read "3h 7m": notification text, CLI output and
+  Atom titles change, and with them the post-mortem, the weekly digest, the
+  webhook's `change` phrase ("deploy api v2.3, 3 min before") and the
+  display labels of `/api/summary` (`uptime_label`, `budget_label`,
+  `cert_label`). In the same texts a percentage and a latency take a space
+  ("99.97 %", "is slow (812 ms)"), and an expiry warning reads "expires in
+  3 d" instead of "expires in 3 days". Update any mail rule, chat filter or
+  script that parses those strings. Numeric fields are untouched (JSON
+  seconds such as `duration_s` and `secs_left`, per-mille figures,
+  Prometheus metrics, the webhook's numbers and its `burn_window`), and so
+  is what you type: `hora silence api 2h30m`, `duration=10m`, config keys.
+  Incidents already recorded keep the wording they were stored with.
+- **Planned maintenance, and mixed 0.11 / 0.12 meshes.** Nothing changes
+  for a config that sets none of the new keys (`host`,
+  `accept_maintenance_secs`): no window is announced with a host, and no
+  announcement is accepted. A 0.12 node with windows planned through
+  `/api/maintenance` adds a JSON body to its heartbeat; a 0.11 peer never
+  reads a heartbeat's body, so it keeps counting the heartbeat and mutes
+  nothing - it alerts for the reboot as it did before. A 0.11 node sends no
+  body, which a 0.12 peer reads as "nothing planned". Upgrade both nodes,
+  then add `host` and `accept_maintenance_secs`: see
+  [planned maintenance of a host](https://uplg.github.io/hora/guides/peers/#planned-maintenance-of-a-host).
+  A job's heartbeat body is still ignored; a peer's announcement is read
+  up to 64 KiB.
+- **Connections are bounded and timed.** New optional key
+  `server.max_connections`: how many HTTP connections are served at once
+  (default 1024; fewer when the container's memory limit is small - 128 at
+  64 MiB; never more than half the open-files limit). The log line at
+  startup says the number. Connections beyond it wait instead of being
+  refused. A connection is now closed when it stalls: 30 s without a first
+  byte, 60 s for a request to be answered, 30 s for a client that stops
+  reading, 3 minutes idle on keep-alive (above the usual reverse proxies'
+  own idle timeout; if yours keeps upstream connections longer, it will
+  simply reopen them).
+- **One client address holds a quarter of the connections at most.** New
+  optional key `server.max_connections_per_ip` (0 turns it off). It does
+  not apply to loopback, nor when `client_ip_header` is set. If a reverse
+  proxy on another machine fronts Hora and `client_ip_header` is not set,
+  set it (or the key): the proxy is otherwise held to a client's share,
+  and Hora closes the connections beyond it.
+- **A peer's maintenance has a daily budget**: four times its
+  `accept_maintenance_secs` of muted time in any 24 hours. Nothing to do
+  for a host that reboots a few times a day; a peer that announces windows
+  back to back is cut, with a warning in the log.
+- **`/api/summary`'s `overall` has a fifth value, `maintenance`**, and
+  follows the status page: a monitor down inside a planned window no
+  longer makes it `down`. Uptime figures read `100 %` (not `100.0 %`) and
+  a latency over a second reads `1.8 s` in the text view, `hora top` and
+  `hora probe`: adjust a script that parses them.
+- **A heartbeat's `ping` is at most a day** (86 400 000 ms): a larger one
+  gets a 400. A `schedule` with an empty field (`0 3 * * 1,`) no longer
+  loads; it never ran.
+- **Request bodies are limited to 64 KiB** on the JSON endpoints (it was
+  2 MiB): a pushed alert with a larger body gets a 413.
+- **`/healthz` has a new field, `probes_ok`**, and a new reason to answer
+  503: the node cannot open sockets for its checks (out of file
+  descriptors or memory). It skips them instead of recording failures. An
+  external monitor matching `"status":"ok"` needs no change.
+- **Memory.** The page cache ceiling goes from 32 to 36 MiB (nine
+  connections in two pools instead of eight in one). Measured on the image
+  with 300 monitors and a year of history: 18 MiB at rest, 45 MiB at the
+  worst of a flood; a 64 MiB limit holds, 32 MiB does not for a fleet that
+  size.
+- **Building from source.** `.cargo/config.toml` now carries a compile flag
+  for the bundled SQLite (`LIBSQLITE3_FLAGS`). `cargo build` in the
+  repository picks it up; a packager who builds elsewhere, or sets
+  `LIBSQLITE3_FLAGS` already, should add `SQLITE_DEFAULT_MEMSTATUS=0` (a
+  test fails without it).
+
 ## 0.11.4 → 0.11.5
 
 No migration, no new key. Pull the new image and recreate the container.

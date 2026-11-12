@@ -941,7 +941,7 @@ async fn incidents_open_close_and_prune() {
         None,
         &["a".to_owned()],
         Some("HTTP/2 503\n\n<html>maintenance</html>"),
-        Some("deploy api v2.3, 3m before"),
+        Some("deploy api v2.3, 3 min before"),
     )
     .await
     .unwrap();
@@ -959,7 +959,7 @@ async fn incidents_open_close_and_prune() {
     );
     assert_eq!(
         incidents[0].event.as_deref(),
-        Some("deploy api v2.3, 3m before")
+        Some("deploy api v2.3, 3 min before")
     );
     assert!(incidents[0].duration_s.is_some());
 
@@ -1485,5 +1485,316 @@ async fn the_incident_marks_cache_follows_the_log_like_a_full_read() {
     check(
         cache.refresh(&store).await.unwrap(),
         incident_marks(&store).await.unwrap(),
+    );
+}
+
+/// The hourly buckets are the daily roll-up's only source: a pass whose daily
+/// roll-up fails (here the table is gone; in the field, a passing "database is
+/// locked") must leave them for the next one instead of pruning the day away.
+#[tokio::test]
+async fn a_failed_daily_roll_up_keeps_its_hourly_source() {
+    let store = Store::in_memory().await;
+    let now = 400 * 86_400;
+    let old_hour = now - 120 * 86_400;
+    sqlx::query(
+        "INSERT INTO checks_hourly \
+            (monitor_id, hour, up_count, down_count, degraded_count, avg_latency_ms) \
+         VALUES ('m', ?, 60, 0, 0, 20)",
+    )
+    .bind(old_hour)
+    .execute(store.sqlx())
+    .await
+    .unwrap();
+    let hourly = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM checks_hourly")
+            .fetch_one(store.sqlx())
+            .await
+            .unwrap()
+    };
+
+    sqlx::query("ALTER TABLE checks_daily RENAME TO checks_daily_away")
+        .execute(store.sqlx())
+        .await
+        .unwrap();
+    retention::roll_up_history(&store, now, &retention::Pace::offline()).await;
+    assert_eq!(hourly().await, 1, "kept: its day was never rolled up");
+
+    // With the roll-up working again the day is written, then pruned.
+    sqlx::query("ALTER TABLE checks_daily_away RENAME TO checks_daily")
+        .execute(store.sqlx())
+        .await
+        .unwrap();
+    retention::roll_up_history(&store, now, &retention::Pace::offline()).await;
+    assert_eq!(hourly().await, 0);
+    let days: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM checks_daily")
+        .fetch_one(store.sqlx())
+        .await
+        .unwrap();
+    assert_eq!(days, 1);
+}
+
+/// An incident is unannounced from its record until a channel takes the
+/// alert; the mark is what a restart reads to tell the two apart.
+#[tokio::test]
+async fn an_incident_is_unannounced_until_marked() {
+    let store = Store::in_memory().await;
+    let id = insert_incident_start(&store, "m", None, None, None, &[], None, None)
+        .await
+        .unwrap();
+    assert!(!incident_notified(&store, id).await.unwrap());
+    mark_incident_notified(&store, id).await.unwrap();
+    assert!(incident_notified(&store, id).await.unwrap());
+    // Nothing left to send for an incident that is gone.
+    assert!(incident_notified(&store, id + 1).await.unwrap());
+}
+
+/// A missed heartbeat is down at once on the page, as it is for the alert; a
+/// check that ran and failed still needs the threshold, and so does a peer.
+#[test]
+fn a_missed_heartbeat_is_down_without_the_threshold() {
+    use crate::status::MonitorState;
+    let row = |status, reason| Latest {
+        time: 0,
+        latency_ms: None,
+        status,
+        error: None,
+        reason,
+    };
+    let miss = || row(CheckStatus::Down, Some(FailureKind::MissingHeartbeat));
+    let up = || row(CheckStatus::Up, None);
+    let failed = row(CheckStatus::Down, Some(FailureKind::Timeout));
+    let pushed = row(CheckStatus::Down, Some(FailureKind::Pushed));
+
+    assert_eq!(derive_status(&[miss(), up()], 3), MonitorState::Down);
+    assert_eq!(derive_status(&[failed, up()], 3), MonitorState::Degraded);
+    // A job that says "down" is a check that ran: the threshold applies.
+    assert_eq!(derive_status(&[pushed, up()], 3), MonitorState::Degraded);
+    assert_eq!(
+        derive_status_by_threshold(&[miss(), up()], 3),
+        MonitorState::Degraded
+    );
+}
+
+/// A stored maintenance window, by selector and hours.
+async fn window(store: &Store, selector: &str, starts_at: i64, ends_at: i64) -> i64 {
+    insert_maintenance_window(
+        store,
+        NewMaintenanceWindow {
+            starts_at,
+            ends_at,
+            reason: "kernel reboot",
+            selector,
+            origin: "api",
+            remote_id: None,
+        },
+    )
+    .await
+    .unwrap()
+    .0
+    .id
+}
+
+#[tokio::test]
+async fn planned_windows_are_stored_once_and_read_by_overlap() {
+    let store = Store::in_memory().await;
+    let id = window(&store, "host:frank", 1_000, 1_600).await;
+    // The same origin, selector and hours: the same row, not a second one.
+    let (again, created) = insert_maintenance_window(
+        &store,
+        NewMaintenanceWindow {
+            starts_at: 1_000,
+            ends_at: 1_600,
+            reason: "another wording",
+            selector: "host:frank",
+            origin: "api",
+            remote_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!created);
+    assert_eq!(again.id, id);
+    assert_eq!(again.reason, "kernel reboot");
+    // Another origin is another window.
+    let (other, created) = insert_maintenance_window(
+        &store,
+        NewMaintenanceWindow {
+            starts_at: 1_000,
+            ends_at: 1_600,
+            reason: "kernel reboot",
+            selector: "host:frank",
+            origin: "peer:hora-frank",
+            remote_id: Some(4),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(created && other.id != id);
+
+    // Both bounds count, like a config window's.
+    let ids = |rows: Vec<MaintenanceWindow>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+    let between = |from, to| {
+        let store = store.clone();
+        async move { maintenance_windows_between(&store, from, to).await.unwrap() }
+    };
+    assert_eq!(ids(between(1_600, 1_600).await), [id, other.id]);
+    assert_eq!(ids(between(0, 1_000).await), [id, other.id]);
+    assert_eq!(between(0, 999).await, Vec::new());
+    assert_eq!(between(1_601, 9_999).await, Vec::new());
+    assert_eq!(
+        pending_maintenance_windows(&store, 1_600)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        pending_maintenance_windows(&store, 1_601).await.unwrap(),
+        Vec::new()
+    );
+
+    // An id is never handed out twice, even once its window is gone.
+    assert!(delete_maintenance_window(&store, other.id).await.unwrap());
+    assert!(!delete_maintenance_window(&store, other.id).await.unwrap());
+    assert_eq!(maintenance_window(&store, other.id).await.unwrap(), None);
+    let next = window(&store, "*", 5_000, 5_600).await;
+    assert!(next > other.id);
+}
+
+#[tokio::test]
+async fn the_retention_sweep_prunes_old_windows_and_the_ones_left_without_a_monitor() {
+    let store = Store::in_memory().await;
+    let now = chrono::Utc::now().timestamp();
+    let day = SECONDS_PER_DAY;
+    // Ended more than a year ago, last month, and still to come.
+    let ancient = window(&store, "*", now - 400 * day, now - 399 * day).await;
+    let recent = window(&store, "*", now - 30 * day, now - 29 * day).await;
+    let planned = window(&store, "host:frank", now + 3600, now + 4200).await;
+    // Naming monitors: one removed since, one of two removed, one kept.
+    let orphan = window(&store, "ids:gone", now + 3600, now + 4200).await;
+    let half = window(&store, "ids:gone,keep", now + 3600, now + 4200).await;
+    let kept = window(&store, "ids:keep", now + 3600, now + 4200).await;
+    // A watched peer's listen id is an id too.
+    let peer = window(&store, "ids:peer-in", now + 3600, now + 4200).await;
+
+    let config: Config = toml::from_str(
+        r#"
+            [page]
+            [server]
+            [health]
+            id = "node"
+            [[peers]]
+            id = "peer"
+            name = "Peer"
+            listen_id = "peer-in"
+            expect_every_secs = 60
+            listen_token = "a-long-enough-listen-token"
+            [[monitors]]
+            id = "keep"
+            name = "Keep"
+            target = "https://example.com"
+            interval_secs = 60
+        "#,
+    )
+    .unwrap();
+    prune(&store, &config).await.unwrap();
+
+    let left: Vec<i64> = maintenance_windows_between(&store, 0, i64::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    // The month-old one stays: the reports and the day bars still show it.
+    assert!(!left.contains(&ancient), "a year after its end it goes");
+    assert!(!left.contains(&orphan), "it covered a removed monitor only");
+    for id in [recent, planned, half, kept, peer] {
+        assert!(left.contains(&id), "{id} in {left:?}");
+    }
+}
+
+/// The build flag in `.cargo/config.toml` reached the bundled `SQLite`: with
+/// its memory statistics on, every allocation takes one process-wide mutex
+/// and concurrent readers queue behind it.
+#[tokio::test]
+async fn sqlite_is_built_without_memory_statistics() {
+    let store = Store::in_memory().await;
+    let options: Vec<(String,)> = sqlx::query_as("PRAGMA compile_options")
+        .fetch_all(store.sqlx())
+        .await
+        .unwrap();
+    assert!(
+        options
+            .iter()
+            .any(|(option,)| option == "DEFAULT_MEMSTATUS=0"),
+        "SQLite was compiled with its memory statistics on: \
+         LIBSQLITE3_FLAGS from .cargo/config.toml did not reach the build"
+    );
+}
+
+/// A push monitor's `ping` is whatever its job sends. Two of them at the top
+/// of `i64` in one sparkline bucket overflowed the bucket's `SUM`, which
+/// `SQLite` answers with an error: every monitor's sparkline was gone with
+/// it, for as long as the two rows stayed in the window.
+#[tokio::test]
+async fn sparklines_survive_latencies_at_the_edge_of_i64() {
+    let store = Store::in_memory().await;
+    insert(&store, "web", 1000, 1, Some(40)).await;
+    for time in [1000, 1001] {
+        insert_push_at(&store, "job", CheckStatus::Up, Some(i64::MAX), None, time)
+            .await
+            .unwrap();
+    }
+    let mut cache = SparklineCache::default();
+    let cached = cache
+        .refresh(&store, 0, 720, 2000)
+        .await
+        .expect("the sparklines of every monitor");
+    assert_eq!(cached["web"][0].latency_ms, 40);
+    assert_eq!(cached["job"].len(), 1);
+    let direct = latency_sparkline_all(&store, 0, 720).await.unwrap();
+    assert_eq!(cached["job"][0].latency_ms, direct["job"][0].latency_ms);
+    // Later rows of the same bucket are added to it in memory.
+    insert_push_at(&store, "job", CheckStatus::Up, Some(i64::MAX), None, 1002)
+        .await
+        .unwrap();
+    let cached = cache.refresh(&store, 0, 720, 2001).await.unwrap();
+    assert_eq!(cached["job"].len(), 1);
+}
+
+/// The same latencies, an hour apart: the day's weighted average summed the
+/// hourly ones as integers, the roll-up failed, and no monitor got its day.
+#[tokio::test]
+async fn the_daily_roll_up_survives_latencies_at_the_edge_of_i64() {
+    let store = Store::in_memory().await;
+    let day0 = 10 * SECONDS_PER_DAY;
+    insert(&store, "web", day0 + 10, 1, Some(40)).await;
+    for hour in [0, 1] {
+        insert_push_at(
+            &store,
+            "job",
+            CheckStatus::Up,
+            Some(i64::MAX),
+            None,
+            day0 + hour * 3600 + 10,
+        )
+        .await
+        .unwrap();
+    }
+    downsample_hourly(&store, day0 + SECONDS_PER_DAY)
+        .await
+        .unwrap();
+    downsample_daily(&store, day0 + SECONDS_PER_DAY)
+        .await
+        .expect("the day of every monitor");
+    let rolled = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT monitor_id, up_count, avg_latency_ms FROM checks_daily ORDER BY monitor_id",
+    )
+    .fetch_all(store.sqlx())
+    .await
+    .unwrap();
+    assert_eq!(
+        rolled,
+        vec![("job".to_owned(), 2, i64::MAX), ("web".to_owned(), 1, 40)]
     );
 }

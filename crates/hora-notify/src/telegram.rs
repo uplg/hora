@@ -79,6 +79,17 @@ impl Notifier for TelegramNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    crate::fuzz::Sent {
+        channel: "telegram",
+        title: None,
+        body: TelegramNotifier::render(event),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,15 +97,7 @@ mod tests {
 
     #[test]
     fn renders_each_event() {
-        let down = TelegramNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = TelegramNotifier::render(Event::down("API", Some("boom")));
         assert_eq!(down, "\u{1F534} <b>API</b> is DOWN\n<code>boom</code>");
 
         let symptom = TelegramNotifier::render(Event::Down {
@@ -130,14 +133,14 @@ mod tests {
             latency_ms: Some(1234),
             detail: Some("disk 91% full"),
         });
-        assert!(degraded.contains("slow") && degraded.contains("1234ms"));
+        assert!(degraded.contains("slow") && degraded.contains("1234 ms"));
         assert!(degraded.contains("disk 91% full"), "{degraded}");
 
         let cert = TelegramNotifier::render(Event::CertExpiring {
             monitor: "API",
             secs_left: 3 * 86_400,
         });
-        assert!(cert.contains("expires in 3 days"));
+        assert!(cert.contains("expires in 3 d"));
 
         let partition = TelegramNotifier::render(Event::PeerLinkDegraded {
             peer: "Hora B",

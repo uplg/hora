@@ -1,4 +1,5 @@
-use super::env::expand_env;
+use super::env::capture::captured_warnings;
+use super::env::{ExpandWarning, expand_env};
 use super::raw::default_timeout;
 use super::*;
 
@@ -334,14 +335,14 @@ fn parses_push_monitor_without_target() {
             name = "Nightly backup"
             kind = "push"
             interval_secs = 90000
-            push_token = "secret"
+            push_token = "a-long-enough-push-token"
         "#,
     );
     assert_eq!(config.monitors[0].kind(), Kind::Push);
     assert_eq!(config.monitors[0].target(), "");
     assert_eq!(
         config.monitors[0].push_token.as_ref().map(AsRef::as_ref),
-        Some("secret")
+        Some("a-long-enough-push-token")
     );
     validate(&config).expect("push monitor valid without target");
 }
@@ -474,11 +475,130 @@ fn maintenance_window_mutes_selected_monitor() {
         "#,
     );
     let parse_dt = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
-    assert!(config.in_maintenance("db", parse_dt("2026-06-08T01:00:00Z")));
+    let schedule = crate::planned::Schedule::merged(&config, &[]);
+    assert!(schedule.in_maintenance("db", parse_dt("2026-06-08T01:00:00Z")));
     // Outside the window, or a monitor not listed.
-    assert!(!config.in_maintenance("db", parse_dt("2026-06-08T03:00:00Z")));
-    assert!(!config.in_maintenance("web", parse_dt("2026-06-08T01:00:00Z")));
+    assert!(!schedule.in_maintenance("db", parse_dt("2026-06-08T03:00:00Z")));
+    assert!(!schedule.in_maintenance("web", parse_dt("2026-06-08T01:00:00Z")));
     validate(&config).expect("valid maintenance");
+}
+
+/// A two-node mesh as its owner writes it: this node on `yuki`, its peer on
+/// `frank`, one service on each host. `peer_extra` and `monitor_extra` are
+/// spliced into the peer and into the first monitor.
+fn host_config(health_extra: &str, peer_extra: &str, monitor_extra: &str) -> String {
+    format!(
+        r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-yuki"
+            {health_extra}
+            [[peers]]
+            id = "hora-frank"
+            name = "Frank"
+            expect_every_secs = 120
+            {peer_extra}
+            [[monitors]]
+            id = "mail"
+            name = "Mail"
+            kind = "tcp"
+            target = "mail.example.com:25"
+            interval_secs = 60
+            {monitor_extra}
+        "#
+    )
+}
+
+#[test]
+fn host_labels_are_optional_short_and_printable() {
+    let token = "listen_token = \"a-long-enough-listen-token\"";
+    // Unset everywhere: nothing changes.
+    let bare = parse(&host_config("", token, ""));
+    assert_eq!(bare.own_host(), None);
+    assert_eq!(bare.peers[0].host, None);
+    assert_eq!(bare.monitors[0].host, None);
+    assert!(!bare.knows_host("frank"));
+
+    let labelled = parse(&host_config(
+        "host = \"yuki\"",
+        &format!("{token}\nhost = \"frank\""),
+        "host = \"frank\"",
+    ));
+    assert_eq!(labelled.own_host(), Some("yuki"));
+    assert_eq!(labelled.peers[0].host.as_deref(), Some("frank"));
+    assert_eq!(labelled.monitors[0].host.as_deref(), Some("frank"));
+    assert!(labelled.knows_host("frank") && labelled.knows_host("yuki"));
+    assert!(!labelled.knows_host("Frank"), "labels compare exactly");
+
+    // Empty, padded, with a control character, or longer than a name.
+    let long = format!("host = \"{}\"", "h".repeat(65));
+    for bad in [
+        "host = \"\"",
+        "host = \" frank\"",
+        "host = \"fr\\tank\"",
+        &long,
+    ] {
+        for (health, peer, monitor) in [(bad, "", ""), ("", bad, ""), ("", "", bad)] {
+            let error = load(&host_config(health, &format!("{token}\n{peer}"), monitor))
+                .expect_err("refused")
+                .to_string();
+            assert!(error.contains("host"), "{bad}: {error}");
+        }
+    }
+}
+
+#[test]
+fn accepting_a_peers_maintenance_is_bounded_and_needs_its_token() {
+    let token = "listen_token = \"a-long-enough-listen-token\"";
+    // Absent: its announcements are ignored.
+    let ignoring = parse(&host_config("", token, ""));
+    assert_eq!(ignoring.peers[0].accepted_maintenance_secs(), None);
+
+    let trusting = parse(&host_config(
+        "",
+        &format!("{token}\naccept_maintenance_secs = 900"),
+        "",
+    ));
+    assert_eq!(trusting.peers[0].accepted_maintenance_secs(), Some(900));
+
+    let refused = |peer: &str| {
+        load(&host_config("", peer, ""))
+            .expect_err("refused")
+            .to_string()
+    };
+    // Zero is not "off": the key is removed for that.
+    let error = refused(&format!("{token}\naccept_maintenance_secs = 0"));
+    assert!(
+        error.contains("accept_maintenance_secs must be > 0"),
+        "{error}"
+    );
+    // More than the longest window anyone can plan.
+    let error = refused(&format!("{token}\naccept_maintenance_secs = 604801"));
+    assert!(error.contains("at most 604800"), "{error}");
+    // A heartbeat anyone can forge must not be able to declare maintenance.
+    let error = refused("allow_unauthenticated = true\naccept_maintenance_secs = 900");
+    assert!(
+        error.contains("cannot be combined with allow_unauthenticated"),
+        "{error}"
+    );
+    // The announcements ride the heartbeat this node expects from the peer.
+    let error = load(
+        r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-yuki"
+            [[peers]]
+            id = "hora-frank"
+            name = "Frank"
+            ping_url = "https://frank.example.com/api/push/hora-yuki"
+            accept_maintenance_secs = 900
+        "#,
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(error.contains("needs expect_every_secs"), "{error}");
 }
 
 #[test]
@@ -624,11 +744,233 @@ fn channel_debug_shows_routing_fields() {
     assert!(dump.contains("smtp.example.com") && dump.contains("b@example.com"));
 }
 
+/// A fixed environment for the expansion tests, which must not touch the
+/// process's: `SET` holds a value, `EMPTY` is set to nothing, `BYTES` is not
+/// Unicode, and nothing else exists.
+fn test_env(name: &str) -> Result<String, std::env::VarError> {
+    match name {
+        "SET" => Ok("value".to_owned()),
+        "EMPTY" => Ok(String::new()),
+        "BYTES" => Err(std::env::VarError::NotUnicode("\u{fffd}".into())),
+        _ => Err(std::env::VarError::NotPresent),
+    }
+}
+
+/// [`super::parse`] against [`test_env`], with what it warned about.
+fn load_with_test_env(toml_src: &str) -> (anyhow::Result<Config>, Vec<String>) {
+    captured_warnings(|| super::parse_with_env(toml_src, None, &test_env))
+}
+
+/// `input` expanded against [`test_env`], with what could not be resolved.
+fn expand(input: &str) -> (String, Vec<ExpandWarning>) {
+    let mut warnings = Vec::new();
+    let expanded = expand_env(input, &test_env, &mut warnings);
+    (expanded, warnings)
+}
+
+/// `input` expanded, for a reference that resolves without a warning.
+fn expanded(input: &str) -> String {
+    let (expanded, warnings) = expand(input);
+    assert!(warnings.is_empty(), "{input}: {warnings:?}");
+    expanded
+}
+
 #[test]
 fn expand_env_dollar_escape() {
     // `$$` is a literal `$`, so `$${id}` is a literal `${id}` (no env lookup).
-    assert_eq!(expand_env("$${id}"), "${id}");
-    assert_eq!(expand_env("a$$b"), "a$b");
+    assert_eq!(expanded("$${id}"), "${id}");
+    assert_eq!(expanded("a$$b"), "a$b");
+    // A lone `$` and an unclosed `${` stay as written.
+    assert_eq!(expanded("5$ ${SET"), "5$ ${SET");
+}
+
+#[test]
+fn expand_env_substitutes_and_falls_back() {
+    assert_eq!(expanded("a-${SET}-b"), "a-value-b");
+    // The fallback stands in for an unset variable, and for an empty one.
+    assert_eq!(expanded("${SET:-other}"), "value");
+    assert_eq!(expanded("${MISSING:-other}"), "other");
+    assert_eq!(expanded("${EMPTY:-other}"), "other");
+    // An empty fallback is how a value says it is optional: no warning.
+    assert_eq!(expanded("[${MISSING:-}]"), "[]");
+    // The fallback is literal text: a `$` or a `:-` in it means nothing.
+    assert_eq!(expanded("${MISSING:-a$$b:-c}"), "a$$b:-c");
+    // A variable set to nothing is set: that is the operator's word.
+    assert_eq!(expanded("${EMPTY}"), "");
+}
+
+/// Nothing in the expansion fails a load: what cannot be resolved expands to
+/// nothing (as on 0.11) or stays as written, and is reported.
+#[test]
+fn expand_env_warns_about_what_it_cannot_resolve() {
+    // Unset without a fallback: nothing, and a warning that names it.
+    let (text, warnings) = expand("a-${MISSING}-b");
+    assert_eq!(text, "a--b");
+    assert_eq!(warnings, [ExpandWarning::Unset("MISSING".into())]);
+    assert_eq!(
+        warnings[0].to_string(),
+        "environment variable MISSING is not set (write ${MISSING:-} if it is optional, \
+         or ${MISSING:-fallback} for a default)"
+    );
+    // Not Unicode: its own message, fallback or not.
+    for input in ["${BYTES}", "${BYTES:-x}"] {
+        let (text, warnings) = expand(input);
+        assert_eq!(text, "", "{input}");
+        assert_eq!(warnings, [ExpandWarning::NotUnicode("BYTES".into())]);
+        assert_eq!(
+            warnings[0].to_string(),
+            "environment variable BYTES is not valid Unicode"
+        );
+    }
+    // Not a name: nothing is looked up, the text stays.
+    for input in ["${}", "${not a var}", "${SET:?needed}", "${1ST}", "${:-x}"] {
+        let (text, warnings) = expand(input);
+        assert_eq!(text, input);
+        assert!(
+            matches!(warnings[..], [ExpandWarning::NotAName(_)]),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        expand("${not a var}").1[0].to_string(),
+        "${not a var} does not name an environment variable (letters, digits and '_', \
+         as ${NAME} or ${NAME:-fallback}): left as written; write $${ for a literal ${"
+    );
+    // A fallback that its own `}` would cut short: the reference stays (the
+    // text after its first `}` was never part of it).
+    let (text, warnings) = expand("${MISSING:-${SET}}");
+    assert_eq!(text, "${MISSING:-${SET}}");
+    assert_eq!(warnings, [ExpandWarning::FallbackBrace("MISSING".into())]);
+    let (text, warnings) = expand(r#"${SET:-{"k":1}}"#);
+    assert_eq!(text, r#"${SET:-{"k":1}}"#);
+    // The message names the variable and never quotes the fallback.
+    assert_eq!(
+        warnings[0].to_string(),
+        "the fallback of ${SET:-...} must not contain '{' or '}' (the first '}' ends \
+         the reference): left as written, set SET instead"
+    );
+    // Every reference of a value is reported, and the rest still expands.
+    let (text, warnings) = expand("${MISSING}/${SET}/${OTHER}");
+    assert_eq!(text, "/value/");
+    assert_eq!(warnings.len(), 2);
+}
+
+/// The defect this answers: a typo in a variable's name emptied the secret
+/// and the channel went away with a warning that named neither the key nor
+/// the channel. The load still succeeds - the config can be fixed and
+/// reloaded while the daemon runs - but both are now said.
+#[test]
+fn an_unset_variable_warns_with_its_key_and_disables_the_channel_loudly() {
+    const DISABLED: &str = "channel phone: token is empty, the channel is disabled until it is set";
+    let config = |token: &str| {
+        format!(
+            r#"
+            [page]
+            [server]
+            [[channels]]
+            name = "ops"
+            type = "discord"
+            webhook_url = "https://discord.example/hook"
+            [[channels]]
+            name = "phone"
+            type = "gotify"
+            url = "https://gotify.example"
+            token = "{token}"
+        "#
+        )
+    };
+
+    let (loaded, warnings) = load_with_test_env(&config("${GOTFY_TOKEN}"));
+    let loaded = loaded.expect("an unset variable does not fail the load");
+    assert_eq!(
+        warnings,
+        [
+            "channels[1].token: environment variable GOTFY_TOKEN is not set (write \
+             ${GOTFY_TOKEN:-} if it is optional, or ${GOTFY_TOKEN:-fallback} for a default)",
+            DISABLED,
+        ]
+    );
+    // The other channel keeps working; the empty one is known as disabled.
+    assert!(loaded.channels[0].is_configured());
+    assert!(!loaded.channels[1].is_configured());
+    assert_eq!(loaded.channels[1].empty_required_field(), Some("token"));
+
+    let (loaded, warnings) = load_with_test_env(&config("${BYTES}"));
+    assert!(loaded.is_ok());
+    assert_eq!(
+        warnings,
+        [
+            "channels[1].token: environment variable BYTES is not valid Unicode",
+            DISABLED,
+        ]
+    );
+
+    // "Optional" on a field the channel cannot do without, a variable set to
+    // nothing, an empty string: no variable to name, the channel still is.
+    for token in ["${GOTFY_TOKEN:-}", "${EMPTY}", ""] {
+        let (loaded, warnings) = load_with_test_env(&config(token));
+        assert!(loaded.is_ok(), "{token}");
+        assert_eq!(warnings, [DISABLED], "{token}");
+    }
+
+    // Set: nothing to say.
+    let (loaded, warnings) = load_with_test_env(&config("${SET}"));
+    assert!(loaded.expect("loads").channels[1].is_configured());
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn every_channel_type_names_its_empty_required_field() {
+    let cases = [
+        ("telegram", "token = \"t\"\nchat_id = \"\"", "chat_id"),
+        ("discord", "webhook_url = \"\"", "webhook_url"),
+        ("slack", "webhook_url = \"\"", "webhook_url"),
+        ("webhook", "url = \"\"", "url"),
+        (
+            "matrix",
+            "homeserver = \"https://m.example\"\ntoken = \"\"\nroom_id = \"!r:m\"",
+            "token",
+        ),
+        ("freemobile", "user = \"1\"\npass = \"\"", "pass"),
+        (
+            "email",
+            "host = \"smtp.example\"\nfrom = \"\"\nto = \"a@example.com\"",
+            "from",
+        ),
+        ("ntfy", "url = \"\"", "url"),
+        (
+            "gotify",
+            "url = \"https://g.example\"\ntoken = \"\"",
+            "token",
+        ),
+        ("pushover", "token = \"t\"\nuser = \"\"", "user"),
+    ];
+    for (kind, fields, empty) in cases {
+        let toml =
+            format!("[page]\n[server]\n[[channels]]\nname = \"c\"\ntype = \"{kind}\"\n{fields}\n");
+        let (loaded, warnings) = captured_warnings(|| load(&toml));
+        let loaded = loaded.expect("an empty secret does not fail the load");
+        assert!(!loaded.channels[0].is_configured(), "{kind}");
+        assert_eq!(
+            warnings,
+            [format!(
+                "channel c: {empty} is empty, the channel is disabled until it is set"
+            )],
+            "{kind}"
+        );
+    }
+    // What a channel may do without stays optional, and says nothing: a
+    // public ntfy topic, an SMTP relay without authentication.
+    for toml in [
+        "[page]\n[server]\n[[channels]]\nname = \"c\"\ntype = \"ntfy\"\n\
+         url = \"https://ntfy.sh/topic\"\ntoken = \"\"\n",
+        "[page]\n[server]\n[[channels]]\nname = \"c\"\ntype = \"email\"\n\
+         host = \"smtp.example\"\nfrom = \"a@example.com\"\nto = \"b@example.com\"\n",
+    ] {
+        let (loaded, warnings) = captured_warnings(|| load(toml));
+        assert!(loaded.expect("loads").channels[0].is_configured());
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
 }
 
 #[test]
@@ -760,7 +1102,6 @@ fn parses_matrix_and_freemobile_channels() {
     assert_eq!(config.channels.len(), 2);
     assert_eq!(config.channels[0].name(), "ops-matrix");
     assert_eq!(config.channels[1].name(), "oncall-sms");
-    assert!(config.channels[0].is_configured() && config.channels[1].is_configured());
     validate(&config).expect("valid");
     // Neither secret may surface through Debug.
     let dump = format!("{:?}", config.channels);
@@ -927,6 +1268,7 @@ fn confirm_with_peers_requires_health_and_a_probeable_peer() {
             id = "hora-b"
             name = "B"
             expect_every_secs = 60
+            listen_token = "a-long-enough-listen-token"
         "#,
     )
     .unwrap_err()
@@ -948,6 +1290,7 @@ fn confirm_with_peers_requires_health_and_a_probeable_peer() {
             id = "beat"
             name = "Beat"
             kind = "push"
+            allow_unauthenticated = true
             interval_secs = 60
             confirm_with_peers = true
         "#,
@@ -996,6 +1339,59 @@ fn cron_keeps_the_3x_shorthand_steps() {
         .find_next_occurrence(&from, false)
         .expect("next");
     assert_eq!(next.timestamp(), 300);
+}
+
+/// Found by the `schedule` fuzz target: croner takes a field that lists
+/// nothing (a stray comma), and looking for the next run of such a schedule
+/// walks every day up to the year 5000 - eleven seconds of a scheduler
+/// thread, on each tick of the push monitor that carries it.
+#[test]
+fn cron_refuses_a_time_field_that_lists_nothing() {
+    for pattern in [", * * * *", ", * ? * *", "* , * * *", ", * * * * *"] {
+        let refusal = super::parse_cron(pattern)
+            .map(|_| ())
+            .map_err(|err| err.to_string());
+        assert!(
+            refusal
+                .as_ref()
+                .is_err_and(|err| err.contains("lists no value")),
+            "{pattern}: {refusal:?}"
+        );
+    }
+    // A stray comma beside a value is the value alone, as croner reads it.
+    let from = chrono::DateTime::from_timestamp(0, 0).expect("epoch");
+    for pattern in [
+        ",5 * * * *",
+        "5, * * * *",
+        "0 3 * * *",
+        "30 0 3 * * *",
+        "0 0 L * *",
+        "0 0 * * 1#2",
+        "0 8 * * MON-FRI",
+        "@daily",
+    ] {
+        let cron = super::parse_cron(pattern).expect(pattern);
+        assert!(cron.find_next_occurrence(&from, false).is_ok(), "{pattern}");
+    }
+    let err = super::parse(
+        r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "backup"
+            name = "Backup"
+            kind = "push"
+            interval_secs = 60
+            allow_unauthenticated = true
+            schedule = ", 3 * * *"
+        "#,
+    )
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(
+        err.contains("monitor backup: invalid schedule") && err.contains("minutes"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1091,7 +1487,7 @@ fn parses_health_and_peers() {
             name = "Hora B"
             ping_url = "https://b.example/api/push/hora-a"
             ping_token = "tok"
-            listen_token = "in"
+            listen_token = "a-long-enough-listen-token"
             expect_every_secs = 90
         "#,
     );
@@ -1165,6 +1561,7 @@ fn rejects_peer_listen_id_clashing_with_monitor() {
             name = "Hora B"
             listen_id = "shared"
             expect_every_secs = 90
+            listen_token = "a-long-enough-listen-token"
         "#,
     )
     .unwrap_err()
@@ -1204,6 +1601,7 @@ fn explicit_witness_url_overrides_derivation() {
             ping_url = "https://b.example:9000/api/push/hora-a"
             witness_url = "https://b.internal/healthz"
             expect_every_secs = 90
+            listen_token = "a-long-enough-listen-token"
         "#,
     );
     assert_eq!(
@@ -1227,6 +1625,7 @@ fn peer_debug_redacts_secrets() {
             ping_url = "https://b.example/api/push/hora-a?tok=sup3rsecret"
             ping_token = "tok3n"
             expect_every_secs = 90
+            listen_token = "a-long-enough-listen-token"
             witness_url = "https://b.example/healthz?key=sup3rsecret"
         "#,
     );
@@ -1566,8 +1965,11 @@ fn private_monitor_requires_auth_token() {
         .to_string();
     assert!(error.contains("requires server.auth_token"), "{error}");
 
-    let config = parse(&private.replace("{token}", "auth_token = \"s3cret\""));
+    let config = parse(&private.replace("{token}", "auth_token = \"0123456789abcdef\""));
     validate(&config).expect("private monitor with token is valid");
+    // The read-only token opens a private monitor too.
+    let config = parse(&private.replace("{token}", "view_token = \"fedcba9876543210\""));
+    validate(&config).expect("private monitor with a view token is valid");
 
     // An interpolated-but-unset token expands to "" - now rejected outright
     // (an empty token would authorize a blank `?token=`), not silently treated
@@ -1870,6 +2272,7 @@ fn accepts_scheduled_push_monitor() {
             id = "backup"
             name = "Backup"
             kind = "push"
+            allow_unauthenticated = true
             interval_secs = 60
             schedule = "0 3 * * *"
             grace_secs = 1800
@@ -2084,8 +2487,11 @@ fn the_example_config_optional_settings_land_in_their_kind() {
     ] {
         text = uncomment_block(&text, from);
     }
-    // `${BACKUP_TOKEN}` is unset here: give the token a value of its own.
-    let text = text.replace("${BACKUP_TOKEN}", "a-long-enough-backup-token");
+    // `${BACKUP_TOKEN}` is unset here: give the token a value of its own,
+    // and drop the opt-out the example ships with in its place.
+    let text = text
+        .replace("${BACKUP_TOKEN}", "a-long-enough-backup-token")
+        .replace("allow_unauthenticated = true", "");
     let exec_dir = std::env::temp_dir();
     let config = super::parse_with_exec_dir(&text, Some(exec_dir)).expect("the example loads");
     assert_eq!(config.monitors.len(), raw_monitors(&text).len());
@@ -2229,6 +2635,12 @@ fn page_logo_is_read_next_to_the_config() {
     let again = super::load_from(&config_path).expect("loads");
     assert_ne!(again.page.logo_image.expect("logo").version, logo.version);
 
+    // The hot reload's entry point (the text it already read, plus the path)
+    // resolves the logo too: a config edit must not drop it until restart.
+    let raw = std::fs::read_to_string(&config_path).unwrap();
+    let reloaded = super::parse_at(&raw, &config_path).expect("reloads");
+    assert!(reloaded.page.logo_image.is_some());
+
     std::fs::write(dir.join("mark-dark.svg"), "<svg/>").unwrap();
     std::fs::write(
         &config_path,
@@ -2267,4 +2679,420 @@ fn page_logo_is_read_next_to_the_config() {
     assert!(err.contains("the limit is"), "{err}");
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A minimal config around `server` keys and extra tables, for the token rules.
+fn with_tokens(server: &str, rest: &str) -> String {
+    format!(
+        r#"
+            [page]
+            [server]
+            {server}
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://example.com"
+            interval_secs = 60
+            group = "A"
+            {rest}
+        "#
+    )
+}
+
+#[test]
+fn short_access_tokens_are_rejected() {
+    let push = |token: &str| {
+        format!(
+            "[[monitors]]\nid = \"beat\"\nname = \"Beat\"\nkind = \"push\"\n\
+             interval_secs = 60\npush_token = \"{token}\""
+        )
+    };
+    let peer = |token: &str| {
+        format!(
+            "[health]\nid = \"a\"\n[[peers]]\nid = \"b\"\nname = \"B\"\n\
+             expect_every_secs = 60\nlisten_token = \"{token}\""
+        )
+    };
+    let short = "fifteen-chars-1";
+    let long = "sixteen-chars-12";
+    for (label, config) in [
+        (
+            "server.auth_token",
+            with_tokens(&format!("auth_token = \"{short}\""), ""),
+        ),
+        (
+            "server.view_token",
+            with_tokens(&format!("view_token = \"{short}\""), ""),
+        ),
+        (
+            "server.group_tokens[\"A\"]",
+            with_tokens(&format!("[server.group_tokens]\nA = \"{short}\""), ""),
+        ),
+        ("monitor beat: push_token", with_tokens("", &push(short))),
+        ("peer b: listen_token", with_tokens("", &peer(short))),
+    ] {
+        let error = load(&config).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("{label} is too short: use at least 16 characters")),
+            "{label}: {error}"
+        );
+        // One more character and the same config loads.
+        load(&config.replace(short, long)).unwrap_or_else(|err| panic!("{label}: {err}"));
+    }
+    // An outbound ping_token is the receiver's secret: short only warns.
+    load(&with_tokens(
+        "",
+        "[health]\nid = \"a\"\n[[peers]]\nid = \"b\"\nname = \"B\"\n\
+         ping_url = \"https://hc-ping.com/x\"\nping_token = \"short\"",
+    ))
+    .expect("a short ping_token loads");
+}
+
+#[test]
+fn view_token_is_validated_like_the_operator_token() {
+    let error = load(&with_tokens("view_token = \"\"", ""))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("server.view_token must not be empty"),
+        "{error}"
+    );
+    // The same secret twice would make the read-only token the operator's.
+    let error = load(&with_tokens(
+        "auth_token = \"0123456789abcdef\"\nview_token = \"0123456789abcdef\"",
+        "",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("server.view_token must differ from server.auth_token"),
+        "{error}"
+    );
+    let config = parse(&with_tokens(
+        "auth_token = \"0123456789abcdef\"\nview_token = \"fedcba9876543210\"",
+        "",
+    ));
+    assert_eq!(
+        config.server.view_token.as_ref().map(AsRef::as_ref),
+        Some("fedcba9876543210")
+    );
+    // Redacted like every other secret.
+    assert!(!format!("{:?}", config.server).contains("fedcba9876543210"));
+}
+
+#[test]
+fn push_monitors_require_a_token_or_the_explicit_opt_out() {
+    let push = |extra: &str| {
+        with_tokens(
+            "",
+            &format!(
+                "[[monitors]]\nid = \"beat\"\nname = \"Beat\"\nkind = \"push\"\n\
+                 interval_secs = 60\n{extra}"
+            ),
+        )
+    };
+    let error = load(&push("")).unwrap_err().to_string();
+    assert!(
+        error.contains("monitor beat: a push monitor requires a push_token"),
+        "{error}"
+    );
+    assert!(error.contains("allow_unauthenticated = true"), "{error}");
+
+    let open = parse(&push("allow_unauthenticated = true"));
+    assert!(open.monitors[1].allow_unauthenticated);
+    assert!(!open.monitors[0].allow_unauthenticated);
+    load(&push("push_token = \"a-long-enough-push-token\"")).expect("a token is enough");
+
+    // The opt-out next to a token says two things at once.
+    let error = load(&push(
+        "allow_unauthenticated = true\npush_token = \"a-long-enough-push-token\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("allow_unauthenticated contradicts push_token"),
+        "{error}"
+    );
+    // And it means nothing on a monitor Hora probes itself.
+    let error = load(&with_tokens(
+        "",
+        "[[monitors]]\nid = \"api\"\nname = \"API\"\ntarget = \"https://example.org\"\n\
+         interval_secs = 60\nallow_unauthenticated = true",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("allow_unauthenticated only applies to push monitors"),
+        "{error}"
+    );
+    // A non-push monitor needs no token: push_token there is the alert
+    // endpoint's optional credential.
+    load(&with_tokens("", "")).expect("an http monitor needs no push_token");
+}
+
+#[test]
+fn watched_peers_require_a_listen_token_or_the_explicit_opt_out() {
+    let peer = |extra: &str| {
+        with_tokens(
+            "",
+            &format!("[health]\nid = \"a\"\n[[peers]]\nid = \"b\"\nname = \"B\"\n{extra}"),
+        )
+    };
+    let error = load(&peer("expect_every_secs = 60"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("peer b: a watched peer requires a listen_token"),
+        "{error}"
+    );
+    assert!(error.contains("allow_unauthenticated = true"), "{error}");
+
+    let open = parse(&peer(
+        "expect_every_secs = 60\nallow_unauthenticated = true",
+    ));
+    assert!(open.peers[0].allow_unauthenticated);
+    load(&peer(
+        "expect_every_secs = 60\nlisten_token = \"a-long-enough-listen-token\"",
+    ))
+    .expect("a token is enough");
+    // An OUT-only peer receives nothing: no token to require.
+    load(&peer("ping_url = \"https://hc-ping.com/x\"")).expect("out-only peer");
+
+    let error = load(&peer(
+        "expect_every_secs = 60\nallow_unauthenticated = true\n\
+         listen_token = \"a-long-enough-listen-token\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("allow_unauthenticated contradicts listen_token"),
+        "{error}"
+    );
+    let error = load(&peer(
+        "ping_url = \"https://hc-ping.com/x\"\nallow_unauthenticated = true",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("allow_unauthenticated only applies to a watched peer"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_confirming_peer_must_be_reached_over_https() {
+    let mesh = |confirm: bool, ping_url: &str| {
+        with_tokens(
+            "",
+            &format!(
+                "[health]\nid = \"a\"\nconfirm_with_peers = {confirm}\n\
+                 [[peers]]\nid = \"b\"\nname = \"B\"\nping_url = \"{ping_url}\""
+            ),
+        )
+    };
+    let error = load(&mesh(true, "http://b.example/api/push/a"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("peer b: confirm_with_peers requires an https ping_url"),
+        "{error}"
+    );
+    // One monitor opting in is enough to ask the peers.
+    let error = load(
+        &mesh(false, "http://b.example/api/push/a")
+            .replace("group = \"A\"", "group = \"A\"\nconfirm_with_peers = true"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("requires an https ping_url"), "{error}");
+
+    load(&mesh(true, "https://b.example/api/push/a")).expect("https confirms");
+    // The same host has no network path to tamper with.
+    for local in [
+        "http://127.0.0.1:8080/api/push/a",
+        "http://localhost:8080/api/push/a",
+        "http://[::1]:8080/api/push/a",
+    ] {
+        load(&mesh(true, local)).unwrap_or_else(|err| panic!("{local}: {err}"));
+    }
+    // A name that merely starts like one is not loopback.
+    assert!(load(&mesh(true, "http://localhost.example/api/push/a")).is_err());
+    // Without confirmation a cleartext heartbeat still only warns.
+    load(&mesh(false, "http://b.example/api/push/a")).expect("heartbeat only");
+}
+
+#[test]
+fn notify_unconfirmed_tells_unset_from_empty() {
+    let alerts =
+        |line: &str| with_tokens("", "").replace("[page]", &format!("[page]\n[alerts]\n{line}"));
+    assert_eq!(parse(&alerts("")).alerts.notify_unconfirmed, None);
+    assert_eq!(
+        parse(&alerts("notify_unconfirmed = []"))
+            .alerts
+            .notify_unconfirmed,
+        Some(Vec::new())
+    );
+}
+
+/// `health.heartbeat_url` is checked at load, and its value never quoted.
+#[test]
+fn the_heartbeat_url_must_be_an_http_url() {
+    let with = |url: &str| {
+        MINIMAL.to_owned() + &format!("\n[health]\nid = \"node\"\nheartbeat_url = \"{url}\"\n")
+    };
+    assert!(load(&with("https://hc.example.com/ping/secret-uuid")).is_ok());
+    for bad in [
+        "hc.example.com/ping/secret-uuid",
+        "ftp://hc.example.com/x",
+        "https://",
+    ] {
+        let err = format!("{:#}", load(&with(bad)).expect_err(bad));
+        assert!(err.contains("health.heartbeat_url"), "{err}");
+        assert!(!err.contains("secret-uuid"), "{err}");
+    }
+}
+
+/// MINIMAL (one http monitor, "web") with more settings on that monitor.
+fn web_with(settings: &str) -> String {
+    format!("{MINIMAL}\n{settings}\n")
+}
+
+#[test]
+fn a_monitor_may_have_its_own_fail_threshold() {
+    let two = web_with("fail_threshold = 1")
+        + "[[monitors]]\nid = \"api\"\nname = \"API\"\ntarget = \"https://api.example.com\"\n\
+           interval_secs = 60\n";
+    let config = load(&two).expect("loads");
+    assert_eq!(config.fail_threshold("web"), 1, "its own");
+    assert_eq!(config.fail_threshold("api"), 3, "the global default");
+    // An id that is no monitor (a watched peer) goes by the global one.
+    assert_eq!(config.fail_threshold("some-peer"), 3);
+
+    // The global one still decides for every monitor that says nothing, and
+    // an override wins in both directions.
+    let config = load(&format!("[alerts]\nfail_threshold = 5\n{two}")).expect("loads");
+    assert_eq!(config.fail_threshold("web"), 1);
+    assert_eq!(config.fail_threshold("api"), 5);
+    let config = load(&format!(
+        "[alerts]\nfail_threshold = 2\n{}",
+        web_with("fail_threshold = 10")
+    ))
+    .expect("loads");
+    assert_eq!(config.fail_threshold("web"), 10);
+    // A global 0 was always read as 1; it is not what a monitor inherits.
+    let config = load(&format!("[alerts]\nfail_threshold = 0\n{MINIMAL}")).expect("loads");
+    assert_eq!(config.fail_threshold("web"), 1);
+
+    let error = format!(
+        "{:#}",
+        load(&web_with("fail_threshold = 0")).expect_err("0 confirms nothing")
+    );
+    assert!(
+        error.contains("monitor web: fail_threshold must be at least 1"),
+        "{error}"
+    );
+    assert!(load(&web_with("fail_threshold = -1")).is_err());
+}
+
+#[test]
+fn expected_status_takes_a_status_a_class_or_a_list() {
+    let accepted = |settings: &str| {
+        let config = load(&web_with(settings)).unwrap_or_else(|err| panic!("{settings}: {err:#}"));
+        http_spec(&config.monitors[0])
+            .expected_status
+            .as_ref()
+            .map(ToString::to_string)
+    };
+    assert_eq!(accepted(""), None);
+    // The scalar every existing file uses, unchanged.
+    assert_eq!(accepted("expected_status = 200").as_deref(), Some("200"));
+    assert_eq!(
+        accepted("expected_status = [200, 401]").as_deref(),
+        Some("200,401")
+    );
+    assert_eq!(
+        accepted("expected_status = \"2xx\"").as_deref(),
+        Some("2xx")
+    );
+    // One canonical form: sorted, no repeat, no status its class covers.
+    assert_eq!(
+        accepted("expected_status = [503, \"2XX\", 401, 204, 401]").as_deref(),
+        Some("2xx,401,503")
+    );
+
+    let config = load(&web_with("expected_status = [\"2xx\", 401]")).unwrap();
+    let statuses = http_spec(&config.monitors[0])
+        .expected_status
+        .as_ref()
+        .unwrap();
+    for (status, up) in [
+        (200, true),
+        (299, true),
+        (401, true),
+        (301, false),
+        (403, false),
+    ] {
+        assert_eq!(statuses.matches(status), up, "{status}");
+    }
+    assert!(!statuses.accepts_redirect());
+    let redirect = |list: &str| ExpectedStatus::parse_list(list).unwrap().accepts_redirect();
+    assert!(redirect("200,301") && redirect("3xx") && !redirect("200,404"));
+
+    for (settings, why) in [
+        ("expected_status = []", "lists no status"),
+        ("expected_status = [200, 600]", "600 is not an HTTP status"),
+        ("expected_status = -1", "-1 is not an HTTP status"),
+        ("expected_status = 70000", "70000 is not an HTTP status"),
+        ("expected_status = \"200\"", "not a status class"),
+        ("expected_status = [\"20x\"]", "not a status class"),
+        ("expected_status = \"6xx\"", "not a status class"),
+    ] {
+        let error = format!("{:#}", load(&web_with(settings)).expect_err(settings));
+        assert!(error.contains("monitor web: "), "{settings}: {error}");
+        assert!(error.contains(why), "{settings}: {error}");
+    }
+}
+
+#[test]
+fn method_is_get_or_head_and_head_asserts_no_body() {
+    let method = |settings: &str| {
+        let config = load(&web_with(settings)).unwrap_or_else(|err| panic!("{settings}: {err:#}"));
+        http_spec(&config.monitors[0]).method
+    };
+    assert_eq!(method(""), HttpMethod::Get);
+    assert_eq!(method("method = \"GET\""), HttpMethod::Get);
+    assert_eq!(method("method = \"HEAD\""), HttpMethod::Head);
+    assert_eq!(method("method = \"head\""), HttpMethod::Head);
+    // What a HEAD can still be judged on: the status.
+    assert_eq!(
+        method("method = \"HEAD\"\nexpected_status = [200, 405]"),
+        HttpMethod::Head
+    );
+
+    let refused = |settings: &str| format!("{:#}", load(&web_with(settings)).expect_err(settings));
+    for other in ["POST", "PUT", "DELETE", "bad method", ""] {
+        let error = refused(&format!("method = {other:?}"));
+        assert!(error.contains("monitor web: method"), "{error}");
+        assert!(error.contains("\"GET\" or \"HEAD\""), "{error}");
+    }
+    for assertion in [
+        "keyword = \"ok\"",
+        "json_query = \"$.status\"",
+        "number_regex = \"(\\\\d+)\"",
+    ] {
+        let error = refused(&format!("method = \"HEAD\"\n{assertion}"));
+        assert!(
+            error.contains("monitor web: method = \"HEAD\" gets no response body"),
+            "{error}"
+        );
+        // The same assertion on a GET is what it always was.
+        assert!(load(&web_with(&format!("method = \"GET\"\n{assertion}"))).is_ok());
+    }
+    let tcp = "[page]\n[server]\n[[monitors]]\nid = \"db\"\nname = \"DB\"\nkind = \"tcp\"\n\
+               target = \"db.example.com:5432\"\ninterval_secs = 60\nmethod = \"HEAD\"\n";
+    let error = format!("{:#}", load(tcp).expect_err("tcp"));
+    assert!(
+        error.contains("monitor db: method requires an http monitor"),
+        "{error}"
+    );
 }

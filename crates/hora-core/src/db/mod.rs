@@ -30,7 +30,8 @@
 //! - the roll-ups and retention: [`roll_up_recent`], [`downsample_hourly`],
 //!   [`downsample_daily`], the prune of raw rows and orphans;
 //! - the small relational tables: incidents, events, announcements,
-//!   silences, pushed alerts, certificates, domain expiry, release watch and
+//!   silences, planned maintenance windows, pushed alerts, certificates,
+//!   domain expiry, release watch and
 //!   the `meta` key/value store.
 //!
 //! The query functions take `&Store`, so a second implementation means turning
@@ -46,6 +47,7 @@ mod certs;
 mod checks;
 mod compact;
 mod incidents;
+mod maintenance;
 mod release;
 mod retention;
 #[cfg(test)]
@@ -56,6 +58,7 @@ pub use aggregates::{
     DayRow, Point, availability, availability_all, daily_all, latency_hourly,
     latency_percentiles_all, latency_series, latency_sparkline_all,
 };
+pub(crate) use annotations::meta_delete;
 pub use annotations::{
     Announcement, EventMarker, PushedAlert, Silence, active_announcements, active_silences,
     announcements_since, clear_announcements, clear_silences, events_since, insert_announcement,
@@ -67,19 +70,25 @@ pub use certs::{
     upsert_domain_expiry,
 };
 pub use checks::{
-    CheckSample, Heartbeat, Latest, check_samples, derive_status, insert_check,
-    insert_heartbeat_miss, insert_push, last_check_time, last_heartbeat, last_heartbeat_time,
-    recent_checks,
+    CheckSample, Heartbeat, Latest, check_samples, derive_status, derive_status_by_threshold,
+    insert_check, insert_heartbeat_miss, insert_push, last_check_time, last_heartbeat,
+    last_heartbeat_time, recent_checks,
 };
 pub use compact::{
     Compacted, DbLock, LockError, ObjectSize, SizeReport, StoreSize, apply_retention,
     free_disk_bytes, lock_exclusive, lock_writers, size_report, vacuum_swap,
 };
 pub use incidents::{
-    Incident, IncidentMarks, IncidentMarksCache, find_open_incident, incident_by_id,
-    incident_local_only, incident_marks, incidents_between, insert_incident_start,
-    latest_incident_id, monitor_incidents, recent_incidents, set_incident_local_only,
-    set_incident_note, update_incident_end, update_incident_vantage,
+    Incident, IncidentMarks, IncidentMarksCache, end_open_incidents, find_open_incident,
+    incident_by_id, incident_local_only, incident_marks, incident_notified, incidents_between,
+    insert_incident_start, latest_incident_id, mark_incident_notified, monitor_incidents,
+    recent_incidents, set_incident_local_only, set_incident_note, update_incident_end,
+    update_incident_vantage,
+};
+pub use maintenance::{
+    MaintenanceWindow, NewMaintenanceWindow, delete_maintenance_window, end_maintenance_window,
+    insert_maintenance_window, maintenance_window, maintenance_windows_between,
+    maintenance_windows_since, pending_maintenance_windows,
 };
 pub use release::{StoredRelease, mark_release_notified, release_watch, upsert_release_watch};
 pub(crate) use retention::prune;
@@ -114,6 +123,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: SqlitePool,
+    /// A second pool on the same file, for the status pages' reads (see
+    /// [`Store::pages`]). `None` where one pool is all there is: an
+    /// in-memory database, a one-shot command.
+    pages: Option<SqlitePool>,
 }
 
 impl Store {
@@ -134,8 +147,27 @@ impl Store {
             .map(drop)
     }
 
+    /// The handle the status pages read through: the same database, on
+    /// connections of their own.
+    ///
+    /// The pages' queries are the slow ones (a month of history, a year of
+    /// incidents) and anyone may ask for them. On the daemon's own pool,
+    /// enough visitors at once made every check insert, every heartbeat and
+    /// every step of an alert's delivery queue behind them: a busy page
+    /// delayed the alerts it was there to show.
+    #[must_use]
+    pub fn pages(&self) -> Self {
+        Self {
+            pool: self.pages.clone().unwrap_or_else(|| self.pool.clone()),
+            pages: None,
+        }
+    }
+
     /// Close every connection, waiting for in-flight queries to finish.
     pub async fn close(&self) {
+        if let Some(pages) = &self.pages {
+            pages.close().await;
+        }
         self.pool.close().await;
     }
 
@@ -160,7 +192,7 @@ impl Store {
             .run(&pool)
             .await
             .expect("migrate in-memory database");
-        Self { pool }
+        Self { pool, pages: None }
     }
 
     /// The raw pool, for test fixtures that insert rows no public function
@@ -176,6 +208,12 @@ impl Store {
 fn migrator() -> sqlx::migrate::Migrator {
     sqlx::migrate!("./migrations")
 }
+
+/// Connections of the daemon's own pool.
+const CORE_CONNECTIONS: u32 = 3;
+/// Connections of the status pages' pool. With the page cache at 4 MiB a
+/// connection, the two pools bound the daemon's cache memory at 36 MiB.
+const PAGE_CONNECTIONS: u32 = 6;
 
 /// Open the pool (creating the file if needed, WAL mode) and run migrations.
 ///
@@ -197,23 +235,26 @@ pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
         // at worst a power loss drops the last few checks.
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5))
-        // Keep the hot index pages resident across the 5s summary rebuilds
-        // (negative = KiB, so this is 16 MiB rather than the 2 MiB default).
-        .pragma("cache_size", "-16000")
+        // Keep the hot pages resident across the 5s summary rebuilds
+        // (negative = KiB: 4 MiB rather than the 2 MiB default). The cache is
+        // per connection and the two pools hold nine, so this is also the
+        // ceiling of the daemon's page-cache memory: 36 MiB, where the
+        // previous 16 MiB each allowed 128 MiB once the database outgrew it.
+        // What falls out is still in the OS page cache, a copy away.
+        .pragma("cache_size", "-4000")
         // A checkpoint rewinds the WAL but leaves the file at its high-water
         // mark, so one burst (long reads pinning a snapshot while the prune
         // writes) kept 100 MB+ on disk. Truncate it back to 64 MiB after a
         // checkpoint instead.
         .pragma("journal_size_limit", "67108864");
 
-    // WAL lets readers run while one writer (the scheduler) inserts, so a roomy
-    // pool keeps the parallel summary queries from queueing.
+    // Two pools on the one file (see `Store::pages`). The daemon's own:
+    // one writer at a time is all SQLite allows, so a few connections cover
+    // the scheduler's inserts and the reads an alert needs.
     let pool = SqlitePoolOptions::new()
-        .max_connections(8)
-        // Fail fast under contention instead of the 30s default; a slow monitor
-        // query then degrades just that card, not the whole page.
+        .max_connections(CORE_CONNECTIONS)
         .acquire_timeout(Duration::from_secs(10))
-        .connect_with(options)
+        .connect_with(options.clone())
         .await?;
 
     migrator().run(&pool).await?;
@@ -224,7 +265,20 @@ pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
     // re-runs ANALYZE when the shape of the data has drifted, so on most boots
     // this is a no-op; the first one pays a sub-second full ANALYZE.
     sqlx::query("PRAGMA optimize").execute(&pool).await?;
-    Ok(Store { pool })
+    // The pages': WAL lets readers run beside the writer, so a roomy pool
+    // keeps the parallel summary queries from queueing. Opened lazily: a
+    // one-shot command (`hora silence`, `hora tune`) never touches it.
+    let pages = SqlitePoolOptions::new()
+        .max_connections(PAGE_CONNECTIONS)
+        .min_connections(0)
+        // Fail fast under contention instead of the 30s default; a slow monitor
+        // query then degrades just that card, not the whole page.
+        .acquire_timeout(Duration::from_secs(10))
+        .connect_lazy_with(options);
+    Ok(Store {
+        pool,
+        pages: Some(pages),
+    })
 }
 
 /// Create the database file with owner-only (0600) permissions before sqlx opens

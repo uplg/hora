@@ -253,10 +253,11 @@ async fn add_raw(
     }
     // Grouped by value, not returned row by row: an hour of a 10s monitor is
     // 360 rows but rarely more than a hundred distinct latencies.
-    let rows = sqlx::query_as::<_, (String, Option<i64>, i64, i64)>(
-        "SELECT monitor_id, latency_ms, SUM(status IN (1, 2)), COUNT(*) FROM checks \
-         WHERE time >= ? AND time < ? GROUP BY monitor_id, latency_ms",
-    )
+    let rows = sqlx::query_as::<_, (String, Option<i64>, i64, i64)>(concat!(
+        "SELECT monitor_id, latency_ms, ",
+        available_total!(),
+        " FROM checks WHERE time >= ? AND time < ? GROUP BY monitor_id, latency_ms"
+    ))
     .bind(start)
     .bind(end)
     .fetch_all(store.sqlx())
@@ -308,10 +309,15 @@ fn ceil_to(value: i64, step: i64) -> i64 {
 
 /// A sparkline bucket being averaged: its first sample time and the latency
 /// sum and count (SQLite's `AVG` is the same `sum / count` in floating point).
+///
+/// The sum is a float, as `AVG`'s is: not every latency was measured (a push
+/// monitor's `ping` is whatever its job sent), and two near the top of `i64`
+/// overflow an integer sum - which `SUM` answers with an error, for the
+/// whole query.
 #[derive(Debug, Clone, Copy)]
 struct Bucket {
     first: i64,
-    sum: i64,
+    sum: f64,
     count: i64,
 }
 
@@ -326,7 +332,7 @@ impl Bucket {
     fn point(self) -> Point {
         Point {
             t: self.first,
-            latency_ms: (self.sum as f64 / self.count as f64) as i64,
+            latency_ms: (self.sum / self.count as f64) as i64,
         }
     }
 }
@@ -415,8 +421,8 @@ async fn sparkline_rows(
     if start >= end {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
-        "SELECT monitor_id, time / ?3, MIN(time), SUM(latency_ms), COUNT(*) FROM checks \
+    let rows = sqlx::query_as::<_, (String, i64, i64, f64, i64)>(
+        "SELECT monitor_id, time / ?3, MIN(time), TOTAL(latency_ms), COUNT(*) FROM checks \
          WHERE time >= ?1 AND time < ?2 AND latency_ms IS NOT NULL \
          GROUP BY monitor_id, time / ?3",
     )

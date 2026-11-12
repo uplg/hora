@@ -3,15 +3,18 @@
 
 use anyhow::Context as _;
 use hora_core::config;
-use hora_core::config::{Kind, split_host_port};
+use hora_core::config::{ExpectedStatus, HttpMethod, Kind, ParseField as _, split_host_port};
 
 use super::{CliError, usage};
 
-/// `hora probe <monitor-id|target> [--confirm] [--kind http|tcp|icmp|dns]`: a
+/// `hora probe <monitor-id|target> [--confirm] [--kind http|tcp|icmp|dns]
+/// [--method GET|HEAD] [--expect 200,401]`: a
 /// one-shot ad-hoc probe from the terminal with full monitor semantics (status,
 /// latency, HTTP/DNS assertions, TLS expiry). A bare argument matching a
 /// configured monitor id is probed with that monitor's exact config; anything
-/// else is an ad-hoc target whose kind is inferred (or forced with `--kind`).
+/// else is an ad-hoc target whose kind is inferred (or forced with `--kind`),
+/// and for an HTTP one `--method` and `--expect` stand for the monitor's
+/// `method` and `expected_status`.
 /// `--confirm` asks the configured peers to probe the same target - the
 /// distributed "down for everyone or just me?" in one command. Exits non-zero
 /// when the target is down, so it doubles as a scriptable health check.
@@ -35,6 +38,7 @@ pub(crate) async fn probe(args: &[String]) -> Result<(), CliError> {
         };
         hora_core::config::Monitor::ad_hoc(kind, target).map_err(|err| usage(format!("{err:#}")))?
     };
+    apply_http_options(&mut monitor, &parsed, configured.is_some())?;
     // Force confirmation on regardless of the monitor's own setting: the flag
     // is the explicit ask. confirm_with_peers is read by confirm::enabled only.
     if parsed.confirm {
@@ -87,6 +91,44 @@ pub(super) struct ProbeArgs<'a> {
     pub(super) target: &'a str,
     pub(super) confirm: bool,
     pub(super) kind_override: Option<hora_core::config::Kind>,
+    /// `--method`: the request an ad-hoc HTTP probe sends.
+    pub(super) method: Option<HttpMethod>,
+    /// `--expect`: the statuses an ad-hoc HTTP probe accepts as up.
+    pub(super) expect: Option<ExpectedStatus>,
+}
+
+/// Give an ad-hoc HTTP probe its `--method` and `--expect`. They describe a
+/// check that has no monitor: with a configured id the monitor's own settings
+/// are the point of the command, and on another kind they mean nothing, so
+/// both are refused rather than ignored.
+pub(super) fn apply_http_options(
+    monitor: &mut hora_core::config::Monitor,
+    parsed: &ProbeArgs<'_>,
+    configured: bool,
+) -> Result<(), CliError> {
+    if parsed.method.is_none() && parsed.expect.is_none() {
+        return Ok(());
+    }
+    if configured {
+        return Err(usage(format!(
+            "--method and --expect are for an ad-hoc target: monitor {:?} is probed with its \
+             own method and expected_status",
+            monitor.id
+        )));
+    }
+    let hora_core::config::MonitorKind::Http(spec) = &mut monitor.spec else {
+        return Err(usage(format!(
+            "--method and --expect need an http target, and this is a {} probe",
+            monitor.kind().as_str()
+        )));
+    };
+    if let Some(method) = parsed.method {
+        spec.method = method;
+    }
+    if let Some(expect) = &parsed.expect {
+        spec.expected_status = Some(expect.clone());
+    }
+    Ok(())
 }
 
 /// Parse `hora probe`'s arguments: a usage error on anything malformed (a
@@ -95,6 +137,8 @@ pub(super) fn parse_probe_args(args: &[String]) -> Result<ProbeArgs<'_>, CliErro
     let mut target: Option<&str> = None;
     let mut confirm = false;
     let mut kind_override: Option<hora_core::config::Kind> = None;
+    let mut method = None;
+    let mut expect = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -106,9 +150,26 @@ pub(super) fn parse_probe_args(args: &[String]) -> Result<ProbeArgs<'_>, CliErro
                         usage("--kind must be one of: http, tcp, icmp (ping), dns")
                     })?);
             }
+            "--method" => {
+                let raw = iter.next().map_or("", String::as_str);
+                method = Some(
+                    HttpMethod::parse_field(raw)
+                        .map_err(|err| usage(format!("--method: {err}")))?,
+                );
+            }
+            "--expect" => {
+                let raw = iter.next().map_or("", String::as_str);
+                expect = Some(ExpectedStatus::parse_list(raw).map_err(|err| {
+                    usage(format!(
+                        "--expect: {err} (statuses or classes separated by commas: 200,401 or \
+                         2xx,401)"
+                    ))
+                })?);
+            }
             flag if flag.starts_with('-') => {
                 return Err(usage(format!(
-                    "Unknown option {flag:?} (usage: hora probe <id|target> [--confirm] [--kind K])"
+                    "Unknown option {flag:?} (usage: hora probe <id|target> [--confirm] \
+                     [--kind K] [--method GET|HEAD] [--expect 200,401])"
                 )));
             }
             value if target.is_none() => target = Some(value),
@@ -120,12 +181,17 @@ pub(super) fn parse_probe_args(args: &[String]) -> Result<ProbeArgs<'_>, CliErro
         }
     }
     let target = target.ok_or_else(|| {
-        usage("Usage: hora probe <monitor-id|target> [--confirm] [--kind http|tcp|icmp|dns]")
+        usage(
+            "Usage: hora probe <monitor-id|target> [--confirm] [--kind http|tcp|icmp|dns] \
+             [--method GET|HEAD] [--expect 200,401]",
+        )
     })?;
     Ok(ProbeArgs {
         target,
         confirm,
         kind_override,
+        method,
+        expect,
     })
 }
 
@@ -148,7 +214,7 @@ async fn print_probe_report(
         "  latency   {}",
         outcome
             .latency_ms
-            .map_or_else(|| "-".to_owned(), |ms| format!("{ms} ms"))
+            .map_or_else(|| "-".to_owned(), hora_core::fmt::latency)
     );
     if let Some(code) = outcome.status_code {
         println!("  code      {code}");
@@ -220,20 +286,15 @@ fn parse_probe_kind(raw: &str) -> Option<hora_core::config::Kind> {
 }
 
 /// Human phrase for the time a certificate has left, handling the
-/// already-expired case. Under a day it counts hours: "0 days left" with ten
-/// hours to go reads as already gone.
+/// already-expired case: `"30 d left"`, `"10 h left"`, `"EXPIRED 5 h ago"`.
+/// Under two days it counts hours ("0 d left" with ten hours to go reads as
+/// already gone), and minutes in the last hour.
 fn cert_left_phrase(secs_left: i64) -> String {
-    let span = |secs: i64| match secs {
-        ..3_600 => "less than an hour".to_owned(),
-        3_600..7_200 => "1 hour".to_owned(),
-        7_200..86_400 => format!("{} hours", secs / 3_600),
-        86_400..172_800 => "1 day".to_owned(),
-        _ => format!("{} days", secs / 86_400),
-    };
+    let span = hora_core::fmt::elapsed(secs_left.unsigned_abs());
     if secs_left < 0 {
-        format!("EXPIRED {} ago", span(-secs_left))
+        format!("EXPIRED {span} ago")
     } else {
-        format!("{} left", span(secs_left))
+        format!("{span} left")
     }
 }
 
@@ -292,11 +353,11 @@ mod tests {
 
     #[test]
     fn cert_time_left_counts_hours_under_a_day() {
-        assert_eq!(cert_left_phrase(10 * 3_600 + 5), "10 hours left");
-        assert_eq!(cert_left_phrase(90 * 60), "1 hour left");
-        assert_eq!(cert_left_phrase(30 * 86_400), "30 days left");
-        assert_eq!(cert_left_phrase(-5 * 3_600), "EXPIRED 5 hours ago");
-        assert_eq!(cert_left_phrase(-3 * 86_400), "EXPIRED 3 days ago");
+        assert_eq!(cert_left_phrase(10 * 3_600 + 5), "10 h left");
+        assert_eq!(cert_left_phrase(90 * 60), "1 h left");
+        assert_eq!(cert_left_phrase(30 * 86_400), "30 d left");
+        assert_eq!(cert_left_phrase(-5 * 3_600), "EXPIRED 5 h ago");
+        assert_eq!(cert_left_phrase(-3 * 86_400), "EXPIRED 3 d ago");
     }
 
     #[test]

@@ -163,7 +163,9 @@ fn numbers(version: &str) -> Option<Vec<u64>> {
 /// One pass of the release watches: for each monitor with a `release`, refresh
 /// the project's latest release (gated on the stored `checked_at`), learn the
 /// version that runs, and alert when the first is newer - once per release,
-/// the release alerted for being stored, so a restart does not repeat it.
+/// the release alerted for being stored once a channel accepted the alert
+/// (see [`crate::alert_once::delivered`]), so a restart does not repeat it and
+/// a failed one is retried.
 /// Muted during maintenance without being recorded, like the certificate and
 /// domain expiries.
 pub(crate) async fn check_releases(
@@ -222,33 +224,108 @@ pub(crate) async fn check_releases(
         };
         if !crate::release::is_newer(&latest, &current)
             || alerted.as_deref() == Some(latest.as_str())
-            || snapshot.in_maintenance(&monitor.id, chrono::Utc::now())
+            || crate::scheduler::muted_under(store, snapshot, &monitor.id).await
         {
             continue;
         }
-        notifier
-            .load_full()
-            .dispatch(
-                Event::ReleaseAvailable(hora_notify::Release {
-                    monitor: &monitor.name,
-                    project: &watch.github,
-                    current: &current,
-                    latest: &latest,
-                    url: &url,
-                    notes: None,
-                }),
-                monitor.notify.as_deref(),
-            )
-            .await;
-        if let Err(err) = db::mark_release_notified(store, &monitor.id, &latest).await {
+        let event = Event::ReleaseAvailable(hora_notify::Release {
+            monitor: &monitor.name,
+            project: &watch.github,
+            current: &current,
+            latest: &latest,
+            url: &url,
+            notes: None,
+        });
+        // Recorded only once a channel accepted it: an alert that failed
+        // everywhere is sent again at the next sweep.
+        if crate::alert_once::dispatch(notifier, event, monitor.notify.as_deref(), &monitor.id)
+            .await
+            && let Err(err) = db::mark_release_notified(store, &monitor.id, &latest).await
+        {
             warn!(monitor = %monitor.id, "failed to record the release alert: {err:#}");
         }
+    }
+}
+
+/// The answer parsing and the version comparison for the fuzz targets in
+/// `fuzz/` (built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use serde_json_path::JsonPath;
+
+    /// [`super::release_of`], as `(tag, url, notes)`.
+    #[must_use]
+    pub fn release_of(body: &serde_json::Value) -> Option<(String, String, String)> {
+        super::release_of(body).map(|release| (release.tag, release.url, release.notes))
+    }
+
+    /// [`super::version_in`].
+    #[must_use]
+    pub fn version_in(body: &str, query: Option<&JsonPath>) -> Option<String> {
+        super::version_in(body, query)
+    }
+
+    /// [`super::is_newer`].
+    #[must_use]
+    pub fn is_newer(latest: &str, current: &str) -> bool {
+        super::is_newer(latest, current)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn watching(hook: &str) -> Config {
+        crate::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "chat"
+            name = "Chat"
+            target = "https://localhost:1/"
+            interval_secs = 60
+            timeout_secs = 5
+            release = {{ github = "owner/repo", current = "v1.9.1" }}
+            [[channels]]
+            name = "hook"
+            type = "webhook"
+            url = "{hook}"
+            "#
+        ))
+        .expect("config")
+    }
+
+    /// The stored release is fresh (no call to GitHub) and newer than the
+    /// literal `current`: only the alert policy runs.
+    #[tokio::test]
+    async fn a_release_alert_is_recorded_only_once_delivered() {
+        let store = Store::in_memory().await;
+        let client = crate::http::client(None).unwrap();
+        let now = 1_800_000_000;
+        db::upsert_release_watch(&store, "chat", "owner/repo", "v1.9.2", "https://x/r", now)
+            .await
+            .unwrap();
+        let recorded = || async {
+            let stored = db::release_watch(&store, "chat").await.unwrap();
+            stored.and_then(|stored| stored.notified)
+        };
+
+        let refusing = watching(&crate::testing::webhook_refusing().await);
+        let notifier = crate::notifications::shared(&refusing, &client);
+        check_releases(&store, &refusing, &notifier, &client, now).await;
+        assert_eq!(recorded().await, None, "a failed alert must stay owed");
+
+        let (hook, posts) = crate::testing::webhook_sink().await;
+        let working = watching(&hook);
+        let notifier = crate::notifications::shared(&working, &client);
+        check_releases(&store, &working, &notifier, &client, now).await;
+        check_releases(&store, &working, &notifier, &client, now).await;
+        assert_eq!(crate::testing::events(&posts), ["release_available"]);
+        assert_eq!(recorded().await.as_deref(), Some("v1.9.2"));
+    }
 
     #[test]
     fn a_later_release_is_newer_whatever_the_spelling() {

@@ -58,9 +58,21 @@ pub fn redact_url_secrets(raw: &str) -> std::borrow::Cow<'_, str> {
         redacted = true;
     }
     if url.query().is_some_and(|query| !query.is_empty()) {
+        // A key comes out of `query_pairs` decoded. The four characters that
+        // would read differently the next time (`a%26b` is one key, `a&b`
+        // two) are written encoded again, so that masking a masked URL
+        // changes nothing: peers compare targets masked on both sides (see
+        // `mesh::wire::disclosed_target`).
         let keys: Vec<String> = url
             .query_pairs()
-            .map(|(key, _value)| format!("{key}=***"))
+            .map(|(key, _value)| {
+                let key = key
+                    .replace('%', "%25")
+                    .replace('&', "%26")
+                    .replace('=', "%3D")
+                    .replace('+', "%2B");
+                format!("{key}=***")
+            })
             .collect();
         url.set_query(Some(&keys.join("&")));
         redacted = true;
@@ -69,5 +81,37 @@ pub fn redact_url_secrets(raw: &str) -> std::borrow::Cow<'_, str> {
         std::borrow::Cow::Owned(url.to_string())
     } else {
         std::borrow::Cow::Borrowed(raw)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url_secrets;
+
+    /// Peers compare targets masked on both sides, the one received being
+    /// masked a second time: masking what is already masked must change
+    /// nothing. Found by the `text` fuzz target: a query key holding an
+    /// encoded `&`, `=` or `+` was written back decoded, and read as another
+    /// query the second time.
+    #[test]
+    fn masking_a_masked_url_changes_nothing() {
+        for (raw, masked) in [
+            ("http://h/?a%26b=1", "http://h/?a%26b=***"),
+            ("http://h/?a%3Db", "http://h/?a%3Db=***"),
+            ("http://h/?a%2Bb=1", "http://h/?a%2Bb=***"),
+            ("http://h/?a%2541=1", "http://h/?a%2541=***"),
+            // Everything else is written as it always was.
+            (
+                "http://h/?api_key=s3cret&x=1",
+                "http://h/?api_key=***&x=***",
+            ),
+            ("http://h/?a+b=1&c%20d=2", "http://h/?a%20b=***&c%20d=***"),
+            ("http://h/?filter[x]=1", "http://h/?filter[x]=***"),
+            ("https://u:p@h/p?k", "https://***:***@h/p?k=***"),
+        ] {
+            let once = redact_url_secrets(raw);
+            assert_eq!(once, masked, "{raw}");
+            assert_eq!(redact_url_secrets(&once), masked, "{raw}, masked twice");
+        }
     }
 }

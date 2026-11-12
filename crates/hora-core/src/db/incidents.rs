@@ -24,7 +24,7 @@ pub struct Incident {
     /// What the service actually answered: the failing response's status line,
     /// headers and body start, captured (bounded) when the down was confirmed.
     pub snapshot: Option<String>,
-    /// The correlated event phrase ("deploy api v2.3, 3m before"), resolved
+    /// The correlated event phrase ("deploy api v2.3, 3 min before"), resolved
     /// when the down was confirmed - the "what changed?" answer.
     pub event: Option<String>,
     /// The multi-vantage verdict recorded once the peers answered; `None` when
@@ -57,8 +57,8 @@ pub async fn insert_incident_start(
     let result = sqlx::query(
         "INSERT INTO incidents \
             (monitor_id, started_at, error, reason, cause, impacted, snapshot, event, \
-             created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             created_at, notified) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
     )
     .bind(monitor_id)
     .bind(now)
@@ -92,6 +92,37 @@ pub async fn set_incident_local_only(
         .execute(store.sqlx())
         .await?;
     Ok(())
+}
+
+/// Record that an incident's down alert was announced, or settled without a
+/// notification by design (folded into its root cause, local-only with nowhere
+/// to go). Until then a daemon start that finds the incident still open
+/// confirms and announces the down instead of taking it for already sent.
+///
+/// # Errors
+///
+/// Returns an error if the update fails.
+pub async fn mark_incident_notified(store: &Store, incident_id: i64) -> sqlx::Result<()> {
+    sqlx::query("UPDATE incidents SET notified = 1 WHERE id = ? AND notified = 0")
+        .bind(incident_id)
+        .execute(store.sqlx())
+        .await?;
+    Ok(())
+}
+
+/// Whether an incident's down alert was announced (see
+/// [`mark_incident_notified`]). An incident that no longer exists reads as
+/// announced: there is nothing left to send for it.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn incident_notified(store: &Store, incident_id: i64) -> sqlx::Result<bool> {
+    let notified: Option<bool> = sqlx::query_scalar("SELECT notified FROM incidents WHERE id = ?")
+        .bind(incident_id)
+        .fetch_optional(store.sqlx())
+        .await?;
+    Ok(notified.unwrap_or(true))
 }
 
 /// How an incident's down was routed (see [`set_incident_local_only`]):
@@ -142,6 +173,29 @@ pub async fn update_incident_end(store: &Store, incident_id: i64) -> sqlx::Resul
         .bind(incident_id)
         .execute(store.sqlx())
         .await?;
+    Ok(())
+}
+
+/// Record the end of every incident still open for a monitor. A monitor has
+/// one outage at a time, so more than one open row is a leftover (an earlier
+/// close that failed, an incident opened while the open one could not be
+/// read): ending only the one held in memory would leave the others open
+/// forever, and "down since" reading from the oldest of them.
+///
+/// # Errors
+///
+/// Returns an error if the update fails.
+pub async fn end_open_incidents(store: &Store, monitor_id: &str) -> sqlx::Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "UPDATE incidents SET ended_at = ?, duration_s = (? - started_at) \
+         WHERE monitor_id = ? AND ended_at IS NULL",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(monitor_id)
+    .execute(store.sqlx())
+    .await?;
     Ok(())
 }
 
