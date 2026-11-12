@@ -73,15 +73,7 @@ mod tests {
 
     #[test]
     fn renders_each_event_plain() {
-        let down = FreeMobileNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = FreeMobileNotifier::render(Event::down("API", Some("boom")));
         assert_eq!(down, "API is DOWN\nboom");
 
         let recovered = FreeMobileNotifier::render(Event::Recovered {

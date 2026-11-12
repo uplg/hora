@@ -125,15 +125,7 @@ mod tests {
 
     #[test]
     fn renders_each_event() {
-        let down = MatrixNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = MatrixNotifier::render(Event::down("API", Some("boom")));
         assert!(down.contains("is DOWN") && down.contains("boom"));
 
         let recovered = MatrixNotifier::render(Event::Recovered {

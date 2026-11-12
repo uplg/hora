@@ -80,15 +80,7 @@ mod tests {
 
     #[test]
     fn renders_each_event() {
-        let down = SlackNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = SlackNotifier::render(Event::down("API", Some("boom")));
         assert_eq!(down, "\u{1F534} *API* is DOWN\n```boom```");
 
         let recovered = SlackNotifier::render(Event::Recovered {

@@ -82,15 +82,7 @@ mod tests {
 
     #[test]
     fn maps_events_to_text_and_priority() {
-        let down = GotifyNotifier::payload(Event::Down {
-            monitor: "API",
-            error: None,
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = GotifyNotifier::payload(Event::down("API", None));
         // The headline is the title, so the body does not say it again.
         assert_eq!(down.title, "API is DOWN");
         assert_eq!(down.message, "no response");

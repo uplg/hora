@@ -253,10 +253,11 @@ async fn add_raw(
     }
     // Grouped by value, not returned row by row: an hour of a 10s monitor is
     // 360 rows but rarely more than a hundred distinct latencies.
-    let rows = sqlx::query_as::<_, (String, Option<i64>, i64, i64)>(
-        "SELECT monitor_id, latency_ms, SUM(status IN (1, 2)), COUNT(*) FROM checks \
-         WHERE time >= ? AND time < ? GROUP BY monitor_id, latency_ms",
-    )
+    let rows = sqlx::query_as::<_, (String, Option<i64>, i64, i64)>(concat!(
+        "SELECT monitor_id, latency_ms, ",
+        available_total!(),
+        " FROM checks WHERE time >= ? AND time < ? GROUP BY monitor_id, latency_ms"
+    ))
     .bind(start)
     .bind(end)
     .fetch_all(store.sqlx())

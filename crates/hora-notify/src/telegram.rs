@@ -86,15 +86,7 @@ mod tests {
 
     #[test]
     fn renders_each_event() {
-        let down = TelegramNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = TelegramNotifier::render(Event::down("API", Some("boom")));
         assert_eq!(down, "\u{1F534} <b>API</b> is DOWN\n<code>boom</code>");
 
         let symptom = TelegramNotifier::render(Event::Down {

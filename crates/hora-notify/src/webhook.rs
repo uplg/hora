@@ -295,15 +295,7 @@ mod tests {
 
     #[test]
     fn payload_per_event() {
-        let down = WebhookNotifier::payload(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = WebhookNotifier::payload(Event::down("API", Some("boom")));
         assert_eq!(down.event, "down");
         assert_eq!(down.monitor, "API");
         assert_eq!(down.message, Some("boom"));

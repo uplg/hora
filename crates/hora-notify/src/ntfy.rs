@@ -160,15 +160,7 @@ mod tests {
         assert_eq!(push.title.as_bytes(), "Café ☕ recovered".as_bytes());
 
         // ...a line break does not: it would end the header, or the request.
-        let push = NtfyNotifier::message(Event::Down {
-            monitor: "API\r\nX-Injected: 1",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let push = NtfyNotifier::message(Event::down("API\r\nX-Injected: 1", Some("boom")));
         assert_eq!(push.title, FALLBACK_TITLE);
         assert!(push.body.starts_with("API\r\nX-Injected: 1 is DOWN\nboom"));
     }

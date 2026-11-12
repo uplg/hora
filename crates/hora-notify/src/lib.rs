@@ -225,6 +225,23 @@ pub enum Event<'a> {
     },
 }
 
+impl<'a> Event<'a> {
+    /// A plain down: no known cause, nothing downstream, no peer's verdict,
+    /// no event before it, seen as any down is.
+    #[must_use]
+    pub fn down(monitor: &'a str, error: Option<&'a str>) -> Self {
+        Self::Down {
+            monitor,
+            error,
+            cause: None,
+            impacted: &[],
+            vantage: None,
+            event: None,
+            local_only: false,
+        }
+    }
+}
+
 /// A delivery channel for [`Event`]s.
 #[async_trait]
 pub trait Notifier: Send + Sync {

@@ -129,15 +129,7 @@ mod tests {
 
     #[test]
     fn renders_subject_and_body() {
-        let (subject, body) = EmailNotifier::render(Event::Down {
-            monitor: "API",
-            error: Some("boom"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let (subject, body) = EmailNotifier::render(Event::down("API", Some("boom")));
         assert!(subject.contains("[DOWN]") && subject.contains("API"));
         assert!(body.contains("boom"));
 

@@ -434,15 +434,7 @@ async fn announce_verdict(
             dispatch(
                 notifier,
                 peer,
-                Event::Down {
-                    monitor: &peer.name,
-                    error: outcome.error.as_deref(),
-                    cause: None,
-                    impacted: &[],
-                    vantage: None,
-                    event: None,
-                    local_only: false,
-                },
+                Event::down(&peer.name, outcome.error.as_deref()),
             )
             .await;
             state.level = AlertLevel::Down;

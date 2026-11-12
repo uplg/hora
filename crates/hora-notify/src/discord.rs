@@ -245,15 +245,7 @@ mod tests {
 
     #[test]
     fn down_body_neutralises_backticks() {
-        let down = DiscordNotifier::embed(Event::Down {
-            monitor: "API",
-            error: Some("``` injection"),
-            cause: None,
-            impacted: &[],
-            vantage: None,
-            event: None,
-            local_only: false,
-        });
+        let down = DiscordNotifier::embed(Event::down("API", Some("``` injection")));
         let body = down.description.expect("down has a body");
         assert!(
             body.contains("''' injection"),

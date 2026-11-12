@@ -187,15 +187,10 @@ pub(crate) async fn test_alert(monitor_id: Option<&str>) -> Result<(), CliError>
         "Sending a test alert (down + recovered) as {name:?} to: {}",
         targeted.join(", ")
     );
-    let event = hora_core::notifications::Event::Down {
-        monitor: &name,
-        error: Some("test alert sent by `hora test-alert` - not a real incident"),
-        cause: None,
-        impacted: &[],
-        vantage: None,
-        event: None,
-        local_only: false,
-    };
+    let event = hora_core::notifications::Event::down(
+        &name,
+        Some("test alert sent by `hora test-alert` - not a real incident"),
+    );
     let mut failed = dispatcher.dispatch(event, notify.as_deref()).await;
     let failed_recovery = dispatcher
         .dispatch(
