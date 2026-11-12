@@ -1093,6 +1093,151 @@ mod tests {
         assert!(alerts(true, true).any());
     }
 
+    /// A monitor with a 99.9 % target, its channel a recording webhook, and
+    /// a way to write its checks at chosen minutes before now.
+    struct Burning {
+        store: Store,
+        notifier: Notifiers,
+        monitor: Monitor,
+        posts: crate::testing::Posts,
+        now: i64,
+    }
+
+    impl Burning {
+        async fn new() -> Self {
+            let (url, posts) = crate::testing::webhook_sink().await;
+            let config = Arc::new(
+                crate::config::parse(&format!(
+                    r#"
+                    [page]
+                    [server]
+                    [[channels]]
+                    name = "hook"
+                    type = "webhook"
+                    url = "{url}"
+                    [[monitors]]
+                    id = "api"
+                    name = "API"
+                    target = "https://example.com"
+                    interval_secs = 30
+                    slo_uptime = 99.9
+                    "#
+                ))
+                .expect("config"),
+            );
+            let client = crate::http::client(None).expect("client");
+            Self {
+                store: Store::in_memory().await,
+                notifier: crate::notifications::shared(&config, &client),
+                monitor: config.monitors[0].clone(),
+                posts,
+                now: chrono::Utc::now().timestamp(),
+            }
+        }
+
+        /// One check every 30 s over the last `hours`, down at the given
+        /// minutes before now, up otherwise.
+        async fn history(&self, hours: i64, down_at_minutes: &[i64]) {
+            sqlx::query("DELETE FROM checks")
+                .execute(self.store.sqlx())
+                .await
+                .unwrap();
+            for step in 1..=hours * 120 {
+                let ago = step * 30;
+                let down = down_at_minutes.contains(&(ago / 60)) && ago % 60 == 0;
+                sqlx::query("INSERT INTO checks (monitor_id, time, status) VALUES ('api', ?, ?)")
+                    .bind(self.now - ago)
+                    .bind(i64::from(!down))
+                    .execute(self.store.sqlx())
+                    .await
+                    .unwrap();
+            }
+        }
+
+        async fn evaluate(&self, state: &mut BurnAlerts) {
+            evaluate_burn(&self.store, &self.notifier, &self.monitor, 9990, state).await;
+        }
+
+        /// The `(event, window)` of every alert sent so far.
+        fn sent(&self) -> Vec<(String, String)> {
+            self.posts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|post| {
+                    (
+                        post["event"].as_str().unwrap_or_default().to_owned(),
+                        post["burn_window"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+                .collect()
+        }
+    }
+
+    /// The budget burning fast - an outage going on - pages once, on the
+    /// hour's figure, and is not repeated while it lasts; a spike that is
+    /// over (nothing down in the last five minutes) pages nobody.
+    #[tokio::test]
+    async fn a_fast_burn_pages_once_and_a_past_spike_does_not() {
+        let burning = Burning::new().await;
+        let fast = |alert: &str| (alert.to_owned(), "1h".to_owned());
+
+        // Down for the last ten minutes: the hour and its last five agree.
+        burning.history(6, &(1..=10).collect::<Vec<_>>()).await;
+        let mut state = BurnAlerts::default();
+        burning.evaluate(&mut state).await;
+        assert!(state.fast && state.slow, "a fast alert covers the slow one");
+        assert_eq!(burning.sent(), [fast("budget_burn")]);
+        burning.evaluate(&mut state).await;
+        assert_eq!(burning.sent().len(), 1, "said again while it lasts");
+
+        // The same ten minutes, forty minutes ago: the hour still burns, the
+        // last five minutes and the last thirty do not.
+        burning.history(6, &(40..=49).collect::<Vec<_>>()).await;
+        let mut state = BurnAlerts::default();
+        burning.evaluate(&mut state).await;
+        assert_eq!(state, BurnAlerts::default());
+        assert_eq!(burning.sent().len(), 1, "a spike that is over paged");
+    }
+
+    /// A slow leak - one failed check now and then - warns once on the six
+    /// hours' figure, and re-arms when the windows have cooled.
+    #[tokio::test]
+    async fn a_slow_burn_warns_once_and_re_arms_when_it_cools() {
+        let burning = Burning::new().await;
+        // About 1 % of failures: ten times the budget, under the fast
+        // threshold (14.4), over the slow one (6) - with one of them in the
+        // last half hour and none in the last five minutes.
+        let leak = [10, 100, 150, 200, 250, 300, 350];
+        burning.history(6, &leak).await;
+        let mut state = BurnAlerts::default();
+        burning.evaluate(&mut state).await;
+        assert!(state.slow && !state.fast);
+        assert_eq!(
+            burning.sent(),
+            [("budget_burn".to_owned(), "6h".to_owned())]
+        );
+        burning.evaluate(&mut state).await;
+        assert_eq!(burning.sent().len(), 1, "warned again while it lasts");
+
+        // The leak without its recent failure: six hours still burn, the
+        // last half hour does not. Nothing new, and the alert stays armed
+        // as sent (it re-arms on the six hours, not on the half hour).
+        burning.history(6, &leak[1..]).await;
+        burning.evaluate(&mut state).await;
+        assert!(state.slow);
+        assert_eq!(burning.sent().len(), 1);
+
+        // Cooled: nothing failed. Both are armed again, and the next leak
+        // warns anew.
+        burning.history(6, &[]).await;
+        burning.evaluate(&mut state).await;
+        assert_eq!(state, BurnAlerts::default());
+        burning.history(6, &leak).await;
+        burning.evaluate(&mut state).await;
+        assert_eq!(burning.sent().len(), 2);
+    }
+
     #[tokio::test]
     async fn a_recent_event_is_named_with_its_age() {
         let store = Store::in_memory().await;
