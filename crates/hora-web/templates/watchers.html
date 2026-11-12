@@ -33,7 +33,7 @@
 {%- if page.rows.is_empty() %}
 <p class="quiet-line">{% call m::glyph("none") %}{% endcall %}No peer shares its view of these services yet. Peers report what they watch too, once they can be asked (<code>/api/peer/monitors</code>).</p>
 {%- else %}
-<div class="tw panel table"><table class="mx">
+<div class="tw panel table" tabindex="0" role="region" aria-labelledby="lx"><table class="mx">
 <thead><tr><th scope="col">Service</th>{% for column in page.columns %}<th scope="col">{{ column }}</th>{% endfor %}</tr></thead>
 <tbody>
 {%- for row in page.rows %}

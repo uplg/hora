@@ -30,6 +30,7 @@
 	font-display: swap;
 }
 
+/* tokens:begin - generated from brand/tokens.json by brand/src/tokens.py, do not edit */
 :root {
 	/* dark: night ground, paper ink, bright petrol */
 	--sl-color-white: #f2f0ea;
@@ -148,6 +149,7 @@
 	--hora-owl-line: #1b222c;
 	--hora-blush: #e6a49a;
 }
+/* tokens:end */
 
 /* type: Fraunces for what you read first */
 h1#_top,

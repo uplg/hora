@@ -12,7 +12,8 @@ use hora_core::db::Incident;
 use hora_core::fmt::xml_escape;
 use hora_core::mesh::wire::{HealthReport, HealthStatus, PeerState};
 
-use crate::layout::{Chrome, display_state, ms, word};
+use crate::display::DisplayState;
+use crate::layout::{Chrome, ms};
 use crate::render::{OWL_PARTS as OWL, coord, owl};
 use crate::summary::Summary;
 
@@ -68,17 +69,10 @@ struct PeerLink {
     link: &'static str,
 }
 
-/// Seconds at a human size: `21 s`, `6 min`, `3 h`.
+/// An age at a human size: `21 s`, `6 min`, `3 h`, `3 d`
+/// ([`hora_core::fmt::elapsed`]; a clock skew cannot make it negative).
 fn ago(secs: i64) -> String {
-    if secs < 60 {
-        format!("{} s", secs.max(0))
-    } else if secs < 3600 {
-        format!("{} min", secs / 60)
-    } else if secs < 2 * 86_400 {
-        format!("{} h", secs / 3600)
-    } else {
-        format!("{} days", secs / 86_400)
-    }
+    hora_core::fmt::elapsed(secs.max(0).unsigned_abs())
 }
 
 // One flat assembly of the page's parts; splitting it would only scatter it.
@@ -105,6 +99,10 @@ pub(crate) fn build(
         (true, false) => "The database does not answer.".to_owned(),
         (false, false) => "Scheduler stalled and database not answering.".to_owned(),
     };
+    if !health.probes_ok {
+        self_detail
+            .push_str(" Checks are being skipped: this host is out of file descriptors or memory.");
+    }
     if pinged > 0 {
         let _ = write!(
             self_detail,
@@ -321,8 +319,16 @@ fn map(self_name: &str, healthy: bool, links: &[PeerLink]) -> String {
             }
         )
     };
+    // As tall as the fan of peers needs, no taller: one peer sits level with
+    // this node, and a fixed square left that drawing afloat in an empty card.
+    let reach = if count > 1 {
+        160.0 * std::f64::consts::FRAC_PI_3.sin()
+    } else {
+        0.0
+    };
+    let (top, height) = (CY - reach - 56.0, 2.0 * reach + 140.0);
     format!(
-        "<svg class=\"map\" viewBox=\"0 0 560 400\" role=\"img\" aria-label=\"{}\">\
+        "<svg class=\"map\" viewBox=\"0 {top:.0} 560 {height:.0}\" role=\"img\" aria-label=\"{}\">\
          {edges}\
          <g transform=\"translate({CX:.0} {CY:.0})\"><circle class=\"ring me\" r=\"34\"/>\
          <svg class=\"owl\" data-state=\"{}\" viewBox=\"6 6 40 40\" width=\"48\" height=\"48\" \
@@ -351,16 +357,18 @@ fn matrix(summary: &Summary) -> (Vec<String>, Vec<MatrixRow>, usize) {
         .iter()
         .filter(|monitor| !monitor.vantages.is_empty())
         .map(|monitor| {
-            let here = display_state(monitor.status.as_str());
+            let here = DisplayState::from(monitor.status);
             let here_cell = match here {
-                "up" | "degraded" => monitor
+                DisplayState::Up | DisplayState::Degraded => monitor
                     .p50_ms
                     .or(monitor.last_latency_ms)
-                    .map_or_else(|| word(here).to_owned(), ms),
-                "down" => "Down here".to_owned(),
-                _ => word(here).to_owned(),
+                    .map_or_else(|| here.word().to_owned(), ms),
+                DisplayState::Down => "Down here".to_owned(),
+                DisplayState::Maint | DisplayState::None => here.word().to_owned(),
             };
-            let mut cells = vec![(here, here_cell)];
+            // What each peer that watches it sees; `None` where one does not.
+            let mut seen: Vec<DisplayState> = Vec::new();
+            let mut cells = vec![(here.class(), here_cell)];
             for peer in &peers {
                 cells.push(
                     match monitor
@@ -369,21 +377,23 @@ fn matrix(summary: &Summary) -> (Vec<String>, Vec<MatrixRow>, usize) {
                         .find(|vantage| &vantage.peer == peer)
                     {
                         Some(vantage) => {
-                            let state = display_state(vantage.status.as_str());
-                            let text = match (state, vantage.p50_ms) {
-                                ("up" | "degraded", Some(latency)) => ms(latency),
-                                _ => word(state).to_owned(),
+                            let state = DisplayState::from(vantage.status);
+                            let text = match vantage.p50_ms {
+                                Some(latency) if state.answers() => ms(latency),
+                                _ => state.word().to_owned(),
                             };
-                            (state, text)
+                            seen.push(state);
+                            (state.class(), text)
                         }
-                        None => ("none", "Not watched there".to_owned()),
+                        None => (DisplayState::None.class(), "Not watched there".to_owned()),
                     },
                 );
             }
-            let disagree = cells
+            // A peer without data takes no side.
+            let disagree = seen
                 .iter()
-                .filter(|(state, _)| *state != "none")
-                .any(|(state, _)| (*state == "down") != (here == "down"));
+                .filter(|state| **state != DisplayState::None)
+                .any(|state| (*state == DisplayState::Down) != (here == DisplayState::Down));
             MatrixRow {
                 name: monitor.name.clone(),
                 disagree,
@@ -408,6 +418,6 @@ mod tests {
         assert_eq!(ago(21), "21 s");
         assert_eq!(ago(360), "6 min");
         assert_eq!(ago(7200), "2 h");
-        assert_eq!(ago(3 * 86_400), "3 days");
+        assert_eq!(ago(3 * 86_400), "3 d");
     }
 }

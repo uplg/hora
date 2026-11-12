@@ -40,7 +40,6 @@ skip = [
     { crate = "hashbrown" },
     { crate = "thiserror" },
     { crate = "thiserror-impl" },
-    { crate = "windows-sys" },
     # lettre (email parsing) pulls nom 8 while x509-parser is still on nom 7.
     { crate = "nom" },
     # hickory-resolver 0.26 (DNS monitors) is on rand 0.10 / getrandom 0.4 /
@@ -66,11 +65,7 @@ skip = [
     # and x509-parser still pull 0.22.
     { crate = "base64" },
 ]
-# Windows-only: the two windows-sys majors each pin their own windows-targets,
-# which fans out into one shim crate per architecture - skip the whole subtree
-# rather than naming every windows_<arch>_<abi> twin.
 skip-tree = [
-    { crate = "windows-targets" },
     # We use sha2 0.11 (cert pinning) for its fixes going forward; sqlx still
     # pins the 0.10 line.
     { crate = "sha2" },

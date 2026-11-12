@@ -6,8 +6,7 @@
 <title>{% block title %}{{ chrome.site }}{% endblock %}</title>
 <meta name="description" content="{% block description %}Live status of {{ chrome.site }}.{% endblock %}">
 <meta name="color-scheme" content="{{ chrome.scheme()|safe }}">
-<meta name="theme-color" content="#F2F0EA" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#151A21" media="(prefers-color-scheme: dark)">
+{{ chrome.theme_color()|safe }}
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v={{ chrome.v }}">
 <link rel="manifest" href="/manifest.webmanifest">

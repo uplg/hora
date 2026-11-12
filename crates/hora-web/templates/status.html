@@ -26,7 +26,7 @@ target = "https://example.com"</pre>
   <div class="door">
     <div class="side">
       <svg class="trail" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true" focusable="false"><circle cx="200" cy="200" r="150" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="2 10" stroke-linecap="round"/><path d="M200 38v18M200 344v18M38 200h18M344 200h18M281 60l-9 15.6M128 324.4l-9 15.6M340 119l-15.6 9M75.6 272l-15.6 9M340 281l-15.6-9M75.6 128 60 119M281 340l-9-15.6M128 75.6 119 60" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
-      <div class="id"><img src="/assets/mark.svg?v={{ chrome.v }}" alt="" width="88" height="88"><p class="name">Hora</p><p class="promise-line">Hora keeps the hours, so you can sleep.</p></div>
+      <div class="id"><img src="/assets/mark.svg?v={{ chrome.v }}" alt="" width="88" height="88"><p class="name"><svg class="wm" viewBox="0 0 89 26" role="img" aria-label="Hora"><use href="#w-hora"/></svg></p><p class="promise-line">Hora keeps the hours, so you can sleep.</p></div>
     </div>
     <div class="content"><form method="get" action="">
       <p class="eyebrow">{% call m::icon("lock") %}{% endcall %} {{ page.summary.title }} · status</p>
@@ -41,7 +41,7 @@ target = "https://example.com"</pre>
       </div>
       {{ chrome.theme_input()|safe }}
       <button class="btn primary big" type="submit">Open the page</button>
-      <p class="aside">Running Hora? The viewer token is <code>server.auth_token</code> in <code>config.toml</code>; a group's page also opens with its <code>[server.group_tokens]</code> entry.</p>
+      <p class="aside">Running Hora? The viewer token is <code>server.view_token</code> (or the operator's <code>server.auth_token</code>) in <code>config.toml</code>; a group's page also opens with its <code>[server.group_tokens]</code> entry.</p>
     </form></div>
   </div>
 </section>
@@ -62,7 +62,7 @@ target = "https://example.com"</pre>
     {%- if let Some(window) = page.window %}
     <div class="window">
       <div class="ends"><span>{{ window.start }}</span><span>{{ window.progress }}</span><span>{{ window.end }}</span></div>
-      <div role="progressbar" aria-label="Maintenance window, {{ window.progress }}">{{ window.meter|safe }}</div>
+      <div role="progressbar" aria-label="Maintenance window" aria-valuemin="0" aria-valuemax="{{ window.length }}" aria-valuenow="{{ window.done }}" aria-valuetext="{{ window.progress }}">{{ window.meter|safe }}</div>
     </div>
     {%- endif %}
   </div>
@@ -77,17 +77,17 @@ target = "https://example.com"</pre>
 </section>
 
 {%- for note in page.maintenances %}
-<div class="callout maint" role="note">{% call m::glyph("maint") %}{% endcall %}<p class="k">{{ note.title }}</p><p>{{ note.body }}</p></div>
+<div class="callout maint" role="note">{% call m::glyph("maint") %}{% endcall %}<p class="k">{{ note.title }}</p><p>{{ note.body }}</p>{% if let Some(when) = note.when %}<p class="when">{{ when }}</p>{% endif %}</div>
 {%- endfor %}
 {%- if let Some(note) = page.next %}
-<div class="callout info" role="note" id="next">{% call m::glyph("info") %}{% endcall %}<p class="k">{{ note.title }}</p><p>{{ note.body }}</p></div>
+<div class="callout info" role="note" id="next">{% call m::glyph("info") %}{% endcall %}<p class="k">{{ note.title }}</p><p>{{ note.body }}</p>{% if let Some(when) = note.when %}<p class="when">{{ when }}</p>{% endif %}</div>
 {%- endif %}
 
 {%- if let Some(local) = page.local %}
 <div class="callout info" role="note" id="local">{% call m::glyph("info") %}{% endcall %}<p class="k">Not an outage</p><p>{{ local.sentence }}</p></div>
 {%- if page.operator %}
 <details class="why" open>
-<summary><svg class="chev" aria-hidden="true"><use href="#i-chev"/></svg><h2>Why nobody was woken</h2><span class="tag">Operators only · hidden from the public page</span></summary>
+<summary><svg class="chev" aria-hidden="true"><use href="#i-chev"/></svg><h2>Why this is not an outage</h2><span class="tag">Operators only · hidden from the public page</span></summary>
 <div class="why-in">
 {%- for detail in local.monitors %}
   <div>
@@ -149,9 +149,9 @@ target = "https://example.com"</pre>
   <div class="group-head"><h3 id="g{{ loop.index }}">{% if !group.href.is_empty() && !page.group_page %}<a class="ink" href="{{ group.href }}{{ chrome.q()|safe }}">{{ group.name }}</a>{% else %}{{ group.name }}{% endif %}</h3><span class="fact">{{ group.fact }}</span></div>
   <ul class="list">
   {%- for row in group.rows %}
-    <li><div class="row {{ row.state }}">{% call m::glyph(row.state) %}{% endcall %}<a class="name" href="/monitor/{{ row.href_id }}{{ chrome.q()|safe }}">{{ row.m.name }}</a><span class="state"><span class="word {{ row.state }}">{{ row.word }}</span>{% if !row.detail.is_empty() %} <span class="muted">· {{ row.detail }}</span>{% endif %}</span>
+    <li><div class="row {{ row.state }}">{% call m::glyph(row.state) %}{% endcall %}<a class="name" href="/monitor/{{ row.href_id }}{{ chrome.q()|safe }}">{{ row.m.name }}<span class="vh">. {{ row.bar_label }}</span></a><span class="state"><span class="word {{ row.state }}">{{ row.word }}</span>{% if !row.detail.is_empty() %} <span class="muted">· {{ row.detail }}</span>{% endif %}</span>
     {%- if let Some(why) = row.why %}<span class="why">{{ why }}</span>{% endif %}
-    <a class="bar" href="/monitor/{{ row.href_id }}{{ chrome.q()|safe }}" aria-label="{{ row.bar_label }}">{{ row.bar|safe }}</a></div></li>
+    <a class="bar" href="/monitor/{{ row.href_id }}{{ chrome.q()|safe }}" tabindex="-1" aria-hidden="true">{{ row.bar|safe }}</a></div></li>
   {%- endfor %}
   </ul>
   <div class="bar-legend" aria-hidden="true"><span class="dall">{{ page.days }} days ago</span><span class="d30">30 days ago</span><span>Today</span></div>
@@ -159,7 +159,7 @@ target = "https://example.com"</pre>
 {%- endfor %}
 </div>
 <details class="under"><summary class="btn quiet">How to read the bars</summary>
-<div class="legend" aria-label="How to read the bars">
+<div class="legend" role="group" aria-label="How to read the bars">
 <span><svg class="cell" viewBox="0 0 4 29" aria-hidden="true"><rect class="u" width="4" height="22"/></svg>Up all day</span>
 <span><svg class="cell" viewBox="0 0 4 29" aria-hidden="true"><rect class="d" y="7" width="4" height="15"/></svg>Slow at times (shorter)</span>
 <span><svg class="cell" viewBox="0 0 4 29" aria-hidden="true"><rect class="x" width="4" height="29"/></svg>Outage (drops below the line)</span>

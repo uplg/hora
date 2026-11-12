@@ -146,7 +146,7 @@ mod tests {
             monitor: "API",
             secs_left: 3 * 86_400,
         });
-        assert!(cert.contains("expires in 3 days"));
+        assert!(cert.contains("expires in 3 d"));
 
         // Same line structure as every other channel (was "degraded: unreachable…").
         let partition = MatrixNotifier::render(Event::PeerLinkDegraded {

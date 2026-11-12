@@ -53,14 +53,10 @@ impl Cadence {
     }
 }
 
-/// A cron grace as configured: `30m`, `2h`, `20s`, `1m 30s` - whole minutes
-/// alone would read "0m grace" for a 20-second one.
+/// A cron grace as a span: `30 min`, `2 h`, `20 s`, `1 min 30 s` - whole
+/// minutes alone would read "0 min grace" for a 20-second one.
 fn grace_phrase(secs: u64) -> String {
-    match secs {
-        3_600.. if secs.is_multiple_of(3_600) => format!("{}h", secs / 3_600),
-        60.. if secs.is_multiple_of(60) => format!("{}m", secs / 60),
-        _ => crate::fmt::duration(i64::try_from(secs).unwrap_or(i64::MAX)),
-    }
+    crate::fmt::duration(i64::try_from(secs).unwrap_or(i64::MAX))
 }
 
 /// A push monitor's heartbeat expectations, resolved once per task.
@@ -218,7 +214,8 @@ fn judge_heartbeat(
 }
 
 /// Evaluate a heartbeat-driven monitor (push monitor or peer watch) from the
-/// stored pings for `id`: down (and recorded as a miss) when overdue, else the
+/// stored pings for `id`: down (and recorded as a miss, once per
+/// `record_every` seconds; 0 records every time) when overdue, else the
 /// latest heartbeat's own status. `None` means nothing to react to yet (never
 /// pinged and not yet late, or a read error).
 ///
@@ -231,6 +228,7 @@ pub(crate) async fn heartbeat_outcome_for(
     id: &str,
     cadence: &Cadence,
     expected_since: i64,
+    record_every: i64,
     now: i64,
 ) -> Option<Outcome> {
     let last = match db::last_heartbeat(store, id).await {
@@ -245,8 +243,20 @@ pub(crate) async fn heartbeat_outcome_for(
         HeartbeatVerdict::OnTime(outcome) => Some(outcome),
         HeartbeatVerdict::Overdue(kind, reason) => {
             // Recorded so the page and history show it; marked as a miss so it
-            // never reads as a heartbeat (or as the job's own down).
-            if let Err(err) = db::insert_heartbeat_miss(store, id, kind, &reason).await {
+            // never reads as a heartbeat (or as the job's own down). At most
+            // one row per `record_every`: the monitor is looked at far more
+            // often than its heartbeat is due, and availability counts rows -
+            // a nightly job that missed one night must weigh one check, not
+            // the 1 440 looks of that day.
+            let recorded_lately = record_every > 0
+                && db::last_check_time(store, id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|last| now - last < record_every);
+            if !recorded_lately
+                && let Err(err) = db::insert_heartbeat_miss(store, id, kind, &reason).await
+            {
                 error!(monitor = %id, "failed to record heartbeat miss: {err:#}");
             }
             Some(Outcome::down(kind, reason))
@@ -260,11 +270,11 @@ mod tests {
 
     #[test]
     fn the_grace_reads_as_configured() {
-        assert_eq!(grace_phrase(20), "20s");
-        assert_eq!(grace_phrase(90), "1m 30s");
-        assert_eq!(grace_phrase(1_800), "30m");
-        assert_eq!(grace_phrase(5_400), "90m");
-        assert_eq!(grace_phrase(7_200), "2h");
+        assert_eq!(grace_phrase(20), "20 s");
+        assert_eq!(grace_phrase(90), "1 min 30 s");
+        assert_eq!(grace_phrase(1_800), "30 min");
+        assert_eq!(grace_phrase(5_400), "1 h 30 min");
+        assert_eq!(grace_phrase(7_200), "2 h");
     }
 
     fn beat(time: i64, status: CheckStatus, error: Option<&str>) -> db::Heartbeat {
@@ -453,7 +463,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let outcome = heartbeat_outcome_for(&store, "job", &Cadence::Every(60), now, now)
+        let outcome = heartbeat_outcome_for(&store, "job", &Cadence::Every(60), now, 0, now)
             .await
             .expect("an outcome");
         assert!(!outcome.is_up());
@@ -462,14 +472,46 @@ mod tests {
         assert_eq!(db::recent_checks(&store, "job", 10).await.unwrap().len(), 1);
 
         // Never pinged and past its first window: a recorded miss.
-        let outcome = heartbeat_outcome_for(&store, "silent", &Cadence::Every(60), now - 120, now)
-            .await
-            .expect("an outcome");
+        let outcome =
+            heartbeat_outcome_for(&store, "silent", &Cadence::Every(60), now - 120, 0, now)
+                .await
+                .expect("an outcome");
         assert_eq!(outcome.error.as_deref(), Some("no heartbeat received yet"));
         let rows = db::recent_checks(&store, "silent", 10).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, CheckStatus::Down);
         // And that miss is not a heartbeat: still never pinged.
         assert_eq!(db::last_heartbeat(&store, "silent").await.unwrap(), None);
+    }
+
+    /// A push monitor is looked at every minute but its miss weighs one check
+    /// per interval: a nightly job that skipped one night must not fill the
+    /// day with down rows and sink its availability.
+    #[tokio::test]
+    async fn an_overdue_heartbeat_is_recorded_once_per_interval() {
+        let store = Store::in_memory().await;
+        let now = chrono::Utc::now().timestamp();
+        let rows = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM checks WHERE monitor_id = 'nightly'")
+                .fetch_one(store.sqlx())
+                .await
+                .unwrap()
+        };
+        let day = 86_400;
+        let cadence = Cadence::Every(90_000);
+        // Never pinged, expected for two days: overdue at every look...
+        for _ in 0..5 {
+            let outcome =
+                heartbeat_outcome_for(&store, "nightly", &cadence, now - 2 * day, day, now)
+                    .await
+                    .expect("an outcome");
+            assert!(!outcome.is_up());
+            assert!(outcome.reason.is_some_and(FailureKind::is_missed_heartbeat));
+        }
+        // ...and one row says so for the whole interval.
+        assert_eq!(rows().await, 1);
+        // Recording every time is still what a peer watch asks for.
+        heartbeat_outcome_for(&store, "nightly", &cadence, now - 2 * day, 0, now).await;
+        assert_eq!(rows().await, 1, "same second: the row is already there");
     }
 }

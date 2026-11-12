@@ -64,7 +64,7 @@ pub(crate) async fn tune(args: &[String]) -> Result<(), CliError> {
             group: monitor.group.as_deref(),
             kind: monitor.kind().as_str(),
             interval_secs: monitor.interval_secs,
-            current_threshold: config.alerts.fail_threshold,
+            current_threshold: config.fail_threshold(&monitor.id),
             current_degraded_over_ms: monitor.degraded_over_ms,
         };
         let tuning = hora_core::tune::analyze(&ctx, &samples);
@@ -95,7 +95,12 @@ pub(crate) async fn tune(args: &[String]) -> Result<(), CliError> {
 
 /// Render one monitor's tuning block (see [`hora_core::tune`] for the model).
 fn print_tuning(t: &hora_core::tune::MonitorTuning) {
-    println!("{}  ({}, every {}s)", t.name, t.kind, t.interval_secs);
+    println!(
+        "{}  ({}, every {})",
+        t.name,
+        t.kind,
+        fmt::duration(i64::try_from(t.interval_secs).unwrap_or(i64::MAX))
+    );
 
     let window = t.window.map_or_else(String::new, |(first, last)| {
         format!("{} -> {}, ", fmt::utc(first), fmt::utc(last))
@@ -160,6 +165,7 @@ fn print_threshold_advice(t: &hora_core::tune::MonitorTuning) {
                 "  -> every failure was a single-check blip; raise fail_threshold to 2 so a \
                  one-off never pages"
             );
+            println!("{}", apply_hint(&t.id, 2));
         } else {
             println!(
                 "  -> only single-check blips ({}) occurred; fail_threshold {} filtered them all \
@@ -178,6 +184,7 @@ fn print_threshold_advice(t: &hora_core::tune::MonitorTuning) {
              lower it to {longest} or less to catch real outages",
             t.current_threshold
         );
+        println!("{}", apply_hint(&t.id, longest));
         return;
     }
 
@@ -211,6 +218,7 @@ fn print_threshold_advice(t: &hora_core::tune::MonitorTuning) {
                 t.current_alerts,
                 fmt::duration(delay)
             );
+            println!("{}", apply_hint(&t.id, rec));
         }
         std::cmp::Ordering::Less => {
             let saved = i64::from(t.current_threshold - rec).saturating_mul(interval);
@@ -220,8 +228,19 @@ fn print_threshold_advice(t: &hora_core::tune::MonitorTuning) {
                 fmt::duration(saved),
                 t.current_threshold
             );
+            println!("{}", apply_hint(&t.id, rec));
         }
     }
+}
+
+/// Where a recommended threshold goes: the recommendation is this monitor's,
+/// drawn from its own history, so it is set on the monitor rather than in
+/// `[alerts]`, where it would change every other monitor too.
+fn apply_hint(id: &str, threshold: u32) -> String {
+    format!(
+        "     to apply: fail_threshold = {threshold} in the [[monitors]] entry with id = \"{id}\" \
+         (this monitor only; [alerts] fail_threshold is the default of the others)"
+    )
 }
 
 /// The one-line `degraded_over_ms` recommendation from the latency spread.
@@ -230,7 +249,7 @@ fn print_degraded_advice(t: &hora_core::tune::MonitorTuning) {
         return;
     };
     println!(
-        "  latency, up checks: p50 {}ms  p95 {}ms  p99 {}ms  max {}ms{}",
+        "  latency, up checks: p50 {} ms  p95 {} ms  p99 {} ms  max {} ms{}",
         stats.p50,
         stats.p95,
         stats.p99,
@@ -246,13 +265,13 @@ fn print_degraded_advice(t: &hora_core::tune::MonitorTuning) {
             let pct = percent(flagged, stats.count);
             if current < stats.p95 {
                 println!(
-                    "    {current}ms flags {flagged} of {} up checks ({pct}%) - that is normal \
-                     traffic; recommend degraded_over_ms {rec} (~p99, ~1%)",
+                    "    {current} ms flags {flagged} of {} up checks ({pct} %) - that is normal \
+                     traffic; recommend degraded_over_ms {rec} (~p99, ~1 %)",
                     stats.count
                 );
             } else {
                 println!(
-                    "    {current}ms flags {flagged} of {} up checks ({pct}%); ~p99 is {rec}ms",
+                    "    {current} ms flags {flagged} of {} up checks ({pct} %); ~p99 is {rec} ms",
                     stats.count
                 );
             }
@@ -271,4 +290,21 @@ fn percent(part: usize, whole: usize) -> String {
     }
     let tenths = (part * 1000 + whole / 2) / whole;
     format!("{}.{}", tenths / 10, tenths % 10)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_hint;
+
+    /// A recommendation is one monitor's: the hint names the per-monitor
+    /// key and the monitor, not the global setting alone.
+    #[test]
+    fn a_recommended_threshold_says_where_to_set_it() {
+        let hint = apply_hint("api", 2);
+        assert!(hint.contains("fail_threshold = 2"), "{hint}");
+        assert!(
+            hint.contains("[[monitors]] entry with id = \"api\""),
+            "{hint}"
+        );
+    }
 }

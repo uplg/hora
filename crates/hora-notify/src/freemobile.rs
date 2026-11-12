@@ -94,7 +94,7 @@ mod tests {
             monitor: "API",
             secs_left: 3 * 86_400,
         });
-        assert!(cert.contains("expires in 3 days"));
+        assert!(cert.contains("expires in 3 d"));
         // No emoji, to keep the SMS in the cheaper GSM-7 encoding.
         assert!(down.is_ascii() && recovered.is_ascii() && cert.is_ascii());
     }

@@ -53,9 +53,9 @@ it.* on the upstream itself.
 **From several places**: with [peers](../peers/), a down that only this
 node sees, while every peer reaches the target, is a network problem near
 this node, not an outage. The page shows the service as *Up* with a calm
-*Not an outage* notice, and the monitor's channels are not paged (only
-`alerts.notify_unconfirmed`, if set; see
-[local-only downs](../peers/#local-only-downs)). A down the peers confirm
+*Not an outage* notice. The alert is flagged as seen from this node only,
+and goes to `alerts.notify_unconfirmed` instead of the monitor's channels
+when that is set (see [local-only downs](../peers/#local-only-downs)). A down the peers confirm
 says where it was seen from.
 
 Failure reasons are reduced to a safe category for visitors (*HTTP 500*,
@@ -100,9 +100,9 @@ With the operator token (`server.auth_token`), the same page also shows:
   endpoints answer 404, exactly like an id that does not exist.
 - **Full failure detail** on every monitor, and the captured response of
   the last failure in the history.
-- **Why nobody was woken**: for a down seen from this node only, who saw
+- **Why this is not an outage**: for a down seen from this node only, who saw
   what, place by place, and where such a down goes with your config (the
-  quiet channels, or nowhere).
+  monitor's channels, the quiet ones, or nowhere).
 - **The watched peers**, with when each was last heard from, and the
   **Watchers** page (`/watchers`): this node's view of its peers, the last
   30 days of confirmations, each shared service from each place.
@@ -120,6 +120,13 @@ private; it ends up in browser history. Scripts should send
 A [group token](../multi-tenant/#group-tokens) sits in between: it reveals
 everything about one group on `/status/{group}`, and nothing about the
 others.
+
+The **read-only token** (`server.view_token`) is the one for a wall display
+or a colleague: it shows the private monitors and the full failure detail of
+every monitor, like the operator token, but not the rest of this list (no
+*Why this is not an outage*, peers, event markers or channel health), and no
+write endpoint accepts it. A `?token=` URL that leaks then shows a page; it
+cannot mute an alert.
 
 ## Other pages
 
@@ -152,17 +159,17 @@ Saturday 3 October, 14:40 UTC
 
 Pelican
 -------
-  ● Website      Up             100.0%      64ms
-  ● Web app      Up              99.9%      88ms
-  ● Public API   Up              99.9%     112ms
-  ● Mobile sync  Up             100.0%      71ms
+  ● Website      Up            100.0 %     64 ms
+  ● Web app      Up             99.9 %     88 ms
+  ● Public API   Up             99.9 %    112 ms
+  ● Mobile sync  Up            100.0 %     71 ms
 
 Payments and email
 ------------------
-  ◆ Card payments   Down            97.3%         -
-  ● Bank transfers  Up             100.0%     210ms
-  ◐ Invoice emails  Slow           100.0%    1820ms
-  ● Webhooks        Up             100.0%      95ms
+  ◆ Card payments   Down           97.3 %         -
+  ● Bank transfers  Up            100.0 %    210 ms
+  ◐ Invoice emails  Slow          100.0 %   1820 ms
+  ● Webhooks        Up            100.0 %     95 ms
 ```
 
 Each line has the state's shape and its word (`●` up, `◐` slow, `◆` down,
@@ -188,7 +195,9 @@ Caddy, nginx or Cloudflare. Two settings matter there:
 - **`server.client_ip_header`**: every page is rate-limited per client IP.
   Without this setting, every visitor shares the proxy's address and its
   bucket. Set it to the header your proxy writes (`x-real-ip`, or
-  `cf-connecting-ip` behind Cloudflare). See
+  `cf-connecting-ip` behind Cloudflare). With `x-forwarded-for`, a list,
+  Hora reads the entry your proxy appended (the last one); set
+  `server.trusted_proxies = 2` when two of your proxies append. See
   [Rate limiting](../../reference/api/#rate-limiting--security-headers).
 - **HSTS** belongs to the proxy that terminates TLS.
 

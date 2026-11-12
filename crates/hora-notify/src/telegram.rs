@@ -130,14 +130,14 @@ mod tests {
             latency_ms: Some(1234),
             detail: Some("disk 91% full"),
         });
-        assert!(degraded.contains("slow") && degraded.contains("1234ms"));
+        assert!(degraded.contains("slow") && degraded.contains("1234 ms"));
         assert!(degraded.contains("disk 91% full"), "{degraded}");
 
         let cert = TelegramNotifier::render(Event::CertExpiring {
             monitor: "API",
             secs_left: 3 * 86_400,
         });
-        assert!(cert.contains("expires in 3 days"));
+        assert!(cert.contains("expires in 3 d"));
 
         let partition = TelegramNotifier::render(Event::PeerLinkDegraded {
             peer: "Hora B",

@@ -32,14 +32,14 @@
 
   <h2>Timeline</h2>
   <ol class="tl">
-    <li>{% call m::glyph("down") %}{% endcall %}<time>{{ row.started_short }}</time><span class="e"><b>Down</b><span>{% if let Some((_, verdict)) = row.verdict %}{{ verdict }}{% else %}Several failures in a row: Hora retries a single failure before it records anything.{% endif %}</span></span></li>
+    <li>{% call m::glyph("down") %}{% endcall %}<time datetime="{{ row.started_iso }}">{{ row.started_short }}</time><span class="e"><b>Down</b><span>{% if let Some((_, verdict)) = row.verdict %}{{ verdict }}{% else %}Several failures in a row: Hora retries a single failure before it records anything.{% endif %}</span></span></li>
     {%- if let Some(event) = row.event %}
-    <li>{% call m::glyph("info") %}{% endcall %}<time>{{ row.started_short }}</time><span class="e"><b>Recent change</b><span>{{ event }}</span></span></li>
+    <li>{% call m::glyph("info") %}{% endcall %}<time datetime="{{ row.started_iso }}">{{ row.started_short }}</time><span class="e"><b>Recent change</b><span>{{ event }}</span></span></li>
     {%- endif %}
     {%- if let Some(ended) = row.ended_short %}
-    <li>{% call m::glyph("up") %}{% endcall %}<time>{{ ended }}</time><span class="e"><b>Up again</b><span>{% if let Some(length) = row.length %}Down for {{ length }}.{% endif %}</span></span></li>
+    <li>{% call m::glyph("up") %}{% endcall %}<time{% if let Some(at) = row.ended_iso %} datetime="{{ at }}"{% endif %}>{{ ended }}</time><span class="e"><b>Up again</b><span>{% if let Some(length) = row.length %}Down for {{ length }}.{% endif %}</span></span></li>
     {%- else %}
-    <li>{% call m::glyph("degraded") %}{% endcall %}<time>Now</time><span class="e"><b>Still down</b><span>This page updates when it answers again.</span></span></li>
+    <li>{% call m::glyph("degraded") %}{% endcall %}<time datetime="{{ row.now_iso }}">Now</time><span class="e"><b>Still down</b><span>This page updates when it answers again.</span></span></li>
     {%- endif %}
   </ol>
 

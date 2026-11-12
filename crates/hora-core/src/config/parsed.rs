@@ -235,3 +235,233 @@ impl ParseField for DnsRecord {
             .ok_or_else(|| format!("unsupported dns_record type {raw:?}"))
     }
 }
+
+/// `expected_status` as the file spells it: one entry or a list of them.
+///
+/// One key rather than a second `expected_statuses` beside it: two keys
+/// would need a rule for a file that sets both, and a list of one would mean
+/// the same as the scalar under another name. Widening the existing key keeps
+/// every file that loads today loading, and `expected_status = 200` means
+/// what it always did.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawStatuses {
+    One(RawStatus),
+    Many(Vec<RawStatus>),
+}
+
+/// One `expected_status` entry: a status (`401`) or a class (`"2xx"`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RawStatus {
+    Code(i64),
+    Class(String),
+}
+
+/// One accepted status or class of statuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusMatch {
+    /// A whole class, by its hundreds digit (`2` for `2xx`).
+    Class(u16),
+    Code(u16),
+}
+
+impl StatusMatch {
+    fn first(self) -> u16 {
+        match self {
+            Self::Class(class) => class * 100,
+            Self::Code(code) => code,
+        }
+    }
+
+    fn matches(self, status: u16) -> bool {
+        match self {
+            Self::Class(class) => status / 100 == class,
+            Self::Code(code) => status == code,
+        }
+    }
+}
+
+/// The statuses an HTTP monitor accepts as up, when it says so
+/// (`expected_status`): statuses and classes, in one canonical form.
+///
+/// Canonical means sorted, without repeats, and without a status its own
+/// class already covers, so `[401, 200]`, `[200, 401, 200]` and - for a
+/// single one - `200` and `[200]` are the same value: the same check, the
+/// same fingerprint between peers, no monitor restart on a reload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedStatus(Vec<StatusMatch>);
+
+impl ExpectedStatus {
+    /// Exactly this status, for values built outside a config file (tests).
+    #[must_use]
+    pub fn code(status: u16) -> Self {
+        Self(vec![StatusMatch::Code(status)])
+    }
+
+    /// From the file's value.
+    ///
+    /// # Errors
+    ///
+    /// A reason (validation prefixes the monitor) for an entry that is
+    /// neither an HTTP status nor a class, or for an empty list - which no
+    /// answer could satisfy.
+    pub(crate) fn from_raw(raw: &RawStatuses) -> Result<Self, String> {
+        let entries = match raw {
+            RawStatuses::One(entry) => std::slice::from_ref(entry),
+            RawStatuses::Many(entries) => entries.as_slice(),
+        };
+        if entries.is_empty() {
+            return Err("expected_status lists no status: no answer could be up".to_owned());
+        }
+        let parsed = entries
+            .iter()
+            .map(|entry| match entry {
+                RawStatus::Code(code) => u16::try_from(*code)
+                    .ok()
+                    .filter(|code| (100..=599).contains(code))
+                    .map(StatusMatch::Code)
+                    // No server answers outside 100-599, so such an entry
+                    // could never match.
+                    .ok_or_else(|| {
+                        format!("expected_status {code} is not an HTTP status (100-599)")
+                    }),
+                RawStatus::Class(text) => Self::class(text).ok_or_else(|| {
+                    format!(
+                        "expected_status {text:?} is not a status class (\"1xx\" to \"5xx\"); \
+                         a single status is a number, without quotes"
+                    )
+                }),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::canonical(parsed))
+    }
+
+    /// From a command-line value: entries separated by commas (`200,401`,
+    /// `2xx,401`).
+    ///
+    /// # Errors
+    ///
+    /// As for a config value.
+    pub fn parse_list(text: &str) -> Result<Self, String> {
+        let entries = text
+            .split(',')
+            .map(str::trim)
+            .map(|entry| {
+                entry
+                    .parse()
+                    .map_or_else(|_| RawStatus::Class(entry.to_owned()), RawStatus::Code)
+            })
+            .collect();
+        Self::from_raw(&RawStatuses::Many(entries))
+    }
+
+    /// `"2xx"` (in either case) as a class.
+    fn class(text: &str) -> Option<StatusMatch> {
+        let class = match text.to_ascii_lowercase().as_str() {
+            "1xx" => 1,
+            "2xx" => 2,
+            "3xx" => 3,
+            "4xx" => 4,
+            "5xx" => 5,
+            _ => return None,
+        };
+        Some(StatusMatch::Class(class))
+    }
+
+    fn canonical(mut entries: Vec<StatusMatch>) -> Self {
+        let classes: Vec<StatusMatch> = entries
+            .iter()
+            .copied()
+            .filter(|entry| matches!(entry, StatusMatch::Class(_)))
+            .collect();
+        entries.retain(|entry| match *entry {
+            StatusMatch::Class(_) => true,
+            StatusMatch::Code(code) => !classes.iter().any(|class| class.matches(code)),
+        });
+        // By the first status each accepts. Two entries now share one only
+        // when they are the same entry twice, which the sort puts side by
+        // side.
+        entries.sort_unstable_by_key(|entry| entry.first());
+        entries.dedup();
+        Self(entries)
+    }
+
+    /// Whether an answer with this status is up.
+    #[must_use]
+    pub fn matches(&self, status: u16) -> bool {
+        self.0.iter().any(|entry| entry.matches(status))
+    }
+
+    /// Whether a redirect (any 3xx) is among the accepted answers.
+    #[must_use]
+    pub fn accepts_redirect(&self) -> bool {
+        self.0.iter().any(|entry| entry.first() / 100 == 3)
+    }
+}
+
+/// The canonical form, entries separated by commas (`200,401`, `2xx,401`):
+/// what peers compare, and what a failure reason may quote.
+impl std::fmt::Display for ExpectedStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, entry) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str(",")?;
+            }
+            match entry {
+                StatusMatch::Class(class) => write!(f, "{class}xx")?,
+                StatusMatch::Code(code) => write!(f, "{code}")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The request an HTTP monitor sends (`method`): `GET` unless it says `HEAD`.
+///
+/// Only the two methods that carry no request body: Hora has no setting for
+/// one, and a `POST` or `PUT` without a body is a request few services are
+/// meant to answer. It would also raise a question redirects do not have to
+/// answer today (a 301, 302 or 303 turns a `POST` into a `GET`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HttpMethod {
+    #[default]
+    Get,
+    /// Headers only: the cheapest check of a large page or a download, and
+    /// the one for an endpoint that counts its `GET`s.
+    Head,
+}
+
+impl HttpMethod {
+    /// Uppercase, as HTTP spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+        }
+    }
+}
+
+impl ParseField for HttpMethod {
+    fn parse_field(raw: &str) -> Result<Self, String> {
+        [Self::Get, Self::Head]
+            .into_iter()
+            .find(|method| method.as_str().eq_ignore_ascii_case(raw.trim()))
+            .ok_or_else(|| {
+                format!(
+                    "method {raw:?} is not supported: \"GET\" or \"HEAD\" (Hora sends no \
+                     request body)"
+                )
+            })
+    }
+}
+
+impl From<HttpMethod> for reqwest::Method {
+    fn from(method: HttpMethod) -> Self {
+        match method {
+            HttpMethod::Get => Self::GET,
+            HttpMethod::Head => Self::HEAD,
+        }
+    }
+}

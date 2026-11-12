@@ -1,0 +1,141 @@
+//! A check that could not run because *this host* is out of something - file
+//! descriptors, socket buffers, memory - says nothing about its target.
+//!
+//! Recorded as a failure it would turn every monitor down at once, and page
+//! for all of them, whenever the daemon's own descriptors run out (a flood
+//! of connections on the status page is enough). Such a check is skipped
+//! instead - no row, no failure counted - and remembered here, so the node
+//! reports itself degraded on `/healthz` and its peers raise the one alert
+//! that is true: this node can no longer watch.
+
+use std::error::Error;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// How long after the last skipped check the node still reports itself
+/// degraded. Under lasting exhaustion checks are skipped every few seconds
+/// and the report never clears; once they run again it clears within this.
+const MEMORY_SECS: i64 = 30;
+
+/// At most one log line per this many seconds: under exhaustion every
+/// monitor skips every tick.
+const LOG_EVERY_SECS: i64 = 60;
+
+static LAST_FAULT: AtomicI64 = AtomicI64::new(0);
+static LAST_LOGGED: AtomicI64 = AtomicI64::new(0);
+
+// The same numbers on Linux, macOS and the BSDs.
+const ENOMEM: i32 = 12;
+const ENFILE: i32 = 23;
+const EMFILE: i32 = 24;
+const ENOBUFS: i32 = if cfg!(target_os = "linux") { 105 } else { 55 };
+
+/// Whether `err` is this host running out of a resource, rather than
+/// anything the other end did.
+pub(crate) fn is_exhaustion(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::OutOfMemory
+        || matches!(err.raw_os_error(), Some(ENOMEM | ENFILE | EMFILE | ENOBUFS))
+}
+
+/// The exhaustion in `err`'s chain of causes, if any, in words.
+pub(crate) fn exhaustion_in(err: &(dyn Error + 'static)) -> Option<String> {
+    let mut current = Some(err);
+    while let Some(cause) = current {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && is_exhaustion(io)
+        {
+            return Some(io.to_string());
+        }
+        current = cause.source();
+    }
+    None
+}
+
+/// Whether this host cannot open a socket right now for lack of resources:
+/// asked after a failed check, whose own error does not always carry the
+/// cause (a resolver that could not open its socket reports a failed
+/// lookup). Opening a socket is the test - it is what a check needs first.
+pub(crate) fn exhausted_now() -> Option<String> {
+    match std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
+        Err(err) if is_exhaustion(&err) => Some(err.to_string()),
+        _ => None,
+    }
+}
+
+/// Remember that a check was skipped at `now`, and say so in the log (once
+/// per [`LOG_EVERY_SECS`], however many monitors skip).
+pub(crate) fn note(monitor_id: &str, detail: &str, now: i64) {
+    LAST_FAULT.fetch_max(now, Ordering::Relaxed);
+    let logged = LAST_LOGGED.load(Ordering::Relaxed);
+    if now - logged >= LOG_EVERY_SECS
+        && LAST_LOGGED
+            .compare_exchange(logged, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        tracing::error!(
+            monitor = %monitor_id,
+            error = detail,
+            "checks cannot run: this host is out of file descriptors or memory. \
+             They are skipped, not counted as failures, and this node reports \
+             itself degraded until they run again (raise the open-files limit, \
+             or lower server.max_connections)"
+        );
+    }
+}
+
+/// Whether a check was skipped for lack of local resources recently enough
+/// that this node should not call itself healthy.
+#[must_use]
+pub fn recent(now: i64) -> bool {
+    let last = LAST_FAULT.load(Ordering::Relaxed);
+    last != 0 && now - last <= MEMORY_SECS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_local_exhaustion_is_excused() {
+        assert!(is_exhaustion(&std::io::Error::from_raw_os_error(EMFILE)));
+        assert!(is_exhaustion(&std::io::Error::from_raw_os_error(ENFILE)));
+        assert!(is_exhaustion(&std::io::Error::from_raw_os_error(ENOBUFS)));
+        assert!(is_exhaustion(&std::io::Error::from_raw_os_error(ENOMEM)));
+        // What the other end, or the network, did.
+        for kind in [
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::HostUnreachable,
+        ] {
+            assert!(!is_exhaustion(&std::io::Error::from(kind)), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn exhaustion_is_found_under_wrappers() {
+        #[derive(Debug)]
+        struct Wrapper(std::io::Error);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("request failed")
+            }
+        }
+        impl Error for Wrapper {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        assert!(exhaustion_in(&Wrapper(std::io::Error::from_raw_os_error(EMFILE))).is_some());
+        assert!(
+            exhaustion_in(&Wrapper(std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            )))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_host_with_room_is_not_exhausted() {
+        assert_eq!(exhausted_now(), None);
+    }
+}

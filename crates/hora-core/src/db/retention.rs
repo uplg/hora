@@ -11,6 +11,7 @@ use crate::config::{Config, Peer};
 use crate::histogram::LatencyHistogram;
 
 use super::annotations::{meta_delete, meta_set};
+use super::maintenance::{maintenance_selectors, prune_maintenance_windows};
 use super::{CERT_PIN_AGAINST_META_PREFIX, HEARTBEAT_EXPECTED_META_PREFIX};
 
 /// Raw checks roll up into hourly buckets once the hour ended this long ago.
@@ -33,8 +34,13 @@ pub(super) const ORPHAN_GRACE_SECS: i64 = 7 * SECONDS_PER_DAY;
 const ORPHAN_META_PREFIX: &str = "orphan_since:";
 /// Every `meta` key prefix that holds per-id state, swept with the id's rows
 /// (see [`delete_orphans`]).
-const PER_ID_META_PREFIXES: &[&str] =
-    &[HEARTBEAT_EXPECTED_META_PREFIX, CERT_PIN_AGAINST_META_PREFIX];
+const PER_ID_META_PREFIXES: &[&str] = &[
+    HEARTBEAT_EXPECTED_META_PREFIX,
+    CERT_PIN_AGAINST_META_PREFIX,
+    crate::alert_once::META_PREFIXES[0],
+    crate::alert_once::META_PREFIXES[1],
+    crate::alert_once::META_PREFIXES[2],
+];
 
 /// Drop announcements whose expiry passed before `cutoff`.
 pub(super) async fn prune_announcements(store: &Store, cutoff: i64) -> sqlx::Result<()> {
@@ -268,7 +274,7 @@ pub async fn prune_daily(store: &Store, cutoff: i64) -> sqlx::Result<()> {
 
 /// Downsample old history and age the aggregates out. Failures are logged and
 /// non-fatal: the retention pruning in [`prune`] still runs.
-async fn roll_up_history(store: &Store, now: i64, pace: &Pace) {
+pub(super) async fn roll_up_history(store: &Store, now: i64, pace: &Pace) {
     // Downsample before any deletion: every ended hour rolls up into an hourly
     // bucket, hourly buckets older than 90 days into daily ones. Each bucket is
     // written exactly once (see `downsample_hourly`), so the aggregates survive
@@ -277,15 +283,23 @@ async fn roll_up_history(store: &Store, now: i64, pace: &Pace) {
         tracing::warn!("hourly downsampling failed: {err}");
     }
     let daily_cutoff = now - DOWNSAMPLE_DAILY_AFTER_DAYS * SECONDS_PER_DAY;
-    if let Err(err) = downsample_daily(store, daily_cutoff).await {
-        tracing::warn!("daily downsampling failed: {err}");
-    }
+    let daily_rolled = match downsample_daily(store, daily_cutoff).await {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!("daily downsampling failed: {err}");
+            false
+        }
+    };
 
     // Prune aggregates: hourly beyond 90 days (rounded down to a whole day, so
     // only hours already rolled up into a *complete* daily bucket are dropped),
-    // daily beyond a year.
+    // daily beyond a year. The hourly rows are the daily roll-up's only
+    // source: when it failed (a passing "database is locked"), they stay for
+    // the next pass rather than taking that day out of the history for good.
     let hourly_prune_cutoff = (daily_cutoff / 86400) * 86400;
-    if let Err(err) = prune_hourly(store, hourly_prune_cutoff, pace).await {
+    if !daily_rolled {
+        tracing::warn!("hourly prune skipped: its daily roll-up did not complete");
+    } else if let Err(err) = prune_hourly(store, hourly_prune_cutoff, pace).await {
         tracing::warn!("hourly prune failed: {err}");
     }
     let yearly_cutoff = now - AGGREGATE_RETENTION_DAYS * SECONDS_PER_DAY;
@@ -300,6 +314,12 @@ async fn roll_up_history(store: &Store, now: i64, pace: &Pace) {
     // Expired silences are dead weight the moment they lapse.
     if let Err(err) = prune_silences(store, now).await {
         tracing::warn!("silence prune failed: {err}");
+    }
+    // Planned maintenance windows age out with the closed incidents: a
+    // window that ended still marks its days on the status page's bars and
+    // in the monthly reports, which reach a year back.
+    if let Err(err) = prune_maintenance_windows(store, yearly_cutoff).await {
+        tracing::warn!("maintenance-window prune failed: {err}");
     }
     // Same for expired announcements (the active query already hides them).
     if let Err(err) = prune_announcements(store, now).await {
@@ -703,6 +723,7 @@ pub(super) async fn delete_orphans(
             }
         }
     }
+    delete_orphan_windows(store, &keep).await?;
     if !scheduled.is_empty() {
         tracing::warn!(
             "monitors no longer in the config: {}; their history will be deleted after {} \
@@ -710,6 +731,27 @@ pub(super) async fn delete_orphans(
             scheduled.join(", "),
             crate::fmt::utc(now + ORPHAN_GRACE_SECS)
         );
+    }
+    Ok(())
+}
+
+/// Drop the planned maintenance windows that name monitors (`ids:a,b`) of
+/// which none is left in the config: they cover nothing any more, and
+/// nothing can bring them back - a window is never edited. No grace period:
+/// unlike a monitor's history, there is nothing here worth restoring. A
+/// window for a host, for everything or announced by a peer names no id and
+/// is left to age out.
+async fn delete_orphan_windows(
+    store: &Store,
+    keep: &std::collections::HashSet<&str>,
+) -> sqlx::Result<()> {
+    for (id, selector) in maintenance_selectors(store).await? {
+        let Some(ids) = selector.strip_prefix("ids:") else {
+            continue;
+        };
+        if !ids.split(',').any(|id| keep.contains(id)) {
+            super::maintenance::delete_maintenance_window(store, id).await?;
+        }
     }
     Ok(())
 }

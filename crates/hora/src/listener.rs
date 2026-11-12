@@ -1,0 +1,565 @@
+//! The listening socket, guarded: a bound on how many connections are served
+//! at once, and a deadline on each one that stops making progress.
+//!
+//! Unbounded, the status page is a way to take the monitoring down: every
+//! connection is a file descriptor of the process that also opens the
+//! checks' sockets, and a client that connects and then says nothing was
+//! kept for ever. A few hundred of those and the checks could no longer
+//! open a socket.
+//!
+//! - **The bound.** At most [`Guarded::limit`] connections are open; the
+//!   next one is left in the kernel's accept queue (where it costs this
+//!   process nothing) until a slot frees.
+//! - **The deadlines.** A connection is closed when it has sent nothing
+//!   [`FRESH`] after being accepted, when a request it started has no
+//!   answer under way [`REQUEST`] later (the handlers' own deadline is
+//!   shorter: this one is for a request that never finishes arriving),
+//!   when it has taken nothing of an answer for [`STALL`] - a client that
+//!   stopped reading - and when nothing has moved for [`IDLE`] after an
+//!   answer: an idle keep-alive connection.
+
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use axum::serve::Listener;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::{Instant, Sleep};
+
+/// A connection that has sent nothing since it was accepted.
+const FRESH: Duration = Duration::from_secs(30);
+/// From the first byte of a request to the first byte of its answer. Above
+/// the handlers' deadline (`hora_web`'s 30 s), which must answer first.
+const REQUEST: Duration = Duration::from_secs(60);
+/// An answer the client takes no byte of: each one holds its buffers, the
+/// kernel's and ours, for as long as it is kept.
+const STALL: Duration = Duration::from_secs(30);
+/// After an answer, with nothing read or written since. Longer than the
+/// idle timeout of the usual reverse proxies (60 to 120 s), so the proxy is
+/// the one that closes a pooled connection, never Hora under its feet.
+const IDLE: Duration = Duration::from_mins(3);
+
+/// Connections served at once when `server.max_connections` is unset. Each
+/// one that trickles a request in holds about 25 KiB until its deadline:
+/// a full house of them is some 25 MiB, which a small container survives.
+const DEFAULT_LIMIT: u32 = 1024;
+/// Never fewer than this, whatever the open-files limit says.
+const MIN_LIMIT: u32 = 16;
+/// One log line a minute, at most, while the listener is full.
+const FULL_LOG_EVERY: Duration = Duration::from_mins(1);
+
+/// What one connection can cost at its worst - a client that asks for a
+/// large answer and never reads it: the kernel's send buffer plus the
+/// server's own, measured at about 95 KiB.
+const WORST_CONNECTION_BYTES: u64 = 128 * 1024;
+
+/// How many connections to serve at once.
+///
+/// - Configured: that number. Unset: [`DEFAULT_LIMIT`], or fewer when the
+///   memory the process may use is small - a full house of the worst
+///   connections ([`WORST_CONNECTION_BYTES`] each) may take a quarter of it,
+///   which is 128 connections in a 64 MiB container.
+/// - Either way, never more than half the open-files limit: the other half
+///   belongs to the checks and the database.
+pub(crate) fn connection_limit(
+    configured: Option<u32>,
+    open_files: Option<u64>,
+    memory: Option<u64>,
+) -> u32 {
+    let narrow = |count: u64| u32::try_from(count).unwrap_or(u32::MAX);
+    let wanted = configured.unwrap_or_else(|| {
+        let affordable =
+            memory.map_or(u32::MAX, |bytes| narrow(bytes / 4 / WORST_CONNECTION_BYTES));
+        DEFAULT_LIMIT.min(affordable)
+    });
+    let room = open_files.map_or(u32::MAX, |files| narrow(files / 2));
+    wanted.min(room).max(MIN_LIMIT)
+}
+
+/// The process's soft limit on open files, when it has one.
+pub(crate) fn open_files_limit() -> Option<u64> {
+    rustix::process::getrlimit(rustix::process::Resource::Nofile).current
+}
+
+/// The memory this process may use, where the platform says: the smaller of
+/// its control group's limit (a container's `--memory`) and the machine's
+/// own. `None` off Linux.
+pub(crate) fn memory_limit() -> Option<u64> {
+    let read = |path: &str| std::fs::read_to_string(path).ok();
+    let group = read("/sys/fs/cgroup/memory.max")
+        .or_else(|| read("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+        .and_then(|text| cgroup_limit(&text));
+    let machine = read("/proc/meminfo").and_then(|text| meminfo_total(&text));
+    match (group, machine) {
+        (Some(group), Some(machine)) => Some(group.min(machine)),
+        (limit, None) | (None, limit) => limit,
+    }
+}
+
+/// A control group's memory limit as its file spells it: bytes, or `max`
+/// (version 2) for none.
+fn cgroup_limit(text: &str) -> Option<u64> {
+    text.trim().parse().ok()
+}
+
+/// `MemTotal` of `/proc/meminfo`, in bytes.
+fn meminfo_total(text: &str) -> Option<u64> {
+    let line = text
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?;
+    let kib: u64 = line.trim().strip_suffix("kB")?.trim().parse().ok()?;
+    kib.checked_mul(1024)
+}
+
+/// The kernel's send buffer for one connection. Left to tune itself it
+/// grows to megabytes for a client that asks for a large answer and does not
+/// read it - memory the kernel charges to this process's container, a
+/// megabyte a connection in the measurements. Fixed, it is what
+/// [`WORST_CONNECTION_BYTES`] counts on (Linux reserves twice the number
+/// asked for). The price is paid by the largest answers on a slow link only:
+/// the pages, compressed, fit in one buffer.
+const SEND_BUFFER_BYTES: u32 = 64 * 1024;
+
+/// How many connections the kernel holds for us while every slot is taken.
+const BACKLOG: u32 = 1024;
+
+/// Bind `address` (`host:port`) like [`TcpListener::bind`], with the send
+/// buffer of the connections it will accept fixed at [`SEND_BUFFER_BYTES`]
+/// (accepted sockets inherit it from the listening one).
+pub(crate) async fn bind(address: &str) -> io::Result<TcpListener> {
+    let mut last = None;
+    for candidate in tokio::net::lookup_host(address).await? {
+        match bind_one(candidate) {
+            Ok(listener) => return Ok(listener),
+            Err(err) => last = Some(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "could not resolve to any address",
+        )
+    }))
+}
+
+fn bind_one(address: SocketAddr) -> io::Result<TcpListener> {
+    let socket = if address.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    // As `TcpListener::bind` does: a restart must not wait out the sockets
+    // of the previous run.
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    // Best effort: a platform that refuses the size serves with its own.
+    let _ = socket.set_send_buffer_size(SEND_BUFFER_BYTES);
+    socket.bind(address)?;
+    socket.listen(BACKLOG)
+}
+
+/// A [`TcpListener`] that serves at most `limit` connections at once.
+pub(crate) struct Guarded {
+    inner: TcpListener,
+    slots: Arc<Semaphore>,
+    limit: u32,
+    full_logged: Option<Instant>,
+}
+
+impl Guarded {
+    pub(crate) fn new(inner: TcpListener, limit: u32) -> Self {
+        Self {
+            inner,
+            slots: Arc::new(Semaphore::new(limit as usize)),
+            limit,
+            full_logged: None,
+        }
+    }
+
+    async fn slot(&mut self) -> OwnedSemaphorePermit {
+        if let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() {
+            return slot;
+        }
+        let now = Instant::now();
+        if self
+            .full_logged
+            .is_none_or(|at| now.duration_since(at) >= FULL_LOG_EVERY)
+        {
+            self.full_logged = Some(now);
+            tracing::warn!(
+                limit = self.limit,
+                "every HTTP connection slot is taken: new connections wait \
+                 (server.max_connections)"
+            );
+        }
+        match Arc::clone(&self.slots).acquire_owned().await {
+            Ok(slot) => slot,
+            // The semaphore is never closed; were it, serve nothing more
+            // rather than serve unbounded.
+            Err(_closed) => std::future::pending().await,
+        }
+    }
+}
+
+impl Listener for Guarded {
+    type Io = Connection<TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        // The slot first: a connection that would have none stays in the
+        // kernel's queue, where it holds no descriptor of ours.
+        let slot = self.slot().await;
+        let (stream, peer) = Listener::accept(&mut self.inner).await;
+        // Answers are written whole; waiting to coalesce them only delays
+        // the last segment.
+        let _ = stream.set_nodelay(true);
+        (Connection::new(stream, Some(slot)), peer)
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// One accepted connection: its slot, held until it closes, and the deadline
+/// of whatever it is doing now.
+pub(crate) struct Connection<S> {
+    stream: S,
+    /// `None` only in the tests, which need no listener.
+    _slot: Option<OwnedSemaphorePermit>,
+    /// When the connection is given up on, unless it moves first.
+    deadline: Instant,
+    /// The timer behind `deadline`, re-armed only when a read or a write
+    /// actually has to wait (so a busy connection never touches it).
+    timer: Pin<Box<Sleep>>,
+    /// A request has begun arriving and its answer has not begun leaving.
+    receiving: bool,
+    /// A write is waiting for the client to read.
+    stalled: bool,
+}
+
+impl<S> Connection<S> {
+    fn new(stream: S, slot: Option<OwnedSemaphorePermit>) -> Self {
+        let deadline = Instant::now() + FRESH;
+        Self {
+            stream,
+            _slot: slot,
+            deadline,
+            timer: Box::pin(tokio::time::sleep_until(deadline)),
+            receiving: false,
+            stalled: false,
+        }
+    }
+
+    /// Bytes arrived: a request is on its way in, and has [`REQUEST`] to be
+    /// answered. More bytes of the same request do not extend it.
+    fn received(&mut self) {
+        if !self.receiving {
+            self.receiving = true;
+            self.deadline = Instant::now() + REQUEST;
+        }
+    }
+
+    /// Bytes left: the answer is under way, and each write buys [`IDLE`].
+    fn sent(&mut self) {
+        self.receiving = false;
+        self.stalled = false;
+        self.deadline = Instant::now() + IDLE;
+    }
+
+    /// A write has to wait for the client: it has [`STALL`] to take
+    /// something, counted from when the wait began.
+    fn blocked(&mut self) {
+        if !self.stalled {
+            self.stalled = true;
+            self.deadline = Instant::now() + STALL;
+        }
+    }
+
+    /// The I/O has to wait: until the deadline at most.
+    fn wait<T>(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<T>> {
+        if self.timer.deadline() != self.deadline {
+            let deadline = self.deadline;
+            self.timer.as_mut().reset(deadline);
+        }
+        match self.timer.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connection stalled",
+            ))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Connection<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        match Pin::new(&mut self.stream).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                if buf.filled().len() > before {
+                    self.received();
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => self.wait(cx),
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Connection<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match Pin::new(&mut self.stream).poll_write(cx, buf) {
+            Poll::Ready(Ok(written)) => {
+                if written > 0 {
+                    self.sent();
+                }
+                Poll::Ready(Ok(written))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => {
+                self.blocked();
+                self.wait(cx)
+            }
+        }
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match Pin::new(&mut self.stream).poll_write_vectored(cx, bufs) {
+            Poll::Ready(Ok(written)) => {
+                if written > 0 {
+                    self.sent();
+                }
+                Poll::Ready(Ok(written))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => {
+                self.blocked();
+                self.wait(cx)
+            }
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsFd as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn the_limit_leaves_half_the_descriptors_to_the_checks() {
+        assert_eq!(connection_limit(None, None, None), DEFAULT_LIMIT);
+        assert_eq!(connection_limit(None, Some(1_048_576), None), DEFAULT_LIMIT);
+        assert_eq!(connection_limit(None, Some(1024), None), 512);
+        assert_eq!(connection_limit(Some(10_000), Some(1024), None), 512);
+        assert_eq!(connection_limit(Some(100), Some(1024), None), 100);
+        // A tiny limit still serves the page.
+        assert_eq!(connection_limit(None, Some(20), None), MIN_LIMIT);
+        assert_eq!(connection_limit(Some(0), None, None), MIN_LIMIT);
+    }
+
+    #[test]
+    fn a_small_memory_limit_narrows_the_default_only() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(connection_limit(None, None, Some(64 * MIB)), 128);
+        assert_eq!(connection_limit(None, None, Some(256 * MIB)), 512);
+        assert_eq!(
+            connection_limit(None, None, Some(4096 * MIB)),
+            DEFAULT_LIMIT
+        );
+        assert_eq!(connection_limit(None, None, Some(MIB)), MIN_LIMIT);
+        // What the operator asked for is theirs to size.
+        assert_eq!(connection_limit(Some(2000), None, Some(64 * MIB)), 2000);
+    }
+
+    #[test]
+    fn memory_limits_are_read_as_their_files_spell_them() {
+        assert_eq!(cgroup_limit("67108864\n"), Some(67_108_864));
+        assert_eq!(cgroup_limit("max\n"), None);
+        let meminfo = "MemTotal:        2014968 kB\nMemFree:          123456 kB\n";
+        assert_eq!(meminfo_total(meminfo), Some(2_014_968 * 1024));
+        assert_eq!(meminfo_total("MemFree: 1 kB\n"), None);
+    }
+
+    #[test]
+    fn this_process_has_an_open_files_limit() {
+        assert!(open_files_limit().is_some_and(|limit| limit > 0));
+    }
+
+    /// `SO_SNDBUF` of an accepted connection, read through a socket of the
+    /// same kind (tokio exposes the option on `TcpSocket` only).
+    fn socket_send_buffer(stream: &TcpStream) -> u32 {
+        let std = stream
+            .as_fd()
+            .try_clone_to_owned()
+            .map(std::net::TcpStream::from)
+            .expect("duplicate the descriptor");
+        let socket = tokio::net::TcpSocket::from_std_stream(std);
+        socket.send_buffer_size().expect("read SO_SNDBUF")
+    }
+
+    async fn pair(limit: u32) -> (Guarded, SocketAddr) {
+        let inner = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = inner.local_addr().expect("address");
+        (Guarded::new(inner, limit), address)
+    }
+
+    #[tokio::test]
+    async fn the_listener_binds_names_and_addresses_and_bounds_its_send_buffer() {
+        for address in ["127.0.0.1:0", "localhost:0"] {
+            let listener = bind(address).await.expect(address);
+            assert!(listener.local_addr().expect("address").port() > 0);
+        }
+        assert!(bind("127.0.0.1:not-a-port").await.is_err());
+
+        let listener = bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let mut guarded = Guarded::new(listener, 4);
+        let _client = TcpStream::connect(address).await.expect("connect");
+        let (connection, _) = guarded.accept().await;
+        // What the accepted socket got is the listener's, not the megabytes
+        // of auto-tuning (the kernel may round, or double, the figure).
+        let size = socket_send_buffer(&connection.stream);
+        assert!(
+            (SEND_BUFFER_BYTES..=4 * SEND_BUFFER_BYTES).contains(&size),
+            "send buffer of {size} bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_past_the_limit_waits_for_a_slot() {
+        let (mut listener, address) = pair(1).await;
+        let _first_client = TcpStream::connect(address).await.expect("connect");
+        let (first, _) = listener.accept().await;
+        let _second_client = TcpStream::connect(address).await.expect("connect");
+
+        // Connected (the kernel took it), but not accepted: no slot.
+        let waiting = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(waiting.is_err(), "accepted past the limit");
+
+        drop(first);
+        let accepted = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+        assert!(accepted.is_ok(), "the freed slot was not reused");
+    }
+
+    /// A connection over an in-memory pipe: with the clock paused, real
+    /// sockets would race the timers.
+    fn piped() -> (Connection<tokio::io::DuplexStream>, tokio::io::DuplexStream) {
+        let (server, client) = tokio::io::duplex(1024);
+        (Connection::new(server, None), client)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_connection_is_closed() {
+        let (mut connection, _client) = piped();
+        let started = Instant::now();
+        let mut buffer = [0u8; 16];
+        let error = connection
+            .read(&mut buffer)
+            .await
+            .expect_err("a stalled read fails");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(started.elapsed(), FRESH);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_trickled_request_does_not_extend_its_deadline() {
+        let (mut connection, mut client) = piped();
+        // One byte every 10 s: each read succeeds, the request never ends.
+        let trickle = tokio::spawn(async move {
+            loop {
+                if client.write_all(b"a").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+        let started = Instant::now();
+        let mut buffer = [0u8; 16];
+        let error = loop {
+            match connection.read(&mut buffer).await {
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        // From the first byte, whatever arrived since.
+        assert_eq!(started.elapsed(), REQUEST);
+        trickle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answered_connection_may_idle_longer() {
+        let (mut connection, mut client) = piped();
+        client.write_all(b"ping").await.expect("write");
+        let mut buffer = [0u8; 4];
+        connection.read_exact(&mut buffer).await.expect("read");
+        connection.write_all(b"pong").await.expect("answer");
+
+        // Past the request deadline, within the idle one: still open.
+        let mut next = [0u8; 4];
+        let quiet = tokio::time::timeout(REQUEST + Duration::from_secs(30), async {
+            connection.read(&mut next).await
+        })
+        .await;
+        assert!(quiet.is_err(), "closed while idle within its allowance");
+
+        // The next request is read as usual, and has its own deadline.
+        client.write_all(b"ping").await.expect("write");
+        connection.read_exact(&mut next).await.expect("read");
+        assert_eq!(&next, b"ping");
+        let started = Instant::now();
+        let error = connection
+            .read(&mut next)
+            .await
+            .expect_err("an unanswered request stalls");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(started.elapsed(), REQUEST);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_stops_reading_is_closed() {
+        // A pipe of 8 bytes: the second write has nowhere to go.
+        let (server, _client) = tokio::io::duplex(8);
+        let mut connection = Connection::new(server, None);
+        connection.write_all(b"12345678").await.expect("fits");
+        let started = Instant::now();
+        let error = connection
+            .write_all(b"more")
+            .await
+            .expect_err("a stalled write fails");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(started.elapsed(), STALL);
+    }
+}

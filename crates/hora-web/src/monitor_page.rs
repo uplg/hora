@@ -12,9 +12,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use hora_core::config::{Config, Kind, Monitor};
 use hora_core::db::{EventMarker, Incident};
 
-use crate::layout::{Chrome, display_state, join_and, minutes, ms, pct, word};
-use crate::render::{day_class, meter, owls, sparkline};
-use crate::summary::MonitorView;
+use crate::display::DisplayState;
+use crate::layout::{Chrome, join_and, minutes, ms, pct};
+use crate::render::{Chart, day_class, meter, owls, sparkline};
+use crate::summary::{BudgetState, CertState, MonitorView};
 
 #[derive(Template)]
 #[template(path = "monitor.html")]
@@ -36,8 +37,7 @@ pub(crate) struct MonitorPage {
     pub(crate) target: Option<String>,
     pub(crate) why: Option<String>,
     pub(crate) tiles: Vec<Tile>,
-    pub(crate) chart: String,
-    pub(crate) has_events: bool,
+    pub(crate) chart: Chart,
     pub(crate) days: Vec<Day>,
     pub(crate) first_day: String,
     pub(crate) day30: String,
@@ -49,6 +49,14 @@ pub(crate) struct MonitorPage {
     pub(crate) incidents: Vec<IncidentLine>,
     /// "For operators": label/value pairs, empty for public visitors.
     pub(crate) details: Vec<(String, String)>,
+}
+
+impl MonitorPage {
+    /// The days with something to report, newest first: the links listed
+    /// under the bar.
+    pub(crate) fn notable_days(&self) -> Vec<&Day> {
+        self.days.iter().rev().filter(|day| day.notable).collect()
+    }
 }
 
 /// A figure: what, the number and its unit, the line that explains it.
@@ -66,6 +74,14 @@ pub(crate) struct Day {
     pub(crate) class: char,
     pub(crate) state: &'static str,
     pub(crate) tip: String,
+    /// "18 Sep" and the state's word, for the list of days worth opening.
+    pub(crate) short: String,
+    pub(crate) word: &'static str,
+    /// Something to report (an outage, slow, maintenance): listed under the
+    /// bar as a link of its own, a full-size target where the bar's are thin.
+    pub(crate) notable: bool,
+    /// Among the last 30 days, the ones a phone's bar shows.
+    pub(crate) recent: bool,
     pub(crate) title: String,
     pub(crate) text: String,
     pub(crate) incidents: Vec<(i64, String)>,
@@ -142,7 +158,7 @@ pub(crate) fn build(
                 state: if ongoing { "down" } else { "up" },
                 title: match incident.duration_s {
                     Some(secs) if !ongoing => {
-                        format!("Down for {}", crate::layout::duration(secs))
+                        format!("Down for {}", hora_core::fmt::duration(secs))
                     }
                     _ => "Down, ongoing".to_owned(),
                 },
@@ -161,9 +177,14 @@ pub(crate) fn build(
 
     // The chart is drawn here, for the one monitor asked for (the status
     // page draws none); the series is shared with the snapshot.
-    let chart = sparkline(&m.spark, m.status.as_str(), events);
+    let chart = sparkline(
+        &m.spark,
+        m.status.as_str(),
+        events,
+        monitor.degraded_over_ms,
+    );
     MonitorPage {
-        state,
+        state: state.class(),
         word: match down_for(&m, now) {
             Some(length) => format!("{} · {}", m.word(), minutes(length)),
             None => m.word().to_owned(),
@@ -181,7 +202,6 @@ pub(crate) fn build(
             .then(|| hora_core::config::redact_url_secrets(monitor.target()).into_owned()),
         why: why_line(&m, now),
         tiles: tiles(&m, monitor, incidents),
-        has_events: chart.contains("spark-event"),
         chart,
         days,
         first_day,
@@ -204,7 +224,9 @@ pub(crate) fn build(
 /// How long a monitor shown down has been down, in whole minutes (its open
 /// incident's age); `None` when it is not shown down or the start is unknown.
 pub(crate) fn down_for(m: &MonitorView, now: i64) -> Option<i64> {
-    let since = m.down_since.filter(|_| m.display_state() == "down")?;
+    let since = m
+        .down_since
+        .filter(|_| m.display_state() == DisplayState::Down)?;
     Some((now - since).max(0) / 60)
 }
 
@@ -231,7 +253,7 @@ fn why_line(m: &MonitorView, now: i64) -> Option<String> {
         );
     }
     match m.display_state() {
-        "down" => {
+        DisplayState::Down => {
             let answer = m.last_error.as_ref().map_or_else(
                 || "It does not answer.".to_owned(),
                 |error| format!("It does not answer as expected: {error}."),
@@ -241,14 +263,14 @@ fn why_line(m: &MonitorView, now: i64) -> Option<String> {
                 None => answer,
             })
         }
-        "degraded" => Some(match (&m.last_error, m.last_latency_ms) {
+        DisplayState::Degraded => Some(match (&m.last_error, m.last_latency_ms) {
             (Some(error), _) => {
                 format!("The last check failed ({error}); checking again before calling it down.")
             }
             (None, Some(latency)) => format!("It answers, slowly: {}.", ms(latency)),
             _ => "It answers, slowly.".to_owned(),
         }),
-        "maint" => Some(format!(
+        DisplayState::Maint => Some(format!(
             "Planned maintenance{}.",
             m.maintenance
                 .as_deref()
@@ -256,8 +278,8 @@ fn why_line(m: &MonitorView, now: i64) -> Option<String> {
                 .map(|title| format!(": {title}"))
                 .unwrap_or_default()
         )),
-        "none" => Some("Waiting for the first check.".to_owned()),
-        _ => None,
+        DisplayState::None => Some("Waiting for the first check.".to_owned()),
+        DisplayState::Up => None,
     }
 }
 
@@ -294,9 +316,9 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
     if let (Some(left), Some(total)) = (m.budget_minutes_left, m.budget_minutes_total) {
         let (value, unit) = split_unit(&minutes(left));
         let class = match m.budget_state {
-            "breached" => "meter out",
-            "low" => "meter low",
-            _ => "meter",
+            BudgetState::Breached => "meter out",
+            BudgetState::Low => "meter low",
+            BudgetState::Met | BudgetState::None => "meter",
         };
         tiles.push(Tile {
             key: "Allowed downtime left".to_owned(),
@@ -308,15 +330,16 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
             meter: meter(left, total, class),
         });
     }
-    if let Some(days) = m.cert_days {
+    if let Some(left) = m.cert_secs_left {
+        let (value, unit) = cert_left(left);
         tiles.push(Tile {
             key: "Certificate".to_owned(),
-            value: days.max(0).to_string(),
-            unit: if days == 1 { "day left" } else { "days left" }.to_owned(),
+            value: value.to_string(),
+            unit: unit.to_owned(),
             note: match m.cert_state {
-                "expired" => "Expired: browsers refuse it".to_owned(),
-                "warn" => "Renew it soon".to_owned(),
-                _ => "Valid".to_owned(),
+                CertState::Expired => "Expired: browsers refuse it".to_owned(),
+                CertState::Warn => "Renew it soon".to_owned(),
+                CertState::Ok | CertState::None => "Valid".to_owned(),
             },
             meter: String::new(),
         });
@@ -324,8 +347,24 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
     tiles
 }
 
+/// A certificate's time left as a figure and its unit, from the seconds until
+/// it expires: days, then hours on the last day, then minutes in the last
+/// hour. A certificate with 23 hours left is not expired, and the page must
+/// not say so; one that has expired reads 0 d.
+fn cert_left(secs_left: i64) -> (i64, &'static str) {
+    if secs_left < 0 {
+        (0, "d left")
+    } else if secs_left >= hora_core::SECONDS_PER_DAY {
+        (secs_left / hora_core::SECONDS_PER_DAY, "d left")
+    } else if secs_left >= 3600 {
+        (secs_left / 3600, "h left")
+    } else {
+        (secs_left / 60, "min left")
+    }
+}
+
 /// The outages over the bar's days, in words: "One outage, 41 min, on 18
-/// Sep", "3 outages, 2 h 05 min in all", "No outage in 90 days". Counted
+/// Sep", "3 outages, 2 h 5 min in all", "No outage in 90 days". Counted
 /// from the incidents when they reach back that far, else from the days.
 fn outage_note(m: &MonitorView, incidents: &[Incident]) -> String {
     let days = m.bar.len();
@@ -400,34 +439,36 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
             {
                 class = b'm';
             }
+            // `day_class` gives these five letters only; anything else
+            // would be a day without data.
             let state = match class {
-                b'u' => "up",
-                b'd' => "degraded",
-                b'x' => "down",
-                b'm' => "maint",
-                _ => "none",
+                b'u' => DisplayState::Up,
+                b'd' => DisplayState::Degraded,
+                b'x' => DisplayState::Down,
+                b'm' => DisplayState::Maint,
+                _ => DisplayState::None,
             };
             let figure = cell.permille.map(hora_core::fmt::permille);
             let date = NaiveDate::parse_from_str(&cell.date, "%Y-%m-%d").ok();
             let short = short_date(&cell.date);
             let tip = match &figure {
-                Some(figure) => format!("{short}: {} · {figure} up", word(state)),
-                None => format!("{short}: {}", word(state)),
+                Some(figure) => format!("{short}: {} · {figure} up", state.word()),
+                None => format!("{short}: {}", state.word()),
             };
             let text = match (state, figure) {
-                ("up", _) => "Up all day.".to_owned(),
-                ("none", _) => "No checks recorded this day.".to_owned(),
-                ("maint", _) if index == last => "Planned maintenance today.".to_owned(),
-                ("maint", _) => "Planned maintenance this day.".to_owned(),
-                (_, Some(figure)) => format!(
-                    "{}: answered as expected in {figure} of the day's checks.",
-                    if state == "down" {
-                        "Outage"
-                    } else {
-                        "Slow at times"
-                    }
-                ),
-                _ => word(state).to_owned(),
+                (DisplayState::Up, _) => "Up all day.".to_owned(),
+                (DisplayState::None, _) => "No checks recorded this day.".to_owned(),
+                (DisplayState::Maint, _) if index == last => {
+                    "Planned maintenance today.".to_owned()
+                }
+                (DisplayState::Maint, _) => "Planned maintenance this day.".to_owned(),
+                (DisplayState::Down, Some(figure)) => {
+                    format!("Outage: answered as expected in {figure} of the day's checks.")
+                }
+                (DisplayState::Degraded, Some(figure)) => {
+                    format!("Slow at times: answered as expected in {figure} of the day's checks.")
+                }
+                (DisplayState::Down | DisplayState::Degraded, None) => state.word().to_owned(),
             };
             let started: Vec<(i64, String)> = incidents
                 .iter()
@@ -441,15 +482,19 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
                         .unwrap_or_default();
                     let length = incident
                         .duration_s
-                        .map_or_else(|| "ongoing".to_owned(), crate::layout::duration);
+                        .map_or_else(|| "ongoing".to_owned(), hora_core::fmt::duration);
                     (incident.id, format!("Down at {at}, {length}"))
                 })
                 .collect();
             Day {
                 anchor: format!("day-{}", cell.date),
                 class: char::from(class),
-                state,
+                state: state.class(),
                 tip,
+                short,
+                word: state.word(),
+                notable: state.notable(),
+                recent: index + 30 >= m.bar.len(),
                 title: date.map_or_else(
                     || cell.date.clone(),
                     |day| day.format("%A %-d %B").to_string(),
@@ -465,27 +510,35 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
 /// target, with each one's typical answer time.
 fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
     if m.vantages.is_empty() {
-        return (Vec::new(), String::new(), "none", String::new());
+        return (
+            Vec::new(),
+            String::new(),
+            DisplayState::None.class(),
+            String::new(),
+        );
     }
-    let here = display_state(m.status.as_str());
+    let here = DisplayState::from(m.status);
+    let seen: Vec<DisplayState> = std::iter::once(here)
+        .chain(m.vantages.iter().map(|v| DisplayState::from(v.status)))
+        .collect();
     let mut rows = vec![PlaceRow {
         name: "This Hora".to_owned(),
         sub: m.last_checked.as_deref().map_or_else(
             || "this node".to_owned(),
             |at| format!("this node · checked {}", at.get(11..16).unwrap_or(at)),
         ),
-        state: here,
-        word: word(here),
+        state: here.class(),
+        word: here.word(),
         latency: m.p50_ms.or(m.last_latency_ms).map(ms).unwrap_or_default(),
         meter: String::new(),
     }];
     for vantage in &m.vantages {
-        let state = display_state(vantage.status.as_str());
+        let state = DisplayState::from(vantage.status);
         rows.push(PlaceRow {
             name: vantage.peer.clone(),
             sub: "peer".to_owned(),
-            state,
-            word: word(state),
+            state: state.class(),
+            word: state.word(),
             latency: vantage.p50_ms.map(ms).unwrap_or_default(),
             meter: String::new(),
         });
@@ -504,14 +557,17 @@ fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
             row.meter = meter(latency, slowest, "lat");
         }
     }
-    let up = rows.iter().filter(|row| row.state == "up").count();
+    let up = seen
+        .iter()
+        .filter(|state| **state == DisplayState::Up)
+        .count();
     let total = rows.len();
     let state = if up == total {
-        "up"
-    } else if rows.iter().all(|row| row.state == "down") {
-        "down"
+        DisplayState::Up
+    } else if seen.iter().all(|state| *state == DisplayState::Down) {
+        DisplayState::Down
     } else {
-        "degraded"
+        DisplayState::Degraded
     };
     let pictured: Vec<(&str, &str)> = rows.iter().map(|r| (r.state, r.name.as_str())).collect();
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
@@ -521,7 +577,12 @@ fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
         m.name
     );
     let picture = owls(&pictured, &label);
-    (rows, picture, state, format!("Up from {up} of {total}"))
+    (
+        rows,
+        picture,
+        state.class(),
+        format!("Up from {up} of {total}"),
+    )
 }
 
 /// The operator's details: the probe, the figures behind the words, the
@@ -561,14 +622,7 @@ fn details(
     if let Some(target) = m.slo_latency_ms {
         rows.push((
             "Latency SLO".to_owned(),
-            format!(
-                "p95 under {target} ms: {}",
-                match m.slo_state {
-                    "met" => "met",
-                    "breached" => "breached",
-                    _ => "no data",
-                }
-            ),
+            format!("p95 under {target} ms: {}", m.slo_state.word()),
         ));
     }
     if let Some(label) = &m.uptime_label {
@@ -583,7 +637,7 @@ fn details(
     if let Some(label) = &m.cert_label {
         rows.push((
             "TLS certificate".to_owned(),
-            format!("{label} ({})", m.cert_state),
+            format!("{label} ({})", m.cert_state.as_str()),
         ));
     }
     if let Some(depends) = &monitor.depends_on {
@@ -605,19 +659,10 @@ fn details(
     rows
 }
 
-/// `30 s`, `5 min`, `1 h`, `1 day`.
+/// A configured period (interval, timeout) as a span: `30 s`, `5 min`,
+/// `1 min 30 s`, `1 h`, `1 d`.
 fn humanize_secs(secs: u64) -> String {
-    // An interval that is not a whole number of the larger unit stays in
-    // seconds ("90 s"), so the figure is never rounded.
-    match secs {
-        60..3600 if secs.is_multiple_of(60) => format!("{} min", secs / 60),
-        3600..86_400 if secs.is_multiple_of(3600) => format!("{} h", secs / 3600),
-        86_400.. if secs.is_multiple_of(86_400) => {
-            let days = secs / 86_400;
-            format!("{days} day{}", if days == 1 { "" } else { "s" })
-        }
-        _ => format!("{secs} s"),
-    }
+    hora_core::fmt::duration(i64::try_from(secs).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]
@@ -628,15 +673,27 @@ mod tests {
     fn intervals_read_like_a_person_says_them() {
         assert_eq!(humanize_secs(30), "30 s");
         assert_eq!(humanize_secs(300), "5 min");
-        assert_eq!(humanize_secs(90), "90 s");
+        assert_eq!(humanize_secs(90), "1 min 30 s");
         assert_eq!(humanize_secs(3600), "1 h");
-        assert_eq!(humanize_secs(86_400), "1 day");
+        assert_eq!(humanize_secs(86_400), "1 d");
+    }
+
+    /// The last day reads in hours and the last hour in minutes: truncated to
+    /// days, 23 hours left read "0 d left", next to "Expired".
+    #[test]
+    fn a_certificates_last_day_reads_in_hours() {
+        assert_eq!(cert_left(40 * 86_400 + 7), (40, "d left"));
+        assert_eq!(cert_left(86_400), (1, "d left"));
+        assert_eq!(cert_left(23 * 3600 + 59), (23, "h left"));
+        assert_eq!(cert_left(3600), (1, "h left"));
+        assert_eq!(cert_left(12 * 60), (12, "min left"));
+        assert_eq!(cert_left(-23 * 3600), (0, "d left"));
     }
 
     #[test]
     fn units_split_off_their_figure() {
         assert_eq!(split_unit("64 ms"), ("64".to_owned(), "ms".to_owned()));
-        assert_eq!(split_unit("3 h 07 min").0, "3");
+        assert_eq!(split_unit("3 h 7 min").0, "3");
         assert_eq!(short_date("2026-09-18"), "18 Sep");
     }
 }

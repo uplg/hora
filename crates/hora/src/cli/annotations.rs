@@ -1,5 +1,5 @@
-//! Operator annotations from the shell: announcements, event markers and
-//! silences.
+//! Operator annotations from the shell: announcements, event markers,
+//! silences and planned maintenance.
 
 use hora_core::announce::{self, Announcement};
 use hora_core::silence::SilenceError;
@@ -224,3 +224,195 @@ const SILENCE_USAGE: &str = concat!(
     "       hora silence list\n",
     "       hora silence clear",
 );
+
+/// `hora maintenance plan|list|cancel`: maintenance windows planned at
+/// runtime, written straight into the daemon's database and picked up on its
+/// next tick (and told to the peers on its next heartbeat). The HTTP twins
+/// are `POST`, `GET` and `DELETE /api/maintenance`.
+pub(crate) async fn maintenance(args: &[String]) -> Result<(), CliError> {
+    match args.split_first() {
+        Some((word, rest)) if word == "plan" => plan_maintenance(rest).await,
+        Some((word, [])) if word == "list" => list_maintenance().await,
+        Some((word, [id])) if word == "cancel" => {
+            let id: i64 = id
+                .parse()
+                .map_err(|_| usage(format!("Invalid window id {id:?} (a number).")))?;
+            let (_, store) = open_database().await?;
+            match hora_core::planned::cancel(&store, id).await {
+                Ok(window) => {
+                    println!(
+                        "Cancelled maintenance window #{}: {}.",
+                        window.id, window.reason
+                    );
+                    Ok(())
+                }
+                Err(err @ hora_core::planned::CancelError::Database(_)) => {
+                    Err(CliError::Other(err.into()))
+                }
+                Err(err) => Err(CliError::Failed(format!(
+                    "{err} ('hora maintenance list' shows the windows)."
+                ))),
+            }
+        }
+        _ => Err(usage(MAINTENANCE_USAGE)),
+    }
+}
+
+/// What `hora maintenance` answers a malformed invocation with.
+const MAINTENANCE_USAGE: &str = concat!(
+    "Usage: hora maintenance plan (--host <name> | --monitors <ids|all>) [--at <when>] --for <duration> <reason...>\n",
+    "       hora maintenance list\n",
+    "       hora maintenance cancel <id>\n",
+    "<when>: 2026-11-13T05:00:00Z, unix seconds, or 05:00 (its next occurrence, UTC); default now.\n",
+    "<duration>: 10m, 1h30m (max 7d).",
+);
+
+/// `hora maintenance plan` arguments, flags taken out of the reason's words.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct PlanArgs {
+    pub(super) host: Option<String>,
+    pub(super) monitors: Option<String>,
+    /// The start, resolved to unix seconds; `None` = now.
+    pub(super) starts_at: Option<i64>,
+    pub(super) duration: String,
+    pub(super) reason: String,
+}
+
+/// Parse `hora maintenance plan` arguments at `now`. `--at` takes what the
+/// API's `starts_at` takes, plus a UTC clock time (`05:00`): its next
+/// occurrence, a convenience for a person at a shell - a script that runs
+/// again after 05:00 would plan tomorrow's, so scripts pass the full
+/// timestamp.
+pub(super) fn parse_plan_args(args: &[String], now: i64) -> Result<PlanArgs, CliError> {
+    let mut plan = PlanArgs::default();
+    let mut words = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let mut value = |flag: &str| {
+            iter.next()
+                .cloned()
+                .ok_or_else(|| usage(format!("{flag} needs a value.\n{MAINTENANCE_USAGE}")))
+        };
+        match arg.as_str() {
+            "--host" => plan.host = Some(value("--host")?),
+            "--monitors" => plan.monitors = Some(value("--monitors")?),
+            "--for" => plan.duration = value("--for")?,
+            "--at" => {
+                let raw = value("--at")?;
+                let at = hora_core::planned::parse_start(&raw)
+                    .or_else(|| {
+                        // A clock time only: `parse_until` also reads a
+                        // duration, which `--for` already is.
+                        raw.contains(':')
+                            .then(|| announce::parse_until(&raw, now))
+                            .flatten()
+                    })
+                    .ok_or_else(|| usage(format!("Invalid --at {raw:?}.\n{MAINTENANCE_USAGE}")))?;
+                plan.starts_at = Some(at);
+            }
+            word => words.push(word),
+        }
+    }
+    plan.reason = words.join(" ");
+    if plan.duration.is_empty() {
+        return Err(usage(MAINTENANCE_USAGE));
+    }
+    Ok(plan)
+}
+
+async fn plan_maintenance(args: &[String]) -> Result<(), CliError> {
+    use hora_core::planned::{Plan, PlanError};
+
+    let now = chrono::Utc::now().timestamp();
+    let args = parse_plan_args(args, now)?;
+    let (config, store) = open_database().await?;
+    let starts_at = args.starts_at.map(|at| at.to_string());
+    let planned = match hora_core::planned::plan(
+        &store,
+        &config,
+        Plan {
+            monitors: args.monitors.as_deref(),
+            host: args.host.as_deref(),
+            starts_at: starts_at.as_deref(),
+            duration: &args.duration,
+            reason: &args.reason,
+        },
+        now,
+    )
+    .await
+    {
+        Ok(planned) => planned,
+        Err(PlanError::UnknownId(id)) => return Err(unknown_monitor(&config, &id)),
+        Err(err @ PlanError::Database(_)) => return Err(CliError::Other(err.into())),
+        Err(err) => return Err(usage(format!("{err}.\n{MAINTENANCE_USAGE}"))),
+    };
+    let window = &planned.window;
+    println!(
+        "{} maintenance window #{}: {} to {} ({}).",
+        if planned.created {
+            "Planned"
+        } else {
+            "Already planned,"
+        },
+        window.id,
+        fmt::utc(window.starts_at),
+        fmt::utc(window.ends_at),
+        fmt::duration(window.ends_at - window.starts_at),
+    );
+    println!("  {}", covered(&config, window));
+    if hora_core::planned::is_announced(&config, window) {
+        println!("  Announced to the peers on the next heartbeats.");
+    }
+    Ok(())
+}
+
+async fn list_maintenance() -> Result<(), CliError> {
+    let (config, store) = open_database().await?;
+    let now = chrono::Utc::now().timestamp();
+    let windows = hora_core::db::pending_maintenance_windows(&store, now).await?;
+    if windows.is_empty() {
+        println!("No maintenance window planned.");
+    }
+    for window in windows {
+        let state = if window.starts_at > now {
+            format!("starts in {}", fmt::duration(window.starts_at - now))
+        } else {
+            format!("active, {} left", fmt::duration(window.ends_at - now))
+        };
+        println!(
+            "#{}  {} to {}  ({state})  {}",
+            window.id,
+            fmt::utc(window.starts_at),
+            fmt::utc(window.ends_at),
+            window.reason
+        );
+        let origin = match window.origin.strip_prefix("peer:") {
+            Some(peer) => format!(" Announced by peer {peer}."),
+            None => String::new(),
+        };
+        println!("      {}{origin}", covered(&config, &window));
+    }
+    Ok(())
+}
+
+/// What a stored window covers on this node, in a sentence.
+fn covered(
+    config: &hora_core::config::Config,
+    window: &hora_core::db::MaintenanceWindow,
+) -> String {
+    let Some(resolved) = hora_core::planned::resolve(config, window) else {
+        return "Ignored: its peer is no longer accepted maintenance from.".to_owned();
+    };
+    let host = resolved
+        .host
+        .as_ref()
+        .map(|host| format!("Host {host}: "))
+        .unwrap_or_default();
+    if resolved.all {
+        format!("{host}covers all monitors.")
+    } else if resolved.monitors.is_empty() {
+        format!("{host}covers nothing monitored from this node.")
+    } else {
+        format!("{host}covers {}.", resolved.monitors.join(", "))
+    }
+}

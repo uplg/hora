@@ -22,7 +22,6 @@ const CSS_SOURCE: &str = include_str!("../../assets/hora.css");
 
 const FRAUNCES: &[u8] = include_bytes!("../../assets/fonts/Fraunces-VF.woff2");
 const CAL_SANS: &[u8] = include_bytes!("../../assets/fonts/CalSansVF.woff2");
-const BOREL: &[u8] = include_bytes!("../../assets/fonts/BorelDisplay-Regular.woff2");
 /// Mona Sans Mono: "Mona" is a Reserved Font Name under the OFL, so the file
 /// ships exactly as released (not subset, converted or renamed).
 const MONA_SANS_MONO: &[u8] = include_bytes!("../../assets/fonts/MonaSansMono.woff2");
@@ -36,7 +35,6 @@ const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../../assets/apple-touch-icon.pn
 const BINARY: &[(&str, &[u8], &str)] = &[
     ("fonts/Fraunces-VF.woff2", FRAUNCES, "font/woff2"),
     ("fonts/CalSansVF.woff2", CAL_SANS, "font/woff2"),
-    ("fonts/BorelDisplay-Regular.woff2", BOREL, "font/woff2"),
     ("fonts/MonaSansMono.woff2", MONA_SANS_MONO, "font/woff2"),
     ("mark.svg", MARK_SVG.as_bytes(), "image/svg+xml"),
     ("favicon.svg", FAVICON_SVG.as_bytes(), "image/svg+xml"),

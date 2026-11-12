@@ -40,7 +40,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame, app: &mut App) {
             hora_core::fmt::bytes(storage.db_bytes)
         )));
     }
-    if let Some(error) = &app.error {
+    if let Some(error) = app.status_error() {
         spans.push(Span::styled(
             format!("  {error}"),
             Style::new().fg(Color::Red).bold(),
@@ -55,7 +55,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         || "latency".to_owned(),
         |monitor| {
             format!(
-                "latency 24h - {} (p95 {})",
+                "latency 24 h - {} (p95 {})",
                 monitor.name,
                 ms(monitor.p95).trim().to_owned()
             )
@@ -282,7 +282,7 @@ fn severity_style(severity: &str) -> Style {
 }
 
 fn ms(value: Option<i64>) -> String {
-    value.map_or_else(|| "-".to_owned(), |ms| format!("{ms}ms"))
+    value.map_or_else(|| "-".to_owned(), |ms| format!("{ms} ms"))
 }
 
 fn status_dot(status: &str) -> &'static str {

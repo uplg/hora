@@ -103,28 +103,55 @@ impl Channel {
         }
     }
 
-    /// Whether the channel's required secret is present (an empty one - e.g. an
-    /// unset `${VAR}` - disables the channel rather than erroring at send time).
+    /// Whether the channel has everything it needs to send. One that lacks a
+    /// required field (see [`Channel::empty_required_field`]) is disabled:
+    /// left out of the dispatcher rather than failing at every send, while
+    /// the others keep working.
     #[must_use]
     pub fn is_configured(&self) -> bool {
+        self.empty_required_field().is_none()
+    }
+
+    /// The first required field that is empty - typically a secret whose
+    /// `${VAR}` is not set. The load warns about it by name and `hora doctor`
+    /// lists the channel as disabled: it used to go away without a word, and
+    /// the first sign was an outage nobody heard about.
+    #[must_use]
+    pub fn empty_required_field(&self) -> Option<&'static str> {
+        self.required_fields()
+            .into_iter()
+            .find(|(_field, value)| value.is_empty())
+            .map(|(field, _value)| field)
+    }
+
+    /// The fields the channel cannot send without, each with its value.
+    fn required_fields(&self) -> Vec<(&'static str, &str)> {
         match self {
-            Self::Telegram { token, chat_id, .. } => !token.is_empty() && !chat_id.is_empty(),
-            Self::Discord { webhook_url, .. } | Self::Slack { webhook_url, .. } => {
-                !webhook_url.is_empty()
+            Self::Telegram { token, chat_id, .. } => {
+                vec![("token", token.as_ref()), ("chat_id", chat_id)]
             }
-            Self::Webhook { url, .. } | Self::Ntfy { url, .. } => !url.is_empty(),
+            Self::Discord { webhook_url, .. } | Self::Slack { webhook_url, .. } => {
+                vec![("webhook_url", webhook_url.as_ref())]
+            }
+            Self::Webhook { url, .. } | Self::Ntfy { url, .. } => vec![("url", url.as_ref())],
             Self::Matrix {
                 homeserver,
                 token,
                 room_id,
                 ..
-            } => !homeserver.is_empty() && !token.is_empty() && !room_id.is_empty(),
-            Self::FreeMobile { user, pass, .. } => !user.is_empty() && !pass.is_empty(),
-            Self::Email { host, from, to, .. } => {
-                !host.is_empty() && !from.is_empty() && !to.is_empty()
+            } => vec![
+                ("homeserver", homeserver),
+                ("token", token.as_ref()),
+                ("room_id", room_id),
+            ],
+            Self::FreeMobile { user, pass, .. } => vec![("user", user), ("pass", pass.as_ref())],
+            Self::Email { host, from, to, .. } => vec![("host", host), ("from", from), ("to", to)],
+            Self::Gotify { url, token, .. } => {
+                vec![("url", url.as_ref()), ("token", token.as_ref())]
             }
-            Self::Gotify { url, token, .. } => !url.is_empty() && !token.is_empty(),
-            Self::Pushover { token, user, .. } => !token.is_empty() && !user.is_empty(),
+            Self::Pushover { token, user, .. } => {
+                vec![("token", token.as_ref()), ("user", user.as_ref())]
+            }
         }
     }
 }

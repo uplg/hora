@@ -2,6 +2,8 @@
 //! fixtures and the cross-cutting checks (headers, request ids, rate limits) here.
 
 mod annotations;
+mod auth;
+mod maintenance;
 mod pages;
 mod peer;
 mod push;
@@ -33,6 +35,7 @@ async fn test_app_with_vantage(
             [page]
             [server]
             auth_token = "0123456789abcdef"
+            view_token = "viewviewviewview"
             [server.group_tokens]
             App = "appappappappapp1"
             [health]
@@ -41,7 +44,7 @@ async fn test_app_with_vantage(
             id = "peer-x"
             name = "Peer X"
             expect_every_secs = 60
-            listen_token = "peertok"
+            listen_token = "peertok-peertok-1"
             [[monitors]]
             id = "web"
             name = "Web"
@@ -60,7 +63,7 @@ async fn test_app_with_vantage(
             name = "Beat"
             kind = "push"
             interval_secs = 60
-            push_token = "s3cret"
+            push_token = "s3cret-s3cret-16"
             "#,
     )
     .expect("config");
@@ -105,6 +108,25 @@ fn push(uri: &str) -> Request<Body> {
         .extension(fake_peer())
         .body(Body::empty())
         .expect("request")
+}
+
+/// A POST carrying `token` in `header` - where a write's credential belongs.
+fn push_with(uri: &str, header: &'static str, token: &str) -> Request<Body> {
+    let mut request = push(uri);
+    request
+        .headers_mut()
+        .insert(header, token.parse().expect("header value"));
+    request
+}
+
+/// An operator write: a POST with `server.auth_token` as the Bearer.
+fn write(uri: &str) -> Request<Body> {
+    push_with(uri, "authorization", "Bearer 0123456789abcdef")
+}
+
+/// A heartbeat for the push monitor `beat`, with its token.
+fn beat(uri: &str) -> Request<Body> {
+    push_with(uri, "x-push-token", "s3cret-s3cret-16")
 }
 
 /// Node B's config for the peer-probe tests: it knows the tcp target and
@@ -413,18 +435,18 @@ async fn openapi_and_page_render() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    // ?token= is marked deprecated on the writes, not on the reads.
+    // ?token= is refused on the writes, so none of them documents it.
     let doc: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
-    let token_param = |path: &str, method: &str| {
-        doc["paths"][path][method]["parameters"]
-            .as_array()
-            .and_then(|params| params.iter().find(|p| p["name"] == "token"))
-            .cloned()
-    };
-    let push = token_param("/api/push/{id}", "post").expect("push token param");
-    assert_eq!(push["deprecated"], true, "{push}");
-    let silence = token_param("/api/silence", "post").expect("silence token param");
-    assert_eq!(silence["deprecated"], true, "{silence}");
+    let paths = doc["paths"].as_object().expect("paths");
+    for (path, methods) in paths {
+        for method in ["post", "delete"] {
+            let documented = methods[method]["parameters"]
+                .as_array()
+                .is_some_and(|params| params.iter().any(|p| p["name"] == "token"));
+            assert!(!documented, "{method} {path} documents ?token=");
+        }
+    }
+    assert!(paths.contains_key("/api/silence") && paths.contains_key("/api/push/{id}"));
     assert_eq!(
         test_app().await.oneshot(get("/")).await.unwrap().status(),
         StatusCode::OK
@@ -487,4 +509,33 @@ async fn only_the_operator_summary_carries_the_database_size() {
     let public = app.oneshot(get("/api/summary")).await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&body_text(public).await).unwrap();
     assert!(json.get("storage").is_none(), "{json}");
+}
+
+/// Pages, JSON and the stylesheet are gzipped for a client that accepts it;
+/// fonts (already compressed) and a credentialed viewer's own responses are
+/// sent as they are.
+#[tokio::test]
+async fn text_responses_are_compressed_but_not_fonts_or_credentialed_views() {
+    let app = test_app().await;
+    let encoding = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let request = Request::builder()
+                .uri(uri)
+                .header("accept-encoding", "gzip")
+                .extension(fake_peer())
+                .body(Body::empty())
+                .unwrap();
+            let res = app.oneshot(request).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{uri}");
+            res.headers()
+                .get("content-encoding")
+                .map(|value| value.to_str().unwrap().to_owned())
+        }
+    };
+    for uri in ["/", "/api/summary", "/assets/hora.css"] {
+        assert_eq!(encoding(uri).await.as_deref(), Some("gzip"), "{uri}");
+    }
+    assert_eq!(encoding("/assets/fonts/CalSansVF.woff2").await, None);
+    assert_eq!(encoding("/?token=0123456789abcdef").await, None);
 }

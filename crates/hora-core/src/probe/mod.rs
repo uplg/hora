@@ -8,6 +8,7 @@ mod dns;
 mod family;
 mod http;
 mod icmp;
+pub mod local;
 mod reason;
 mod snapshot;
 mod tcp;
@@ -59,6 +60,26 @@ impl Outcome {
         self.status == CheckStatus::Degraded
     }
 
+    /// Whether the check could not run for lack of resources on this host:
+    /// no verdict on the target, to be skipped rather than recorded.
+    #[must_use]
+    pub fn is_local_fault(&self) -> bool {
+        self.reason == Some(FailureKind::Local)
+    }
+
+    /// A failed check that is this host's own exhaustion becomes a local
+    /// fault: by the cause its error names when it names one, else by asking
+    /// whether a socket can still be opened at all.
+    pub(crate) fn excusing_exhaustion(self) -> Self {
+        if self.is_up() || self.is_local_fault() {
+            return self;
+        }
+        match local::exhausted_now() {
+            Some(detail) => Self::down(FailureKind::Local, detail),
+            None => self,
+        }
+    }
+
     pub(crate) fn down(kind: FailureKind, error: String) -> Self {
         Self {
             status: CheckStatus::Down,
@@ -101,7 +122,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 pub async fn run(client: &Client, monitor: &Monitor, probe: NetworkProbe<'_>) -> Outcome {
     let mut outcome = probe_once(client, monitor, probe).await;
     for attempt in 1..=monitor.probe_retries() {
-        if outcome.is_up() {
+        if outcome.is_up() || outcome.is_local_fault() {
             break;
         }
         tracing::info!(
@@ -113,7 +134,7 @@ pub async fn run(client: &Client, monitor: &Monitor, probe: NetworkProbe<'_>) ->
         tokio::time::sleep(RETRY_DELAY).await;
         outcome = probe_once(client, monitor, probe).await;
     }
-    outcome
+    outcome.excusing_exhaustion()
 }
 
 async fn probe_once(client: &Client, monitor: &Monitor, probe: NetworkProbe<'_>) -> Outcome {

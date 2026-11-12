@@ -15,15 +15,17 @@
 //!    token cannot turn a peer into an SSRF relay. Both nodes must know the
 //!    monitor - which pairs naturally with sharing the config in git.
 //! 3. **Only an explicit contradiction quiets a down.** When every peer that
-//!    answered sees the target up, the down is local-only: it goes to
-//!    `alerts.notify_unconfirmed` (or is only recorded) instead of the
-//!    monitor's channels, and the peers are asked again while it lasts. No
+//!    answered sees the target up, the down is local-only: it is flagged
+//!    as such (and goes to `alerts.notify_unconfirmed` instead of the
+//!    monitor's channels when that is set), and the peers are asked again
+//!    while it lasts. Never silent unless the operator asked for it. No
 //!    answer, or any peer seeing it down too, alerts as usual: geo-partial
 //!    outages are real outages.
 
 use std::time::Duration;
 
-use super::wire::{ProbeRequest, ProbeResponse};
+use super::fingerprint::check_fingerprint;
+use super::wire::{ProbeRequest, ProbeResponse, disclosed_target};
 use crate::config::{Config, Kind, Monitor};
 
 /// Hard per-peer deadline for one confirmation probe. The responder bounds
@@ -162,11 +164,7 @@ async fn peer_verdicts(
         return None;
     }
 
-    let request = ProbeRequest {
-        from,
-        kind: monitor.kind(),
-        target: monitor.target().to_owned(),
-    };
+    let request = probe_request(config, monitor, from);
     let probes = peers.iter().map(|(name, url, token)| {
         let request = &request;
         async move {
@@ -175,6 +173,28 @@ async fn peer_verdicts(
         }
     });
     Some(futures_util::future::join_all(probes).await)
+}
+
+/// What this node asks its peers about `monitor`.
+///
+/// The target goes out as a peer may know it, secrets masked: a peer that
+/// does not have this monitor used to learn the `user:pass@` or `?api_key=`
+/// of its URL just by being asked.
+///
+/// The fingerprint speaks for a configured check: the peer then answers only
+/// with a monitor that asserts the same thing. An ad-hoc monitor (`hora probe
+/// <target> --confirm`) has no check to speak of and asks about the target
+/// alone, as every request did before.
+fn probe_request(config: &Config, monitor: &Monitor, from: String) -> ProbeRequest {
+    let configured = config
+        .find_monitor(&monitor.id)
+        .is_some_and(|known| known.spec == monitor.spec);
+    ProbeRequest {
+        from,
+        kind: monitor.kind(),
+        target: disclosed_target(monitor.target()),
+        check: configured.then(|| check_fingerprint(monitor)).flatten(),
+    }
 }
 
 /// One confirmation probe against one peer. Every failure mode - transport,
@@ -436,6 +456,7 @@ mod tests {
             id = "beat"
             name = "Beat"
             kind = "push"
+            allow_unauthenticated = true
             interval_secs = 60
             "#,
         )
@@ -452,17 +473,64 @@ mod tests {
         assert!(!enabled(&config, &exec));
     }
 
+    /// A peer that is asked about a monitor it may not have used to receive
+    /// the target verbatim, credentials included.
+    #[test]
+    fn the_probe_request_carries_no_credentials_and_says_what_is_checked() {
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://user:hunter2@api.example.com/health?api_key=s3cret"
+            expected_status = 204
+            interval_secs = 60
+            "#,
+        )
+        .expect("config");
+        let monitor = &config.monitors[0];
+        let request = probe_request(&config, monitor, "hora-a".to_owned());
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(
+            !json.contains("hunter2") && !json.contains("s3cret"),
+            "{json}"
+        );
+        assert_eq!(
+            request.target,
+            "https://***:***@api.example.com/health?api_key=***"
+        );
+        assert_eq!(request.check, check_fingerprint(monitor));
+        assert!(request.check.is_some());
+
+        // An ad-hoc probe of the same URL is no configured check: it asks
+        // about the target alone, still masked.
+        let ad_hoc = Monitor::ad_hoc(Kind::Http, monitor.target().to_owned()).unwrap();
+        let request = probe_request(&config, &ad_hoc, "hora-a".to_owned());
+        assert_eq!(
+            request.target,
+            "https://***:***@api.example.com/health?api_key=***"
+        );
+        assert!(request.check.is_none());
+    }
+
     #[test]
     fn dto_roundtrip() {
         let request = ProbeRequest {
             from: "hora-a".to_owned(),
             kind: Kind::Tcp,
             target: "db.example.com:5432".to_owned(),
+            check: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"kind\":\"tcp\""), "{json}");
+        // No fingerprint, no field: exactly the request a 0.11 node sends,
+        // which reads back as one without.
+        assert!(!json.contains("check"), "{json}");
         let back: ProbeRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.target, request.target);
+        assert!(back.check.is_none());
 
         let response: ProbeResponse = serde_json::from_str(r#"{"up":false}"#).unwrap();
         assert!(!response.up && response.error.is_none());

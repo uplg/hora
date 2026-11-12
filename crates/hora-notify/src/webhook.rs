@@ -63,7 +63,8 @@ impl WebhookNotifier {
                 ..Payload::new("recovered", monitor)
             },
             Event::CertExpiring { monitor, secs_left } => Payload {
-                days_left: Some(secs_left / 86_400),
+                days_left: Some(whole_days(secs_left)),
+                secs_left: Some(secs_left),
                 ..Payload::new("cert_expiring", monitor)
             },
             Event::DomainExpiring {
@@ -72,7 +73,8 @@ impl WebhookNotifier {
                 secs_left,
             } => Payload {
                 domain: Some(domain),
-                days_left: Some(secs_left / 86_400),
+                days_left: Some(whole_days(secs_left)),
+                secs_left: Some(secs_left),
                 ..Payload::new("domain_expiring", monitor)
             },
             Event::ReleaseAvailable(release) => Payload {
@@ -131,6 +133,14 @@ impl WebhookNotifier {
     }
 }
 
+/// `secs` in whole days, rounded towards negative infinity. Plain division
+/// truncates towards zero, which made `days_left` 0 both for a certificate
+/// with 23 hours left and for one expired 23 hours ago; a consumer testing
+/// `days_left < 0` now sees the second.
+const fn whole_days(secs: i64) -> i64 {
+    secs.div_euclid(86_400)
+}
+
 #[derive(Serialize)]
 struct Payload<'a> {
     event: &'static str,
@@ -148,15 +158,16 @@ struct Payload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     impacted: Option<&'a [&'a str]>,
     /// On down and recovered events: the down was seen from this node only
-    /// (every peer that answered sees the target up), so it went to the
-    /// `notify_unconfirmed` channels rather than the usual ones.
+    /// (every peer that answered sees the target up); with
+    /// `alerts.notify_unconfirmed` set it went to those channels rather than
+    /// the usual ones.
     #[serde(skip_serializing_if = "Option::is_none")]
     local_only: Option<bool>,
     /// Multi-vantage verdict, on down events when peers were asked.
     #[serde(skip_serializing_if = "Option::is_none")]
     vantage: Option<&'a str>,
     /// Correlated event marker, on down events when one was recorded shortly
-    /// before ("deploy api v2.3, 3m before").
+    /// before ("deploy api v2.3, 3 min before").
     #[serde(skip_serializing_if = "Option::is_none")]
     change: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,8 +190,14 @@ struct Payload<'a> {
     /// The covered period, on digest events.
     #[serde(skip_serializing_if = "Option::is_none")]
     period: Option<&'a str>,
+    /// Whole days until the expiry, rounded down: 0 during the last day, -1
+    /// from the moment it has passed (see [`whole_days`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     days_left: Option<i64>,
+    /// Seconds until the expiry, negative once it has passed; on the events
+    /// that carry `days_left`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secs_left: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -218,6 +235,7 @@ impl<'a> Payload<'a> {
             url: None,
             period: None,
             days_left: None,
+            secs_left: None,
             latency_ms: None,
             old_fingerprint: None,
             new_fingerprint: None,
@@ -320,6 +338,26 @@ mod tests {
         });
         assert_eq!(cert.event, "cert_expiring");
         assert_eq!(cert.days_left, Some(5));
+        assert_eq!(cert.secs_left, Some(5 * 86_400 + 7));
+
+        // The last day reads 0, an expired certificate -1: never the same.
+        let days = |secs_left| {
+            let payload = WebhookNotifier::payload(Event::CertExpiring {
+                monitor: "API",
+                secs_left,
+            });
+            (payload.days_left, payload.secs_left)
+        };
+        assert_eq!(days(23 * 3600), (Some(0), Some(23 * 3600)));
+        assert_eq!(days(-23 * 3600), (Some(-1), Some(-23 * 3600)));
+        assert_eq!(days(-86_400), (Some(-1), Some(-86_400)));
+        assert_eq!(days(-86_401), (Some(-2), Some(-86_401)));
+        let domain = WebhookNotifier::payload(Event::DomainExpiring {
+            monitor: "API",
+            domain: "example.com",
+            secs_left: -1,
+        });
+        assert_eq!((domain.days_left, domain.secs_left), (Some(-1), Some(-1)));
 
         let degraded = WebhookNotifier::payload(Event::Degraded {
             monitor: "API",

@@ -11,7 +11,7 @@ use hora_core::db::{self};
 use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::status::CheckStatus;
 
-use crate::auth::{QueryTokenAuth, Viewer, ct_eq, push_token};
+use crate::auth::{Viewer, ct_eq, push_token};
 use crate::error::AppError;
 use crate::flood;
 use crate::{AppState, MAX_ALERT_DEDUP_CHARS, MAX_ALERT_TAG_CHARS, MAX_ALERT_TAGS};
@@ -19,8 +19,6 @@ use hora_core::{MAX_ALERT_TITLE_CHARS, MAX_PUSH_MSG_CHARS};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PushQuery {
-    #[serde(default)]
-    token: Option<String>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
@@ -34,40 +32,52 @@ pub(crate) struct PushQuery {
     path = "/api/push/{id}",
     params(
         ("id" = String, Path, description = "Push monitor id"),
-        ("token" = Option<String>, Query, deprecated, description = "Push token, if the monitor sets one; deprecated (answered with a Deprecation header): use X-Push-Token"),
         ("status" = Option<String>, Query, description = "up (default), down or degraded"),
         ("msg" = Option<String>, Query, description = "Optional detail recorded with the heartbeat"),
         ("ping" = Option<i64>, Query, description = "Optional round-trip latency in ms (>= 0)")
     ),
+    request_body(content = Option<hora_core::mesh::wire::HeartbeatBody>, description = "Only between two Hora, and optional: the maintenance windows the sending peer plans. Applied only for a peer with `accept_maintenance_secs` whose heartbeat carries its `listen_token`; ignored for a push monitor. A heartbeat without a body announces none"),
     security((), ("push_token" = [])),
     responses(
         (status = 200, description = "Heartbeat recorded"),
         (status = 400, description = "Unknown status or negative ping"),
-        (status = 401, description = "Missing or wrong token (also for an unknown id, so ids cannot be probed)")
+        (status = 401, description = "Missing or wrong X-Push-Token (also for an unknown id, so ids cannot be probed), or a `?token=` in the URL: a write takes its token from a header only")
     )
 )]
 pub(crate) async fn push(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    query_auth: QueryTokenAuth,
     Query(query): Query<PushQuery>,
     headers: HeaderMap,
+    // Taken unread: nothing of it is buffered for a caller that has not
+    // shown its token, and a job's heartbeat body is never read at all. Only
+    // an authorized peer's is, bounded, for the maintenance it announces.
+    body: axum::body::Body,
 ) -> Result<&'static str, AppError> {
     let config = state.config.borrow().clone();
     // A push id is either a push monitor or a watched peer's listen id (peers
-    // heartbeat the same endpoint); the expected token comes from whichever matches.
-    let expected_token = if let Some(monitor) = config
+    // heartbeat the same endpoint); the expected token comes from whichever
+    // matches, with its explicit opt-out.
+    let (expected_token, open, peer) = if let Some(monitor) = config
         .monitors
         .iter()
         .find(|monitor| monitor.id == id && monitor.kind() == Kind::Push)
     {
-        monitor.push_token.as_ref()
+        (
+            monitor.push_token.as_ref(),
+            monitor.allow_unauthenticated,
+            None,
+        )
     } else if let Some(peer) = config
         .peers
         .iter()
         .find(|peer| peer.is_watched() && peer.listen_id() == id)
     {
-        peer.listen_token.as_ref()
+        (
+            peer.listen_token.as_ref(),
+            peer.allow_unauthenticated,
+            Some(peer),
+        )
     } else {
         // The same 401 as a wrong token: a 404 here would tell anyone which
         // push ids exist (and so which ones to try tokens on). The operator
@@ -76,17 +86,16 @@ pub(crate) async fn push(
         return Err(AppError::Unauthorized("invalid push token"));
     };
 
-    // A configured token is required; without one, the id alone authorizes. Prefer
-    // the `X-Push-Token` header (kept out of access logs) over the `?token=` query.
-    if let Some(expected) = expected_token {
-        let header = push_token(&headers);
-        let provided = header.or(query.token.as_deref());
-        if !provided.is_some_and(|token| ct_eq(token, expected.as_ref())) {
-            return Err(AppError::Unauthorized("invalid push token"));
-        }
-        if header.is_none() {
-            query_auth.mark();
-        }
+    // The id is public, so it never authorizes on its own: the token must
+    // match, in the `X-Push-Token` header (kept out of access logs). Only the
+    // explicit `allow_unauthenticated` opens the id - config validation
+    // refuses a push id with neither, and this holds even if it did not.
+    let authorized = match expected_token {
+        Some(expected) => push_token(&headers).is_some_and(|token| ct_eq(token, expected.as_ref())),
+        None => open,
+    };
+    if !authorized {
+        return Err(AppError::Unauthorized("invalid push token"));
     }
 
     // A typo'd status must fail loudly: recording `status=dwon` as "up" would
@@ -106,8 +115,54 @@ pub(crate) async fn push(
             .take(MAX_PUSH_MSG_CHARS)
             .collect::<String>()
     });
-    db::insert_push(&state.store, &id, status, query.ping, msg.as_deref()).await?;
+    db::insert_push(&state.core, &id, status, query.ping, msg.as_deref()).await?;
+    // The heartbeat is recorded whatever its announcement is worth: a peer
+    // that is alive must never read as silent because of what it announced.
+    if let Some(peer) = peer {
+        apply_announcement(&state, peer, expected_token.is_some(), body).await;
+    }
     Ok("ok")
+}
+
+/// The largest heartbeat body read for an announcement. A full one (32
+/// windows, each with a 500-character reason) stays well under it.
+const MAX_ANNOUNCEMENT_BYTES: usize = 64 * 1024;
+
+/// Apply the maintenance windows a peer's heartbeat announces (see
+/// `hora_core::planned::apply_announcement`, which decides what is accepted
+/// and logs it). No body means "none planned": a window announced earlier is
+/// withdrawn. A body that cannot be read - malformed, cut short, or larger
+/// than [`MAX_ANNOUNCEMENT_BYTES`] - changes nothing.
+async fn apply_announcement(
+    state: &AppState,
+    peer: &hora_core::config::Peer,
+    authenticated: bool,
+    body: axum::body::Body,
+) {
+    let now = Utc::now().timestamp();
+    let Ok(body) = axum::body::to_bytes(body, MAX_ANNOUNCEMENT_BYTES).await else {
+        hora_core::planned::refuse_unreadable(peer, now);
+        return;
+    };
+    let announced = if body.is_empty() {
+        hora_core::mesh::wire::HeartbeatBody::default()
+    } else if let Ok(announced) = serde_json::from_slice(&body) {
+        announced
+    } else {
+        hora_core::planned::refuse_unreadable(peer, now);
+        return;
+    };
+    if let Err(err) = hora_core::planned::apply_announcement(
+        &state.core,
+        peer,
+        authenticated,
+        &announced.maintenance,
+        now,
+    )
+    .await
+    {
+        tracing::error!(peer = %peer.id, "failed to apply the peer's maintenance announcement: {err:#}");
+    }
 }
 
 /// The JSON body of `POST /api/monitors/{id}/alert`. Every field is optional at
@@ -157,15 +212,14 @@ pub(crate) struct AlertResponse {
     post,
     path = "/api/monitors/{id}/alert",
     params(
-        ("id" = String, Path, description = "Monitor id the alert is attached to"),
-        ("token" = Option<String>, Query, deprecated, description = "server.auth_token; deprecated (answered with a Deprecation header): use Authorization: Bearer or X-Push-Token")
+        ("id" = String, Path, description = "Monitor id the alert is attached to")
     ),
     request_body = AlertRequest,
     security(("push_token" = []), ("bearer" = [])),
     responses(
         (status = 202, description = "Alert dispatched to the monitor's channels (or coalesced)", body = AlertResponse),
         (status = 400, description = "Empty title or unknown severity"),
-        (status = 401, description = "Missing/wrong X-Push-Token and no matching server.auth_token (also for an unknown monitor)"),
+        (status = 401, description = "Missing/wrong X-Push-Token and no matching server.auth_token (also for an unknown monitor; the read-only server.view_token never authorizes), or a `?token=` in the URL"),
         (status = 404, description = "Unknown monitor (operator token only)")
     )
 )]
@@ -180,7 +234,8 @@ pub(crate) async fn post_alert(
     let monitor = config.find_monitor(&id);
 
     // Authenticate with the monitor's own push_token (preferred, via the
-    // X-Push-Token header kept out of access logs) or the global viewer token.
+    // X-Push-Token header kept out of access logs) or the operator token
+    // (never the read-only one).
     // Dispatching to channels can flood, so - unlike a read-only view - the
     // endpoint stays closed unless a credential is configured and matches.
     // Without the operator token an unknown id answers the same 401 as a
@@ -194,9 +249,6 @@ pub(crate) async fn post_alert(
         return Err(AppError::Unauthorized(
             "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",
         ));
-    }
-    if !item_token_ok {
-        viewer.note_operator_write();
     }
     let monitor = monitor.ok_or(AppError::NotFound("unknown monitor"))?;
 
@@ -251,14 +303,18 @@ pub(crate) async fn post_alert(
     // fan the alert out to the monitor's channels. The dispatch is spawned, so a
     // slow channel never holds up the producer.
     let alert_id = db::insert_pushed_alert(
-        &state.store,
+        &state.core,
         &id,
         severity.as_str(),
         &title,
         &message,
         dedup_key.as_deref(),
     )
-    .await?;
+    .await
+    // Nothing was recorded or sent: reopen the anti-flood window, or the
+    // producer's retry would be answered "coalesced" for an alert that
+    // never existed.
+    .inspect_err(|_| state.flood.release(&id, dedup_key.as_deref()))?;
     spawn_alert_dispatch(&state, monitor, severity, title.clone(), message);
 
     tracing::info!(monitor = %id, severity = severity.as_str(), %title, "pushed alert dispatched");

@@ -13,11 +13,13 @@ a wrong path fails loudly instead of operating on an empty file.
 
 ```sh
 hora                                   # run the monitor
-hora check                             # validate the config; non-zero exit on error
+hora check [--strict]                  # validate the config; non-zero exit on error (--strict: or on a warning)
 hora test-alert [monitor-id]           # send a test alert through the real chain
 hora silence <ids|all> <duration> [reason]
 hora silence list
 hora silence clear
+hora maintenance plan (--host <name> | --monitors <ids|all>) [--at <when>] --for <duration> <reason...>
+hora maintenance list / cancel <id>    # planned maintenance windows
 hora announce <title> [body] [--severity s] [--until 4h|18:00]
 hora announce list / clear             # pinned status-page banners
 hora top [--url U] [--token T] [--interval S]   # live terminal dashboard
@@ -31,7 +33,7 @@ hora annotate <id|last> "<note>"       # attach a note to an incident
 hora event <title...>                  # record an event marker ("what changed?")
 hora event list [limit]                # the recent event markers
 hora postmortem <id|last>              # an incident's markdown post-mortem
-hora timeline [--days N]               # downs, events, alerts, banners, silences
+hora timeline [--days N]               # downs, events, alerts, banners, silences, maintenance
 hora peers diff                        # compare this node's monitors with each peer's
 hora backup <dest.db>                  # consistent snapshot (VACUUM INTO)
 hora compact [--dry-run]               # give free pages back to the disk (daemon stopped)
@@ -44,6 +46,28 @@ hora --version
 Validates the configuration and exits non-zero on error - made for CI and
 pre-deploy hooks. Validation is strict; see
 [Configuration](../../configuration/#validation).
+
+What the loader only warns about - the lines the daemon would log at startup
+(a `${VAR}` that is not set, a channel disabled by an empty secret, a
+`timeout_secs` longer than its interval, a channel over cleartext http) - is
+printed on stderr,
+one `warning: ...` line each, and counted in the verdict:
+
+```text
+$ hora check
+warning: monitor api: timeout_secs (60) exceeds interval_secs (30) - a hung probe delays the next check by up to the timeout
+config.toml is valid, 1 warning.
+```
+
+The exit code is still 0. `hora check --strict` exits non-zero when there is
+at least one warning.
+
+Run it in the environment the daemon runs in: a `${VAR}` that is not set
+there is one of those warnings, and so is the channel it leaves disabled.
+In the container it also warns, as the daemon does at startup, when the
+config is mounted in a way that defeats
+[live reload](../../configuration/#mount-the-directory-not-the-file): as a
+single file, or from a network filesystem.
 
 ## `hora test-alert`
 
@@ -74,6 +98,37 @@ characters. The same action
 exists over HTTP as
 [`POST /api/silence`](../api/#post-apisilence) for CI pipelines.
 
+## `hora maintenance`
+
+Plan a maintenance window while the daemon runs - the scheduled, visible
+counterpart of a silence, and the runtime twin of a `[[maintenance]]`
+window:
+
+```sh
+hora maintenance plan --host frank --at 2026-11-13T05:00:00Z --for 10m "kernel reboot"
+hora maintenance plan --monitors api,web --for 30m "storage move"   # starts now
+hora maintenance list                  # planned and active windows, the peers' included
+hora maintenance cancel 3              # by the id `plan` and `list` print
+```
+
+`--host` covers every monitor labelled `host = "<name>"`; `--monitors`
+takes ids (or a watched peer's `listen_id`), or `all`. Exactly one of the
+two. `--for` is required (`10m`, `1h30m`, at most 7 days); the remaining
+words are the reason, shown on the status page. `--at` takes an RFC 3339
+time, unix seconds, or a UTC clock time such as `05:00` - its next
+occurrence, meant for a person at a shell: a script should pass the full
+timestamp, so that running it again plans the same window instead of
+tomorrow's.
+
+From its start to its end the window mutes alerts (checks keep being
+recorded) and shows as *Planned maintenance*; before, the page announces
+it as *Next*. A window for this node's own `[health] host`, or for named
+monitors, is also announced to the peers on the next heartbeats: see
+[planned maintenance of a host](../../guides/peers/#planned-maintenance-of-a-host).
+A window announced by a peer cannot be cancelled from here. The same
+actions exist over HTTP as
+[`POST` / `GET` / `DELETE /api/maintenance`](../api/#post-apimaintenance).
+
 ## `hora announce`
 
 Pins a public banner on the status page - see
@@ -84,7 +139,7 @@ it the banner stays until `hora announce clear`. A title that starts with
 
 ## `hora top`
 
-A live terminal dashboard over the JSON API: per-monitor statuses, 24h
+A live terminal dashboard over the JSON API: per-monitor statuses, 24 h
 uptime, p50/p95/p99, a latency sparkline for the selected monitor (arrow
 keys), and the current trouble. `--url` and `--token` point it at any Hora -
 local or remote (`HORA_TOKEN` works too, keeping the token out of `ps`);
@@ -140,24 +195,28 @@ Two settings are replayable from the recorded check sequence:
   costs, then recommend the value that sits just above the *flap cluster* (the
   widest gap in the failure-run lengths): flaps are filtered, every real outage
   is still caught. It also flags the opposite mistake - a threshold so high a
-  real multi-check outage went undetected.
+  real multi-check outage went undetected. The replay starts from the
+  monitor's own `fail_threshold` when it has one, and a recommendation that
+  differs from it ends with where to write it: on that monitor (`to apply:
+  fail_threshold = 2 in the [[monitors]] entry with id = "api"`), since
+  `[alerts] fail_threshold` would change every other monitor too.
 - **`degraded_over_ms`** - every up check carries its latency sample, so `tune`
   reports the distribution (p50/p95/p99/max) and recommends a threshold near
   p99, warning when the current one flags normal traffic as "degraded".
 
 ```
-Uplg  (http, every 60s)
+Uplg  (http, every 1 min)
   43182 checks, 2026-05-14 19:20:00 UTC -> 2026-06-13 19:20:00 UTC, 31 down  [fail_threshold=3]
   failure runs: 11  (23, 6, 2, 2, 1, 1, 1, 1, 1, 1, 1)
   fail_threshold   alerts   detect after
-      1               11         1m 0s
-      2                4         2m 0s
-    * 3                2         3m 0s  (current)
-      4                2         4m 0s
-      5                2         5m 0s
+      1               11       1 min
+      2                4       2 min
+    * 3                2       3 min  (current)
+      4                2       4 min
+      5                2       5 min
   -> fail_threshold 3 looks right: flaps (runs <= 2) filtered, longest outage (23 checks) still caught
-  latency, up checks: p50 118ms  p95 124ms  p99 254ms  max 8812ms  [degraded_over_ms=1500]
-    1500ms flags 1 of 5668 up checks (0.0%); ~p99 is 300ms
+  latency, up checks: p50 118 ms  p95 124 ms  p99 254 ms  max 8812 ms  [degraded_over_ms=1500]
+    1500 ms flags 1 of 5668 up checks (0.0 %); ~p99 is 300 ms
 ```
 
 `probe_retries` is deliberately **not** replayed: only a probe's final attempt
@@ -179,6 +238,7 @@ hora probe db.example.com:5432       # host:port -> a tcp connect
 hora probe 192.0.2.10                # a bare IP -> an icmp ping
 hora probe api                       # a configured monitor id -> its exact config
 hora probe api.example.com --kind tcp  # force a kind for an ad-hoc target
+hora probe api.example.com --method HEAD --expect 200,401  # an ad-hoc http check
 ```
 
 A bare argument matching a configured monitor **id** is probed with that
@@ -189,6 +249,12 @@ usually denotes a web service, and ICMP is widely filtered), a bare IP is an
 `icmp` ping - or set with `--kind http|tcp|icmp|dns`. The probe exits non-zero
 when the target is down, so it doubles as a scriptable health check
 (`hora probe url && deploy`).
+
+An ad-hoc `http` target takes `--method GET|HEAD` and `--expect`, the
+monitor's `method` and `expected_status` (statuses or classes separated by
+commas: `200,401`, `2xx,401`): try a `HEAD` or a list of statuses against a
+service before writing the monitor. With a configured id both are refused:
+the monitor is probed as it is configured.
 
 With **`--confirm`** it also asks the configured
 [peers](../../guides/peers/#multi-vantage-confirmation) to probe the same
@@ -222,7 +288,10 @@ the unprivileged ICMP datagram socket (the rootless-Docker
 configured notification channels (active vs. disabled by an empty secret —
 a config with zero working channels is the one class of problem the
 watchdog itself can't warn about, since it needs at least one working
-channel to reach you).
+channel to reach you), and, on Linux, live reload (`reload`: a warning when
+the config is bind-mounted as a single file, which stops following once the
+file is replaced on the host, or sits on a network filesystem, where a
+change waits for the re-read every 60 s).
 Failures are judged against the config - no IPv6 route only fails when a
 `dual_stack` monitor needs one - and the process exits non-zero on any
 missing needed capability.
@@ -233,7 +302,7 @@ Lists recent incidents (default 20) with their ids - the lookup companion of
 `annotate`:
 
 ```
-#42  API  2026-06-10 03:12:04 UTC -> 2026-06-10 03:15:10 UTC (3m 6s)
+#42  API  2026-06-10 03:12:04 UTC -> 2026-06-10 03:15:10 UTC (3 min 6 s)
       error: HTTP 503: upstream database unreachable
       answered: HTTP/2.0 503 Service Unavailable
       note:  fiber cut
@@ -292,7 +361,16 @@ monitors have none) with each peer's, over the authenticated mesh exchange.
 [Multi-vantage confirmation](../../guides/peers/#multi-vantage-confirmation)
 only works for monitors both nodes know, and this is what checks it. Exits
 non-zero on any difference or an unreachable peer, so it can gate a config
-deploy. Needs `[health].id` and peers with a `ping_url`.
+deploy. Needs `[health].id` and peers with a `ping_url`. Targets are compared
+with the secrets of their URLs masked (`user:pass@`, query values), as peers
+list them: two monitors that differ only by a credential are one target.
+
+A target both nodes watch with different assertions (another expected
+status or list of them, another `method`, a keyword on one side only,
+another `Host` header) is reported as
+`same target, checked differently`: the peer would refuse to confirm a down
+of a check it does not run. A 0.11 peer does not say what it checks, and is
+compared on targets alone.
 
 ## `hora backup`
 

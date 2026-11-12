@@ -66,6 +66,11 @@ pub(crate) struct AlertState {
     /// seconds. They are asked again every [`LOCAL_ONLY_REASK_SECS`] while
     /// the down lasts, until they confirm it.
     local_only_asked: Option<i64>,
+    /// The announced outage ended (an up tick closed its incident) while the
+    /// level stayed [`AlertLevel::Down`]: the monitor was muted, or only
+    /// degraded and not yet confirmed so. A later confirmed down is then a
+    /// new outage and is announced, instead of passing for the old one.
+    rearmed: bool,
 }
 
 /// How often the peers are asked again about a local-only down.
@@ -88,7 +93,23 @@ impl AlertState {
     pub(crate) fn observe_down(&mut self, threshold: u32) -> bool {
         self.consecutive_down = self.consecutive_down.saturating_add(1);
         self.consecutive_degraded = 0;
-        self.consecutive_down >= threshold && self.level != AlertLevel::Down
+        let confirmed =
+            self.consecutive_down >= threshold && (self.level != AlertLevel::Down || self.rearmed);
+        if confirmed {
+            self.rearmed = false;
+        }
+        confirmed
+    }
+
+    /// An up tick ended the outage's incident, whatever the alert transitions
+    /// below do with it (they are skipped while muted). The failure streak is
+    /// over, and a down still standing as announced is re-armed: the next
+    /// confirmed down opens a new incident and alerts. The recovery itself
+    /// stays owed, through [`Self::observe_up`].
+    fn outage_ended(&mut self) {
+        self.consecutive_down = 0;
+        self.local_only_asked = None;
+        self.rearmed = self.level == AlertLevel::Down;
     }
 
     /// Count an up-but-slow tick (only when degraded alerts are on). `true`
@@ -106,6 +127,7 @@ impl AlertState {
         self.consecutive_down = 0;
         self.consecutive_degraded = 0;
         self.local_only_asked = None;
+        self.rearmed = false;
         self.level != AlertLevel::Healthy
     }
 
@@ -119,10 +141,15 @@ impl AlertState {
 }
 
 /// One monitor's (or peer's) alert state, owned by the supervisor and handed to
-/// each task it spawns for that id. A task restarted by a config edit or after
-/// a crash picks up where the previous one stopped: a still-down monitor is not
-/// announced twice, and its recovery is not lost. Empty until the first task
-/// seeds it (from the open incident).
+/// each task it spawns for that id. A task restarted by a config edit, or
+/// after it stopped on its own, picks up where the previous one stopped: a
+/// still-down monitor is not announced twice, and its recovery is not lost.
+/// Empty until the first task seeds it (from the open incident).
+///
+/// It lives in memory, so it does not outlive the process: a panic in a
+/// release build (`panic = "abort"`) ends the daemon, and the task spawned
+/// after the restart seeds a new cell from the database - the open incident,
+/// and its `notified` mark telling whether the down alert had gone out.
 ///
 /// The task writes it back synchronously right after each transition's side
 /// effect, so an abort (always at an `.await`) can at worst repeat an alert
@@ -174,6 +201,22 @@ pub fn spawn_monitor(
 /// over the interval, capped at one minute. FNV-1a rather than std's
 /// `DefaultHasher`, whose algorithm is unspecified and may change with the
 /// toolchain: a monitor keeps its phase across restarts, reloads and upgrades.
+/// How often a monitor's loop runs. A probe runs at its interval. A push
+/// monitor's interval is something else - the longest silence it tolerates -
+/// and judging a stored heartbeat costs one indexed read, so its loop runs
+/// at least every minute: ticking once per interval let a nightly job's
+/// missed heartbeat go unnoticed for up to a whole interval after its
+/// deadline, and then wait `fail_threshold` more of them - days.
+fn evaluation_interval(monitor: &Monitor) -> std::time::Duration {
+    match monitor.spec {
+        MonitorKind::Push(_) => monitor.interval().min(PUSH_EVALUATION_MAX),
+        _ => monitor.interval(),
+    }
+}
+
+/// The longest a push monitor goes between two looks at its heartbeats.
+const PUSH_EVALUATION_MAX: std::time::Duration = std::time::Duration::from_mins(1);
+
 fn stagger_offset(id: &str, interval: std::time::Duration) -> std::time::Duration {
     let span = interval.min(std::time::Duration::from_mins(1));
     span.mul_f64(f64::from(u32::try_from(fnv1a(id.as_bytes()) % 1000).unwrap_or(0)) / 1000.0)
@@ -189,7 +232,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 /// Send an alert to the coalescer. It only fails once the coalescer is gone
-/// (it panicked, or shutdown is under way), and then the alert is lost: say so
+/// (it returned, or shutdown is under way; a panic would have aborted a
+/// release build before this), and then the alert is lost: say so
 /// loudly rather than dropping it in silence.
 fn send_alert(alerts: &mpsc::UnboundedSender<AlertMsg>, monitor_id: &str, message: AlertMsg) {
     if alerts.send(message).is_err() {
@@ -219,9 +263,9 @@ async fn run(
     // every aligned tick forever. The offset is a stable hash of the id (same
     // phase across restarts), capped so a long-interval monitor still gets its
     // first check within a minute of starting.
-    let offset = stagger_offset(&monitor.id, monitor.interval());
-    let mut ticker =
-        tokio::time::interval_at(tokio::time::Instant::now() + offset, monitor.interval());
+    let every = evaluation_interval(&monitor);
+    let offset = stagger_offset(&monitor.id, every);
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + offset, every);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The exec directory comes from the environment (immutable for the process
     // lifetime), so one read outlives every config reload.
@@ -231,16 +275,27 @@ async fn run(
     // staying open forever, and a still-down monitor keeps its original start.
     let mut open_incident: Option<i64> = db::find_open_incident(&store, &monitor.id)
         .await
-        .ok()
-        .flatten();
+        .unwrap_or_else(|err| {
+            // Carrying on as if there were none: said out loud, because a
+            // down confirmed now opens a second incident beside it (both
+            // are closed together on recovery).
+            error!(monitor = %monitor.id, "cannot read the open incident: {err:#}");
+            None
+        });
     // The alert state of the previous task for this id, if the supervisor
     // restarted it; otherwise (daemon start) an open incident says the down
-    // was already announced.
+    // was already announced - unless its record says it never was: the daemon
+    // stopped between recording the incident and delivering the alert. That
+    // down is confirmed again from scratch and announced on the same incident.
     let mut state = match alert_state.get() {
         Some(state) => state,
         None => match open_incident {
+            Some(incident_id) if !announced(&store, &monitor.id, incident_id).await => {
+                warn!(monitor = %monitor.id, "open incident was never announced: confirming it again");
+                AlertState::default()
+            }
             Some(incident_id) => {
-                let mut state = AlertState::resumed_down(alert_settings(&config, &monitor.id).1);
+                let mut state = AlertState::resumed_down(alert_settings(&config, &monitor.id).0);
                 resume_local_only(&store, &alerts, &monitor.id, incident_id, &mut state).await;
                 state
             }
@@ -296,15 +351,33 @@ async fn run(
             );
         }
 
-        let (muted, threshold, alert_on_degraded) = alert_settings(&config, &monitor.id);
-        // Ad-hoc silences (`hora silence`, POST /api/silence) mute exactly like
-        // a maintenance window, read fresh each tick so they apply immediately.
-        let muted = muted || silenced(&store, &monitor.id).await;
+        let (threshold, alert_on_degraded) = alert_settings(&config, &monitor.id);
+        // A maintenance window (the config's, one planned through the API,
+        // one a peer announced) or an ad-hoc silence (`hora silence`, POST
+        // /api/silence): both read fresh each tick, so they apply at once and
+        // stop muting the moment they end.
+        let muted = muted(&store, &config, &monitor.id).await;
+        // A heartbeat that did not come is confirmed as it is: its interval
+        // (or its schedule's grace) was the tolerance. The anti-flap
+        // threshold is for checks that ran and failed, and still applies to
+        // a job that pushes `status=down`.
+        let threshold = if outcome
+            .reason
+            .is_some_and(probe::FailureKind::is_missed_heartbeat)
+        {
+            1
+        } else {
+            threshold
+        };
         // An incident is bound to confirmed-down alerts; any up tick (healthy
         // or merely degraded) ends it, whatever the alert state machine does -
         // including an incident inherited from a previous run, and even during
         // maintenance (the record should reflect the real outage span).
         if outcome.is_up() {
+            if open_incident.is_some() {
+                state.outage_ended();
+                alert_state.set(state);
+            }
             close_open_incident(&store, &monitor.id, &mut open_incident).await;
         }
 
@@ -338,7 +411,6 @@ async fn run(
                     &alerts,
                     &monitor,
                     &outcome,
-                    threshold,
                     &mut open_incident,
                 )
                 .await;
@@ -353,7 +425,6 @@ async fn run(
                     &alerts,
                     &monitor,
                     &outcome,
-                    threshold,
                     open_incident,
                 )
                 .await;
@@ -394,7 +465,6 @@ async fn run(
 /// cause's single notification. Returns whether the down is local-only (the
 /// peers that answered all see the target up): the coalescer then sends it
 /// to the quiet channels only, and the caller asks the peers again later.
-#[allow(clippy::too_many_arguments)]
 async fn confirm_down(
     config: &Config,
     store: &Store,
@@ -402,13 +472,12 @@ async fn confirm_down(
     alerts: &mpsc::UnboundedSender<AlertMsg>,
     monitor: &Monitor,
     outcome: &Outcome,
-    threshold: u32,
     open_incident: &mut Option<i64>,
 ) -> bool {
-    let (cause, impacted_names) = down_context(config, store, monitor, threshold).await;
+    let (cause, impacted_names) = down_context(config, store, monitor).await;
 
     // "What changed?": the most recent event marker (`hora event`) within the
-    // lookback, phrased relative to now ("deploy api v2.3, 3m before"). Read
+    // lookback, phrased relative to now ("deploy api v2.3, 3 min before"). Read
     // errors just drop the annotation - it must never delay the alert.
     let event = correlated_event(store, chrono::Utc::now().timestamp()).await;
 
@@ -456,9 +525,22 @@ async fn confirm_down(
             vantage: verdict.map(|verdict| verdict.text),
             event,
             local_only,
+            incident: *open_incident,
         }),
     );
     local_only
+}
+
+/// Whether an open incident's down alert went out before the restart. A read
+/// error keeps the previous behaviour (announced): alerting twice on a
+/// database hiccup is the lesser promise to break only when we know.
+async fn announced(store: &Store, monitor_id: &str, incident_id: i64) -> bool {
+    db::incident_notified(store, incident_id)
+        .await
+        .unwrap_or_else(|err| {
+            warn!(monitor = %monitor_id, "cannot tell whether the open incident was announced: {err:#}");
+            true
+        })
 }
 
 /// A daemon start that finds an open incident whose down was local-only
@@ -540,7 +622,6 @@ async fn record_routing(
 /// which is no contradiction either - the down goes out to the usual
 /// channels (once: the caller stops asking). Returns whether it is still
 /// local-only.
-#[allow(clippy::too_many_arguments)]
 async fn reconfirm_local_down(
     config: &Config,
     store: &Store,
@@ -548,7 +629,6 @@ async fn reconfirm_local_down(
     alerts: &mpsc::UnboundedSender<AlertMsg>,
     monitor: &Monitor,
     outcome: &Outcome,
-    threshold: u32,
     open_incident: Option<i64>,
 ) -> bool {
     let verdict = ask_peers(store, confirm_client, config, monitor, open_incident).await;
@@ -557,7 +637,7 @@ async fn reconfirm_local_down(
     }
     warn!(monitor = %monitor.id, "local-only down now confirmed: alerting");
     record_routing(store, monitor, open_incident, false).await;
-    let (cause, impacted_names) = down_context(config, store, monitor, threshold).await;
+    let (cause, impacted_names) = down_context(config, store, monitor).await;
     send_alert(
         alerts,
         &monitor.id,
@@ -575,6 +655,7 @@ async fn reconfirm_local_down(
             vantage: verdict.map(|verdict| verdict.text),
             event: correlated_event(store, chrono::Utc::now().timestamp()).await,
             local_only: false,
+            incident: open_incident,
         }),
     );
     false
@@ -586,7 +667,7 @@ async fn reconfirm_local_down(
 const EVENT_LOOKBACK_SECS: i64 = 3600;
 
 /// The correlated-event phrase for a down confirming at `now` ("deploy api
-/// v2.3, 3m before"), or `None` when no event was recorded within the
+/// v2.3, 3 min before"), or `None` when no event was recorded within the
 /// lookback. A read error drops the annotation (logged), never the alert.
 async fn correlated_event(store: &Store, now: i64) -> Option<String> {
     match db::latest_event_before(store, now, EVENT_LOOKBACK_SECS).await {
@@ -598,22 +679,30 @@ async fn correlated_event(store: &Store, now: i64) -> Option<String> {
     }
 }
 
-/// `"deploy api v2.3, 3m 10s before"` - the phrase stored on the incident and
+/// `"deploy api v2.3, 3 min 10 s before"` - the phrase stored on the incident and
 /// appended to the alert (each channel prefixes its own "recent change:").
 fn event_phrase(title: &str, age_secs: i64) -> String {
     format!("{title}, {} before", crate::fmt::duration(age_secs))
 }
 
-/// Live alert settings for this tick, read fresh so a maintenance window or a
-/// reloaded threshold applies immediately: (muted, fail threshold, degraded
-/// alerts enabled).
-fn alert_settings(config: &watch::Receiver<Arc<Config>>, monitor_id: &str) -> (bool, u32, bool) {
+/// Live alert settings for this tick, read fresh so a reloaded threshold
+/// applies immediately: (this monitor's fail threshold, degraded alerts
+/// enabled).
+fn alert_settings(config: &watch::Receiver<Arc<Config>>, monitor_id: &str) -> (u32, bool) {
     let snapshot = config.borrow();
     (
-        snapshot.in_maintenance(monitor_id, chrono::Utc::now()),
-        snapshot.alerts.fail_threshold.max(1),
+        snapshot.fail_threshold(monitor_id),
         snapshot.alerts.alert_on_degraded,
     )
+}
+
+/// Whether this id's alerts are muted right now: inside a maintenance window
+/// (see [`crate::planned`]) or under an ad-hoc silence. The same question for
+/// a monitor and for a watched peer (by its listen id).
+pub(crate) async fn muted(store: &Store, config: &watch::Receiver<Arc<Config>>, id: &str) -> bool {
+    let snapshot = config.borrow().clone();
+    crate::planned::in_maintenance(store, &snapshot, id, chrono::Utc::now()).await
+        || silenced(store, id).await
 }
 
 /// Announce a confirmed-degraded monitor (up, but over its latency budget).
@@ -648,8 +737,8 @@ pub(crate) async fn silenced(store: &Store, monitor_id: &str) -> bool {
 
 /// Close the open incident, if any. Failures are logged, never fatal.
 async fn close_open_incident(store: &Store, monitor_id: &str, open_incident: &mut Option<i64>) {
-    if let Some(incident_id) = open_incident.take()
-        && let Err(err) = db::update_incident_end(store, incident_id).await
+    if open_incident.take().is_some()
+        && let Err(err) = db::end_open_incidents(store, monitor_id).await
     {
         error!(monitor = %monitor_id, "failed to close incident: {err:#}");
     }
@@ -674,12 +763,15 @@ async fn tick_outcome(
                 &monitor.id,
                 &watch.cadence,
                 watch.expected_since,
+                i64::try_from(monitor.interval_secs).unwrap_or(i64::MAX),
                 chrono::Utc::now().timestamp(),
             )
             .await;
         }
         MonitorKind::Exec(spec) => match exec_dir {
-            Some(dir) => crate::exec::run(dir, monitor, spec).await,
+            Some(dir) => crate::exec::run(dir, monitor, spec)
+                .await
+                .excusing_exhaustion(),
             // Config validation guarantees the directory; defensive only.
             None => crate::probe::Outcome::down(
                 crate::probe::FailureKind::Plugin,
@@ -691,6 +783,17 @@ async fn tick_outcome(
         MonitorKind::Icmp(spec) => probe::run(client, monitor, NetworkProbe::Icmp(spec)).await,
         MonitorKind::Dns(spec) => probe::run(client, monitor, NetworkProbe::Dns(spec)).await,
     };
+    // A check this host could not run (out of descriptors, of memory) is no
+    // verdict on the target: nothing recorded, nothing counted, and the node
+    // reports itself degraded instead (see `probe::local`).
+    if outcome.is_local_fault() {
+        probe::local::note(
+            &monitor.id,
+            outcome.error.as_deref().unwrap_or("out of resources"),
+            chrono::Utc::now().timestamp(),
+        );
+        return None;
+    }
     if let Err(err) = db::insert_check(store, &monitor.id, &outcome).await {
         error!(monitor = %monitor.id, "failed to record check: {err:#}");
     }
@@ -826,16 +929,20 @@ async fn fire_burn_alert(
 /// (`cause`, as config id + display name) if any, or the list of impacted
 /// dependents (`impacted`) if this monitor is a root cause. Returns
 /// `(None, vec![])` when the monitor has no topology configured.
+///
+/// An upstream is down by its *own* threshold, as its alert and its card on
+/// the page have it: judged by this monitor's, a database confirmed on its
+/// first failure would not yet be the cause of an API that waits for three,
+/// and an upstream that waits for three would be blamed by a symptom that
+/// confirms at one.
 async fn down_context(
     config: &Config,
     store: &Store,
     monitor: &Monitor,
-    threshold: u32,
 ) -> (Option<(String, String)>, Vec<String>) {
-    let threshold_i64 = i64::from(threshold.max(1));
-
     let upstreams = topology::transitive_upstreams(&config.monitors, &monitor.id);
     for up_id in &upstreams {
+        let threshold_i64 = i64::from(config.fail_threshold(up_id));
         let Ok(recent) = db::recent_checks(store, up_id, threshold_i64).await else {
             continue;
         };
@@ -861,6 +968,41 @@ mod tests {
     use crate::status::CheckStatus;
 
     use std::time::Duration;
+
+    /// A push monitor's interval is its tolerance, not how often it is
+    /// looked at: a daily job is judged every minute, a probe at its pace.
+    #[test]
+    fn push_monitors_are_evaluated_at_least_every_minute() {
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "nightly"
+            name = "Nightly"
+            kind = "push"
+            interval_secs = 90000
+            push_token = "0123456789abcdef"
+            [[monitors]]
+            id = "fast"
+            name = "Fast"
+            kind = "push"
+            interval_secs = 20
+            push_token = "0123456789abcdef"
+            [[monitors]]
+            id = "web"
+            name = "Web"
+            target = "https://example.com"
+            interval_secs = 600
+            "#,
+        )
+        .expect("config");
+        let every =
+            |id: &str| evaluation_interval(config.monitors.iter().find(|m| m.id == id).unwrap());
+        assert_eq!(every("nightly"), std::time::Duration::from_mins(1));
+        assert_eq!(every("fast"), std::time::Duration::from_secs(20));
+        assert_eq!(every("web"), std::time::Duration::from_mins(10));
+    }
 
     #[test]
     fn stagger_offset_is_stable_and_bounded() {
@@ -941,7 +1083,7 @@ mod tests {
         let (_config_tx, config_rx) = watch::channel(Arc::clone(&config));
         let (tx, rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let coalescer = crate::coalesce::spawn(config_rx, notifier, rx, shutdown_rx);
+        let coalescer = crate::coalesce::spawn(config_rx, notifier, store.clone(), rx, shutdown_rx);
         // An ordinary incident seeds nothing (and does not ask the peers).
         let ordinary = db::insert_incident_start(&store, "web", None, None, None, &[], None, None)
             .await
@@ -986,18 +1128,18 @@ mod tests {
     fn event_phrase_formats_the_age() {
         assert_eq!(
             event_phrase("deploy api v2.3", 45),
-            "deploy api v2.3, 45s before"
+            "deploy api v2.3, 45 s before"
         );
         assert_eq!(
             event_phrase("deploy api v2.3", 180),
-            "deploy api v2.3, 3m 0s before"
+            "deploy api v2.3, 3 min before"
         );
         assert_eq!(
             event_phrase("deploy api v2.3", 4380),
-            "deploy api v2.3, 1h 13m before"
+            "deploy api v2.3, 1 h 13 min before"
         );
         // A clock skew can't produce a negative age.
-        assert_eq!(event_phrase("x", -5), "x, 0s before");
+        assert_eq!(event_phrase("x", -5), "x, 0 s before");
     }
 
     #[test]
@@ -1022,6 +1164,29 @@ mod tests {
         assert!(seeded.observe_up());
     }
 
+    #[test]
+    fn a_down_after_a_muted_recovery_is_a_new_outage() {
+        // Announced down, then silenced: an up tick closes the incident but
+        // the muted loop skips `observe_up`, so the level still reads Down.
+        let mut state = AlertState::resumed_down(2);
+        state.outage_ended();
+        // The service fails again once the silence is over: the streak
+        // restarts from zero and confirms a new outage at the threshold.
+        assert!(!state.observe_down(2), "anti-flap threshold still applies");
+        assert!(state.observe_down(2), "second outage is announced");
+        state.level = AlertLevel::Down;
+        assert!(!state.observe_down(2), "and only once");
+        assert!(state.observe_up(), "its recovery is owed");
+
+        // Without a second failure, the muted recovery is still announced
+        // by the first unmuted healthy tick, and nothing stays armed.
+        let mut state = AlertState::resumed_down(2);
+        state.outage_ended();
+        assert!(state.observe_up());
+        state.level = AlertLevel::Healthy;
+        assert!(!state.observe_down(2));
+    }
+
     /// A push monitor ticking every two seconds with a threshold of 1, wired to a
     /// test coalescer inbox.
     fn push_task(
@@ -1031,8 +1196,21 @@ mod tests {
         cell: &AlertCell,
         shutdown: &watch::Receiver<bool>,
     ) -> JoinHandle<()> {
+        monitor_task(0, store, config, alerts, cell, shutdown)
+    }
+
+    /// The task of the config's `index`-th monitor, wired to a test
+    /// coalescer inbox.
+    fn monitor_task(
+        index: usize,
+        store: &Store,
+        config: &watch::Receiver<Arc<Config>>,
+        alerts: &mpsc::UnboundedSender<AlertMsg>,
+        cell: &AlertCell,
+        shutdown: &watch::Receiver<bool>,
+    ) -> JoinHandle<()> {
         let client = crate::http::client(None).expect("client");
-        let monitor = config.borrow().monitors[0].clone();
+        let monitor = config.borrow().monitors[index].clone();
         spawn_monitor(
             monitor,
             config.clone(),
@@ -1074,6 +1252,7 @@ mod tests {
             id = "job"
             name = "Job"
             kind = "push"
+            allow_unauthenticated = true
             interval_secs = 2
             "#,
         )
@@ -1098,6 +1277,23 @@ mod tests {
             next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
             Some(("down", "job".to_owned()))
         );
+
+        // The daemon stops before that alert reached a channel (nothing here
+        // delivers it): the next start finds an open incident that was never
+        // announced, and announces it instead of only its recovery.
+        task.abort();
+        let cell = AlertCell::default();
+        let task = push_task(&store, &config_rx, &alerts_tx, &cell, &shutdown_rx);
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("down", "job".to_owned()))
+        );
+        // This time a channel takes it.
+        let incident = db::find_open_incident(&store, "job")
+            .await
+            .unwrap()
+            .expect("still the same open incident");
+        db::mark_incident_notified(&store, incident).await.unwrap();
 
         // A config edit restarts the task while still down: no second alert.
         task.abort();
@@ -1130,5 +1326,310 @@ mod tests {
             None
         );
         task.abort();
+    }
+
+    /// A local port nothing listens on: a target that fails at once.
+    async fn closed_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    /// Two monitors on the same dead target, one with `fail_threshold = 1`:
+    /// it is confirmed on its first failed check, while its neighbour waits
+    /// for the global three.
+    #[tokio::test]
+    async fn a_monitor_with_its_own_threshold_does_not_wait_for_the_global_one() {
+        let port = closed_port().await;
+        let config = crate::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "strict"
+            name = "Strict"
+            target = "http://127.0.0.1:{port}"
+            interval_secs = 2
+            fail_threshold = 1
+            [[monitors]]
+            id = "lenient"
+            name = "Lenient"
+            target = "http://127.0.0.1:{port}"
+            interval_secs = 2
+            "#
+        ))
+        .expect("config");
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        assert_eq!(alert_settings(&config_rx, "strict").0, 1);
+        assert_eq!(alert_settings(&config_rx, "lenient").0, 3);
+
+        let store = Store::in_memory().await;
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let tasks = [0, 1].map(|index| {
+            monitor_task(
+                index,
+                &store,
+                &config_rx,
+                &alerts_tx,
+                &AlertCell::default(),
+                &shutdown_rx,
+            )
+        });
+
+        // Each down alert, with the failed checks its monitor had by then.
+        let mut failures = std::collections::HashMap::new();
+        while failures.len() < 2 {
+            let (event, id) = next_alert(&mut alerts_rx, Duration::from_secs(20))
+                .await
+                .expect("both monitors are down");
+            assert_eq!(event, "down");
+            let checks = db::recent_checks(&store, &id, 10).await.unwrap().len();
+            failures.insert(id, checks);
+        }
+        for task in tasks {
+            task.abort();
+        }
+        assert!(
+            failures["strict"] < 3,
+            "waited for the global: {failures:?}"
+        );
+        assert!(failures["lenient"] >= 3, "did not wait: {failures:?}");
+    }
+
+    /// One tcp monitor on `port`, checked every second and confirmed down
+    /// on its first failed check.
+    fn tcp_config(port: u16) -> Config {
+        crate::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 1
+            [[monitors]]
+            id = "svc"
+            name = "Svc"
+            kind = "tcp"
+            target = "127.0.0.1:{port}"
+            interval_secs = 1
+            timeout_secs = 1
+            probe_retries = 0
+            "#
+        ))
+        .expect("config")
+    }
+
+    /// Plan a window for `svc` through the API's own door, from `offset`
+    /// seconds from now, for `secs` seconds.
+    async fn plan_window(store: &Store, config: &Config, offset: i64, secs: u32) {
+        let now = chrono::Utc::now().timestamp();
+        crate::planned::plan(
+            store,
+            config,
+            crate::planned::Plan {
+                monitors: Some("svc"),
+                starts_at: Some(&(now + offset).to_string()),
+                duration: &format!("{secs}s"),
+                reason: "kernel reboot",
+                ..crate::planned::Plan::default()
+            },
+            now,
+        )
+        .await
+        .expect("planned");
+    }
+
+    /// The host is not back when its window ends: the down that was muted
+    /// all along is announced from that moment, once.
+    #[tokio::test]
+    async fn a_down_that_outlives_its_planned_window_is_announced_when_it_ends() {
+        let config = tcp_config(closed_port().await);
+        let store = Store::in_memory().await;
+        // Under way, with a few seconds left.
+        plan_window(&store, &config, -1, 5).await;
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let task = monitor_task(
+            0,
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+
+        // Muted while the window lasts: checked, recorded down, not alerted,
+        // and no incident opened.
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_millis(2500)).await,
+            None
+        );
+        let checks = db::recent_checks(&store, "svc", 10).await.unwrap();
+        assert!(
+            checks.iter().any(|check| check.status == CheckStatus::Down),
+            "checks are still recorded: {checks:?}"
+        );
+        assert_eq!(db::find_open_incident(&store, "svc").await.unwrap(), None);
+
+        // The window ends and the service is still down.
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(8)).await,
+            Some(("down", "svc".to_owned()))
+        );
+        assert!(
+            db::find_open_incident(&store, "svc")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Once.
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_millis(2500)).await,
+            None
+        );
+        task.abort();
+    }
+
+    /// The host came back before its window ended: nothing was announced
+    /// going down, so nothing is when the window ends - no down, and no
+    /// recovery of an outage nobody heard about.
+    #[tokio::test]
+    async fn a_monitor_back_before_its_planned_window_ends_is_never_announced() {
+        let port = closed_port().await;
+        let config = tcp_config(port);
+        let store = Store::in_memory().await;
+        plan_window(&store, &config, -1, 5).await;
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let task = monitor_task(
+            0,
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+
+        // Down inside the window...
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_millis(2200)).await,
+            None
+        );
+        let checks = db::recent_checks(&store, "svc", 10).await.unwrap();
+        assert!(checks.iter().any(|check| check.status == CheckStatus::Down));
+        // ...and back before it ends.
+        let _listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("the port is free again");
+
+        // Through the end of the window and well past it: silence.
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(7)).await,
+            None
+        );
+        let checks = db::recent_checks(&store, "svc", 3).await.unwrap();
+        assert!(
+            checks.iter().all(|check| check.status == CheckStatus::Up),
+            "{checks:?}"
+        );
+        assert_eq!(db::find_open_incident(&store, "svc").await.unwrap(), None);
+        task.abort();
+    }
+
+    /// A window planned for later mutes nothing until it starts.
+    #[tokio::test]
+    async fn a_planned_window_that_has_not_started_mutes_nothing() {
+        let config = tcp_config(closed_port().await);
+        let store = Store::in_memory().await;
+        plan_window(&store, &config, 3600, 600).await;
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        assert!(!muted(&store, &config_rx, "svc").await);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let task = monitor_task(
+            0,
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("down", "svc".to_owned()))
+        );
+        task.abort();
+    }
+
+    /// The cause of a down is an upstream that is down by its *own*
+    /// threshold, whatever the symptom's is.
+    #[tokio::test]
+    async fn an_upstream_is_down_by_its_own_threshold() {
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "db"
+            name = "Database"
+            kind = "tcp"
+            target = "db.example.com:5432"
+            interval_secs = 60
+            fail_threshold = 1
+            [[monitors]]
+            id = "cache"
+            name = "Cache"
+            kind = "tcp"
+            target = "cache.example.com:6379"
+            interval_secs = 60
+            fail_threshold = 5
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://api.example.com"
+            interval_secs = 60
+            depends_on = ["db"]
+            [[monitors]]
+            id = "edge"
+            name = "Edge"
+            target = "https://edge.example.com"
+            interval_secs = 60
+            fail_threshold = 1
+            depends_on = ["cache"]
+            "#,
+        )
+        .expect("config");
+        let store = Store::in_memory().await;
+        let monitor = |id: &str| config.find_monitor(id).expect("configured").clone();
+        // Failed checks, one per minute of the range (minutes ago).
+        let fail = async |id: &'static str, minutes_ago: std::ops::Range<i64>| {
+            let now = chrono::Utc::now().timestamp();
+            for ago in minutes_ago {
+                sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, ?, 0)")
+                    .bind(now - ago * 60)
+                    .bind(id)
+                    .execute(store.fixture_pool())
+                    .await
+                    .unwrap();
+            }
+        };
+
+        // One failed check: the database (threshold 1) is down, and is the
+        // cause of the API, which itself waits for three.
+        fail("db", 0..1).await;
+        let (cause, impacted) = down_context(&config, &store, &monitor("api")).await;
+        assert_eq!(cause, Some(("db".to_owned(), "Database".to_owned())));
+        assert_eq!(impacted, Vec::<String>::new());
+
+        // Three failed checks: the cache (threshold 5) is not down yet, so
+        // it is not blamed by a symptom that confirms on its first failure.
+        fail("cache", 0..3).await;
+        let (cause, _) = down_context(&config, &store, &monitor("edge")).await;
+        assert_eq!(cause, None);
+        // Two more, and it is.
+        fail("cache", 3..5).await;
+        let (cause, _) = down_context(&config, &store, &monitor("edge")).await;
+        assert_eq!(cause, Some(("cache".to_owned(), "Cache".to_owned())));
     }
 }

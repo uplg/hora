@@ -190,7 +190,7 @@ impl Message {
                 monitor.to_owned(),
                 format!(
                     " is slow{}",
-                    latency_ms.map_or_else(String::new, |ms| format!(" ({ms}ms)"))
+                    latency_ms.map_or_else(String::new, |ms| format!(" ({ms} ms)"))
                 ),
             ),
             Event::Recovered { monitor, .. } => {
@@ -296,6 +296,21 @@ impl Message {
             .chain(self.lines.iter().map(Line::plain))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The headline and the body apart, for a channel with a title field
+    /// (Gotify, ntfy, Pushover): a phone's notification list then names the
+    /// monitor on every line instead of repeating one fixed title. An event
+    /// without detail (a recovery) repeats its headline as the body, which
+    /// these APIs refuse to take empty.
+    pub(crate) fn titled(&self) -> (String, String) {
+        let title = self.headline();
+        let body = self.plain_body();
+        if body.is_empty() {
+            (title.clone(), title)
+        } else {
+            (title, body)
+        }
     }
 
     /// The whole message as plain text: the headline, then the body.
@@ -495,23 +510,23 @@ fn details(event: Event<'_>) -> (Option<String>, Vec<Line>) {
     }
 }
 
-/// `"expires in 3 days"`, `"expires in 1 day"`, `"expires in 10 hours"`,
-/// `"has expired"`. Under a day the hours count: "has expired" with ten
-/// hours still to go sends someone to renew in a panic, or not at all.
+/// `"expires in 3 d"`, `"expires in 30 h"`, `"expires in 10 h"`,
+/// `"expires in 45 min"`, `"has expired"`. Under two days the hours count,
+/// and the minutes in the last hour: "has expired" with ten hours still to
+/// go sends someone to renew in a panic, or not at all.
 fn expiry_phrase(secs_left: i64) -> String {
-    const HOUR: i64 = 3_600;
-    const DAY: i64 = 86_400;
-    match secs_left {
-        ..=0 => "has expired".to_owned(),
-        1..HOUR => "expires in less than an hour".to_owned(),
-        HOUR..DAY => match secs_left / HOUR {
-            1 => "expires in 1 hour".to_owned(),
-            hours => format!("expires in {hours} hours"),
-        },
-        _ => match secs_left / DAY {
-            1 => "expires in 1 day".to_owned(),
-            days => format!("expires in {days} days"),
-        },
+    match u64::try_from(secs_left) {
+        Ok(secs) if secs > 0 => format!("expires in {}", human_duration(secs)),
+        _ => "has expired".to_owned(),
+    }
+}
+
+/// A burn window as a person reads it: the wire's `"1h"` is `"1 h"`. The
+/// webhook payload keeps the compact form.
+fn window_phrase(window: &str) -> String {
+    match window.find(|c: char| !c.is_ascii_digit()) {
+        Some(unit) if unit > 0 => format!("{} {}", &window[..unit], &window[unit..]),
+        _ => window.to_owned(),
     }
 }
 
@@ -523,7 +538,7 @@ fn release_phrase(release: &Release<'_>) -> String {
     )
 }
 
-/// `"burning error budget at 14.4x (1h) - exhausted in ~23h at this rate"`.
+/// `"burning error budget at 14.4x (1 h) - exhausted in ~23 h at this rate"`.
 fn budget_burn_phrase(burn_rate_x10: i64, window: &str, exhausted_in_secs: Option<i64>) -> String {
     let rate = if burn_rate_x10 % 10 == 0 {
         format!("{}x", burn_rate_x10 / 10)
@@ -535,7 +550,10 @@ fn budget_burn_phrase(burn_rate_x10: i64, window: &str, exhausted_in_secs: Optio
         // Zero, or a negative estimate from a clock hiccup: already spent.
         _ => " - budget already exhausted".to_owned(),
     });
-    format!("burning error budget at {rate} ({window}){eta}")
+    format!(
+        "burning error budget at {rate} ({}){eta}",
+        window_phrase(window)
+    )
 }
 
 #[cfg(test)]
@@ -566,7 +584,7 @@ mod tests {
             cause: Some("DB"),
             impacted: &[],
             vantage: Some("confirmed down from 3/3 vantage points"),
-            event: Some("deploy api v2.3, 3m before"),
+            event: Some("deploy api v2.3, 3 min before"),
             local_only: false,
         });
         assert_eq!(msg.headline(), "API is DOWN");
@@ -575,7 +593,7 @@ mod tests {
         assert_eq!(
             msg.plain(),
             "API is DOWN\nboom\ncaused by DB\nconfirmed down from 3/3 vantage points\n\
-             recent change: deploy api v2.3, 3m before"
+             recent change: deploy api v2.3, 3 min before"
         );
 
         let root = Message::render(down(None, None, &["API", "Web"]));
@@ -592,7 +610,7 @@ mod tests {
                     latency_ms: Some(1234),
                     detail: None,
                 },
-                "API is slow (1234ms)",
+                "API is slow (1234 ms)",
             ),
             (
                 Event::Recovered {
@@ -606,7 +624,7 @@ mod tests {
                     monitor: "API",
                     secs_left: 3 * 86_400,
                 },
-                "API TLS certificate expires in 3 days",
+                "API TLS certificate expires in 3 d",
             ),
             (
                 Event::DomainExpiring {
@@ -614,7 +632,7 @@ mod tests {
                     domain: "example.com",
                     secs_left: 86_400,
                 },
-                "API domain example.com expires in 1 day",
+                "API domain example.com expires in 24 h",
             ),
             (
                 Event::ReleaseAvailable(Release {
@@ -660,7 +678,7 @@ mod tests {
                     window: "1h",
                     exhausted_in_secs: Some(0),
                 },
-                "API burning error budget at 14.4x (1h) - budget already exhausted",
+                "API burning error budget at 14.4x (1 h) - budget already exhausted",
             ),
             (
                 Event::Alert {
@@ -728,16 +746,19 @@ mod tests {
         const DAY: i64 = 86_400;
         assert_eq!(expiry_phrase(-1), "has expired");
         assert_eq!(expiry_phrase(0), "has expired");
-        assert_eq!(expiry_phrase(59 * 60), "expires in less than an hour");
-        assert_eq!(expiry_phrase(3_600), "expires in 1 hour");
-        assert_eq!(expiry_phrase(10 * 3_600), "expires in 10 hours");
-        assert_eq!(expiry_phrase(DAY), "expires in 1 day");
-        assert_eq!(expiry_phrase(3 * DAY + 5), "expires in 3 days");
+        assert_eq!(expiry_phrase(59 * 60), "expires in 59 min");
+        assert_eq!(expiry_phrase(59), "expires in 59 s");
+        assert_eq!(expiry_phrase(45 * 60), "expires in 45 min");
+        assert_eq!(expiry_phrase(3_600), "expires in 1 h");
+        assert_eq!(expiry_phrase(10 * 3_600), "expires in 10 h");
+        assert_eq!(expiry_phrase(DAY), "expires in 24 h");
+        assert_eq!(expiry_phrase(3 * DAY + 5), "expires in 3 d");
+        assert_eq!(expiry_phrase(3 * DAY + 7 * 3_600), "expires in 3 d 7 h");
         assert_eq!(
             budget_burn_phrase(60, "6h", Some(200_000)),
-            "burning error budget at 6x (6h) - exhausted in ~2d 7h at this rate"
+            "burning error budget at 6x (6 h) - exhausted in ~2 d 7 h at this rate"
         );
-        // A negative estimate reads as spent, not as "~-5s".
+        // A negative estimate reads as spent, not as "~-5 s".
         assert!(budget_burn_phrase(144, "1h", Some(-5)).ends_with("budget already exhausted"));
     }
 

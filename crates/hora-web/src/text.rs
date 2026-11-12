@@ -4,6 +4,7 @@
 
 use std::fmt::Write as _;
 
+use crate::display::DisplayState;
 use crate::summary::Summary;
 
 /// Render the summary as text. `operator` adds the watched peers (node names
@@ -68,13 +69,13 @@ pub(crate) fn render(summary: &Summary, operator: bool) -> String {
                 .unwrap_or_else(|| "-".to_owned());
             let latency = monitor
                 .last_latency_ms
-                .map_or_else(|| "-".to_owned(), |ms| format!("{ms}ms"));
+                .map_or_else(|| "-".to_owned(), |ms| format!("{ms} ms"));
             let state = monitor.display_state();
 
             let _ = writeln!(
                 out,
                 "  {} {:<width$}  {:<11}  {:>8}  {:>8}",
-                status_symbol(state),
+                state.symbol(),
                 monitor.name,
                 monitor.word(),
                 uptime,
@@ -101,22 +102,10 @@ pub(crate) fn render(summary: &Summary, operator: bool) -> String {
         let _ = writeln!(out, "Watchers");
         let _ = writeln!(out, "--------");
         for peer in &summary.peers {
-            let state = crate::layout::display_state(peer.status.as_str());
-            let _ = writeln!(out, "  {} {}", status_symbol(state), peer.name);
+            let state = DisplayState::from(peer.status);
+            let _ = writeln!(out, "  {} {}", state.symbol(), peer.name);
         }
     }
 
     out
-}
-
-/// The one-glyph shape of a state, the same shapes as the page's: a disc,
-/// a half disc, a diamond, a clock, a dashed ring. Always beside its word.
-fn status_symbol(state: &str) -> &'static str {
-    match state {
-        "up" => "●",
-        "degraded" => "◐",
-        "down" => "◆",
-        "maint" => "◷",
-        _ => "◌",
-    }
 }

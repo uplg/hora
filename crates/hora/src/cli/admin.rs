@@ -22,16 +22,130 @@ pub(crate) fn import_kuma(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// `hora check`: validate the config and exit non-zero on error - meant for
-/// CI and pre-deploy hooks.
-pub(crate) fn check_config() -> Result<(), CliError> {
+/// `hora check [--strict]`: validate the config and exit non-zero on error -
+/// meant for CI and pre-deploy hooks. What the loader only warns about (a
+/// timeout longer than its interval, a channel over cleartext http) is printed
+/// and counted; `--strict` makes one warning a failure, for a pipeline that
+/// wants a config the daemon starts on without a word.
+pub(crate) fn check_config(args: &[String]) -> Result<(), CliError> {
+    let strict = match args {
+        [] => false,
+        [flag] if flag == "--strict" => true,
+        _ => return Err(usage("Usage: hora check [--strict]")),
+    };
     let config_path = config::path();
-    match config::load_from(&config_path) {
-        Ok(_) => {
-            println!("{} is valid.", config_path.display());
-            Ok(())
+    let (loaded, warnings) = collecting_warnings(|| {
+        let loaded = config::load_from(&config_path);
+        // What the daemon would say at startup about a config mounted in a
+        // way that defeats live reload: one of its warnings, so said here.
+        hora_core::config_watch::warn_caveats(&config_path);
+        loaded
+    });
+    // The daemon would log these on stderr at startup: same place here, so
+    // stdout stays the one-line verdict.
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    let verdict = check_verdict(
+        &config_path.display().to_string(),
+        loaded.map(drop),
+        warnings.len(),
+        strict,
+    )?;
+    println!("{verdict}");
+    Ok(())
+}
+
+/// The outcome of `hora check` for a load that ended in `loaded` after
+/// `warnings` warnings: the line to print, or the failure.
+fn check_verdict(
+    path: &str,
+    loaded: anyhow::Result<()>,
+    warnings: usize,
+    strict: bool,
+) -> Result<String, CliError> {
+    if let Err(err) = loaded {
+        return Err(CliError::Failed(format!("Configuration error: {err:#}")));
+    }
+    let count = match warnings {
+        0 => return Ok(format!("{path} is valid.")),
+        1 => "1 warning".to_owned(),
+        n => format!("{n} warnings"),
+    };
+    if strict {
+        return Err(CliError::Failed(format!(
+            "{path} is valid, {count}: failing because of --strict."
+        )));
+    }
+    Ok(format!("{path} is valid, {count}."))
+}
+
+/// Run `load` and return, with its result, the message of every `WARN` or
+/// `ERROR` event it emitted. `hora check` installs no global subscriber, so
+/// without this the loader's warnings went nowhere and a config that warns
+/// was simply "valid". The collector is the default subscriber for the
+/// duration of the closure only, on this thread - which is where the loader
+/// runs.
+fn collecting_warnings<T>(load: impl FnOnce() -> T) -> (T, Vec<String>) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(WarningCollector {
+        collected: std::sync::Arc::clone(&collected),
+    });
+    let result = tracing::subscriber::with_default(subscriber, load);
+    let warnings = collected
+        .lock()
+        .map(|mut warnings| std::mem::take(&mut *warnings))
+        .unwrap_or_default();
+    (result, warnings)
+}
+
+/// A `tracing` layer that keeps the text of `WARN` and `ERROR` events.
+struct WarningCollector {
+    collected: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCollector {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        // `Level` orders by verbosity: ERROR < WARN < INFO.
+        if *event.metadata().level() > tracing::Level::WARN {
+            return;
         }
-        Err(err) => Err(CliError::Failed(format!("Configuration error: {err:#}"))),
+        let mut text = EventText::default();
+        event.record(&mut text);
+        if let Ok(mut collected) = self.collected.lock() {
+            collected.push(text.0);
+        }
+    }
+}
+
+/// An event as one line: its message, then any structured field as
+/// `name=value`.
+#[derive(Default)]
+struct EventText(String);
+
+impl tracing::field::Visit for EventText {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        if field.name() == "message" {
+            // The message is `format_args!`: its `Debug` is the text itself.
+            let rest = std::mem::take(&mut self.0);
+            let _ = write!(self.0, "{value:?}");
+            if !rest.is_empty() {
+                self.0.push(' ');
+                self.0.push_str(&rest);
+            }
+        } else {
+            if !self.0.is_empty() {
+                self.0.push(' ');
+            }
+            let _ = write!(self.0, "{}={value:?}", field.name());
+        }
     }
 }
 
@@ -146,7 +260,7 @@ pub(crate) async fn doctor() -> Result<(), CliError> {
     );
     println!();
 
-    let findings = hora_core::doctor::run(&config).await;
+    let findings = hora_core::doctor::run(&config, &config_path).await;
     let mut failed = false;
     for finding in &findings {
         failed = failed || finding.status == hora_core::doctor::Status::Fail;
@@ -164,4 +278,76 @@ pub(crate) async fn doctor() -> Result<(), CliError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Warns once at load: the timeout outlives the interval.
+    const WARNS: &str = "[page]\n[server]\n[[monitors]]\nid = \"api\"\nname = \"API\"\n\
+         target = \"https://example.com\"\ninterval_secs = 30\ntimeout_secs = 60\n";
+
+    fn failure(result: Result<String, CliError>) -> String {
+        match result {
+            Err(CliError::Failed(message)) => message,
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    /// `hora check` used to print "valid" and nothing else for this config:
+    /// the loader's warning had no subscriber to land in.
+    #[test]
+    fn check_collects_the_loaders_warnings() {
+        let (loaded, warnings) = collecting_warnings(|| config::parse(WARNS));
+        assert!(loaded.is_ok());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("monitor api: timeout_secs (60) exceeds interval_secs (30)"),
+            "{warnings:?}"
+        );
+
+        let quiet = WARNS.replace("timeout_secs = 60", "timeout_secs = 10");
+        let (loaded, warnings) = collecting_warnings(|| config::parse(&quiet));
+        assert!(loaded.is_ok());
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn collected_events_keep_their_fields_and_skip_info() {
+        let ((), warnings) = collecting_warnings(|| {
+            tracing::info!("not a warning");
+            tracing::warn!(peer = "b", "link is slow");
+            tracing::error!("broken");
+        });
+        assert_eq!(warnings, ["link is slow peer=\"b\"", "broken"]);
+    }
+
+    #[test]
+    fn check_counts_warnings_and_strict_fails_on_one() {
+        let verdict = |warnings, strict| check_verdict("config.toml", Ok(()), warnings, strict);
+        assert_eq!(verdict(0, false).unwrap(), "config.toml is valid.");
+        assert_eq!(verdict(0, true).unwrap(), "config.toml is valid.");
+        assert_eq!(
+            verdict(1, false).unwrap(),
+            "config.toml is valid, 1 warning."
+        );
+        assert_eq!(
+            verdict(2, false).unwrap(),
+            "config.toml is valid, 2 warnings."
+        );
+        assert_eq!(
+            failure(verdict(2, true)),
+            "config.toml is valid, 2 warnings: failing because of --strict."
+        );
+        // An error is an error, warnings or not.
+        let broken = check_verdict("config.toml", Err(anyhow::anyhow!("bad")), 1, false);
+        assert_eq!(failure(broken), "Configuration error: bad");
+    }
+
+    #[test]
+    fn check_takes_strict_and_nothing_else() {
+        let unknown = check_config(&["--strikt".to_owned()]);
+        assert!(matches!(unknown, Err(CliError::Usage(_))), "{unknown:?}");
+    }
 }

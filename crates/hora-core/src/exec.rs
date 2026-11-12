@@ -130,7 +130,10 @@ pub(crate) async fn run(exec_dir: &Path, monitor: &Monitor, spec: &ExecSpec) -> 
             let _ = child.kill().await;
             Outcome::down(
                 FailureKind::Plugin,
-                format!("plugin timed out after {}s", monitor.timeout().as_secs()),
+                format!(
+                    "plugin timed out after {}",
+                    crate::fmt::elapsed(monitor.timeout().as_secs())
+                ),
             )
         }
     }

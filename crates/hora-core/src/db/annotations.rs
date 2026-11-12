@@ -31,7 +31,7 @@ pub async fn meta_set(store: &Store, key: &str, value: &str) -> sqlx::Result<()>
 }
 
 /// Remove a key from the `meta` key-value store (a no-op when absent).
-pub(super) async fn meta_delete(store: &Store, key: &str) -> sqlx::Result<()> {
+pub(crate) async fn meta_delete(store: &Store, key: &str) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM meta WHERE key = ?")
         .bind(key)
         .execute(store.sqlx())
@@ -193,7 +193,7 @@ pub async fn events_since(store: &Store, since: i64) -> sqlx::Result<Vec<EventMa
 }
 
 /// The most recent event within `window_secs` before `now`, if any - the
-/// incident correlation ("down 3m after deploy api v2.3").
+/// incident correlation ("down 3 min after deploy api v2.3").
 ///
 /// # Errors
 ///

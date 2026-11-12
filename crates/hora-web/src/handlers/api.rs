@@ -105,7 +105,8 @@ pub(crate) async fn latency_json(
     viewer: Viewer,
     Query(query): Query<LatencyQuery>,
 ) -> Result<Json<Vec<Point>>, AppError> {
-    let visibility = Visibility::new(&viewer.config, &viewer.audience);
+    let audience = super::pages::audience_for_monitor(&viewer, &id);
+    let visibility = Visibility::new(&viewer.config, &audience);
     visible_monitor(&viewer.config, &visibility, &id)?;
     let window = query.hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
     let since = Utc::now().timestamp() - window;

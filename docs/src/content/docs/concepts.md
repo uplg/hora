@@ -83,9 +83,12 @@ Only `fail_threshold` failures **in a row** confirm the outage. With a
 60-second interval and the default of 3, a service that restarts in under
 two minutes never alerts. A single passing check resets the count.
 
-The threshold is global. [`hora tune`](../reference/cli/#hora-tune) replays
-your own history and tells you how many alerts another value would have
-sent, and how much later it would have caught each real outage.
+The value in `[alerts]` is the default; a monitor may set its own
+`fail_threshold` (`1` for a service whose first failure is already worth a
+page, more for one known to flap). [`hora tune`](../reference/cli/#hora-tune) replays
+your own history and tells you, monitor by monitor, how many alerts another
+value would have sent, and how much later it would have caught each real
+outage.
 
 Slowness follows the same rule when you opt in: a monitor with
 `degraded_over_ms` is degraded when it answers slower than that, and
@@ -124,9 +127,10 @@ from where they are, before the alert goes out.
   (network issue near this node?)"*.
 
 In the second case, when every peer that answered sees the target up, the
-down is **local-only**: it does not page the monitor's channels. It goes to
-`alerts.notify_unconfirmed` if you set one (a quiet channel), or is only
-recorded, and the page says *Not an outage*. The peers are asked again
+down is **local-only**: the alert is flagged as seen from this node only and
+the page says *Not an outage*. It goes to the monitor's channels, or to
+`alerts.notify_unconfirmed` if you set one (a quiet channel; an empty list
+only records it). The peers are asked again
 every 5 minutes; if they come to see it down too, the real alert goes out
 then. Anything short of that explicit contradiction - no peer answering, or
 one peer seeing it down - alerts as usual: an outage seen from one region

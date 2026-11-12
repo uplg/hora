@@ -74,16 +74,19 @@ pub(crate) async fn compact(args: &[String]) -> Result<(), CliError> {
     db::apply_retention(&store, &config, purge_removed)
         .await
         .context("applying the retention")?;
-    println!("  done in {}s", started.elapsed().as_secs());
+    println!(
+        "  done in {}",
+        hora_core::fmt::elapsed(started.elapsed().as_secs())
+    );
 
     println!("Rewriting the file (VACUUM INTO a copy, then swap)...");
     let done = db::vacuum_swap(&lock, store, &path, keep).await?;
     println!(
-        "  {} -> {} ({} reclaimed) in {}s",
+        "  {} -> {} ({} reclaimed) in {}",
         bytes(done.bytes_before),
         bytes(done.bytes_after),
         bytes(done.bytes_before.saturating_sub(done.bytes_after)),
-        done.elapsed.as_secs()
+        hora_core::fmt::elapsed(done.elapsed.as_secs())
     );
     if let Some(backup) = done.backup {
         println!(

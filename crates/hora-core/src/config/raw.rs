@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::monitor::{Kind, ReleaseWatch};
-use super::parsed::{DnsRecord, Parsed};
+use super::parsed::{DnsRecord, HttpMethod, Parsed, RawStatuses};
 use super::secret::Secret;
 
 /// A `[[monitors]]` entry exactly as the TOML spells it: one flat table, every
@@ -27,8 +27,19 @@ pub(crate) struct RawMonitor {
     pub(crate) interval_secs: u64,
     #[serde(default = "default_timeout")]
     pub(crate) timeout_secs: u64,
+    /// HTTP monitor: what counts as up instead of any 2xx - a status
+    /// (`200`), a class (`"2xx"`) or a list of them (`[200, 401]`,
+    /// `["2xx", 401]`).
     #[serde(default)]
-    pub(crate) expected_status: Option<u16>,
+    pub(crate) expected_status: Option<RawStatuses>,
+    /// HTTP monitor: the request method, `"GET"` (the default) or `"HEAD"`.
+    #[serde(default)]
+    pub(crate) method: Option<Parsed<HttpMethod>>,
+    /// Consecutive failed checks before this monitor is confirmed down,
+    /// instead of `[alerts] fail_threshold`: `1` for a service whose first
+    /// failure is already worth a page, more for one that is known to flap.
+    #[serde(default)]
+    pub(crate) fail_threshold: Option<u32>,
     #[serde(default)]
     pub(crate) degraded_over_ms: Option<i64>,
     /// Latency SLO objective in ms: the 24h p95 is flagged met/breached against it.
@@ -103,10 +114,16 @@ pub(crate) struct RawMonitor {
     /// `socks5://…`). HTTP monitors only.
     #[serde(default)]
     pub(crate) proxy: Option<String>,
-    /// Push monitor only: secret required as `?token=` on `/api/push/{id}`.
-    /// Unset = no token check (anyone who knows the id can heartbeat).
+    /// The monitor's own secret, sent as `X-Push-Token`: required on
+    /// `/api/push/{id}` (a push monitor must set one, or opt out with
+    /// `allow_unauthenticated`) and accepted on `/api/monitors/{id}/alert`.
     #[serde(default)]
     pub(crate) push_token: Option<Secret>,
+    /// Push monitor only: accept heartbeats on the id alone, with no
+    /// `push_token`. The explicit opt-out for a private network; ids are not
+    /// secrets, so anyone who can reach `/api/push` can then forge them.
+    #[serde(default)]
+    pub(crate) allow_unauthenticated: Option<bool>,
     /// Push monitor only: a five-field cron expression (UTC) for when heartbeats
     /// are expected (e.g. `"0 3 * * *"` for a nightly job). The monitor goes
     /// down only when a scheduled run misses its `grace_secs`
@@ -143,6 +160,11 @@ pub(crate) struct RawMonitor {
     /// together under a section header). Ungrouped monitors appear last.
     #[serde(default)]
     pub(crate) group: Option<String>,
+    /// The machine the monitored service runs on (`host = "frank"`), a free
+    /// label. A maintenance window planned for that host covers every
+    /// monitor that carries its name; unset, nothing changes.
+    #[serde(default)]
+    pub(crate) host: Option<String>,
     /// Upstream monitor ids this one depends on. When set, a down alert is
     /// annotated with the probable upstream cause (if any upstream is also
     /// down) or with the dependents it impacts (if this is a root cause).
@@ -216,6 +238,8 @@ impl Default for RawMonitor {
             interval_secs: 60,
             timeout_secs: default_timeout(),
             expected_status: None,
+            method: None,
+            fail_threshold: None,
             degraded_over_ms: None,
             slo_latency_ms: None,
             slo_uptime: None,
@@ -234,6 +258,7 @@ impl Default for RawMonitor {
             notify: None,
             proxy: None,
             push_token: None,
+            allow_unauthenticated: None,
             schedule: None,
             grace_secs: None,
             check_cert: None,
@@ -241,6 +266,7 @@ impl Default for RawMonitor {
             ehlo_name: None,
             retention_days: None,
             group: None,
+            host: None,
             depends_on: None,
             public: default_true(),
             public_error_detail: false,

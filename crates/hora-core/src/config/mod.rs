@@ -21,7 +21,7 @@ pub use monitor::{
     NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls, TcpSpec,
     split_host_port,
 };
-pub use parsed::{Compiled, DnsRecord, ParseField, Parsed};
+pub use parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, ParseField, Parsed};
 pub use peer::Peer;
 pub use secret::{Secret, redact_url_secrets};
 
@@ -32,7 +32,10 @@ use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use env::expand_env_table;
+#[cfg(test)]
+pub(crate) use env::capture::captured_warnings;
+use env::{Lookup, expand_env_table};
+pub use validate::MIN_TOKEN_CHARS;
 use validate::validate;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,7 +64,7 @@ pub struct Config {
     /// watches it for missed pings (IN); requires a [`Health`] section.
     #[serde(default)]
     pub peers: Vec<Peer>,
-    /// Periodic recap through the notification channels ("this week: 99.97%,
+    /// Periodic recap through the notification channels ("this week: 99.97 %,
     /// 2 incidents, budget 18m of 43m left"). Absent = no digest.
     #[serde(default)]
     pub digest: Option<Digest>,
@@ -92,21 +95,37 @@ impl Config {
             .map_or(id, |monitor| monitor.name.as_str())
     }
 
-    /// The maintenance window covering `monitor_id` at `now`, if any. A window
-    /// with no `monitors` list covers all of them.
+    /// Consecutive failed checks that confirm `monitor_id` down: the
+    /// monitor's own `fail_threshold`, else the global one (see
+    /// [`Monitor::fail_threshold`]). An id that is no monitor - a watched
+    /// peer - gets the global one.
     #[must_use]
-    pub fn active_maintenance(&self, monitor_id: &str, now: DateTime<Utc>) -> Option<&Maintenance> {
-        self.maintenance.iter().find(|window| {
-            now >= window.start
-                && now <= window.end
-                && (window.monitors.is_empty() || window.monitors.iter().any(|id| id == monitor_id))
-        })
+    pub fn fail_threshold(&self, monitor_id: &str) -> u32 {
+        self.find_monitor(monitor_id).map_or_else(
+            || self.alerts.fail_threshold.max(1),
+            |monitor| monitor.fail_threshold(&self.alerts),
+        )
     }
 
-    /// Whether `monitor_id` is inside an active maintenance window (alerts muted).
+    /// The host this node runs on (`[health] host`), if it says.
     #[must_use]
-    pub fn in_maintenance(&self, monitor_id: &str, now: DateTime<Utc>) -> bool {
-        self.active_maintenance(monitor_id, now).is_some()
+    pub fn own_host(&self) -> Option<&str> {
+        self.health.as_ref()?.host.as_deref()
+    }
+
+    /// Whether `host` names a machine this configuration knows: this node's
+    /// own, a peer's, or one a monitor is labelled with.
+    #[must_use]
+    pub fn knows_host(&self, host: &str) -> bool {
+        self.own_host() == Some(host)
+            || self
+                .peers
+                .iter()
+                .any(|peer| peer.host.as_deref() == Some(host))
+            || self
+                .monitors
+                .iter()
+                .any(|monitor| monitor.host.as_deref() == Some(host))
     }
 }
 
@@ -343,16 +362,39 @@ pub struct Server {
     /// bucket; the daemon logs a warning when it sees one).
     #[serde(default)]
     pub client_ip_header: Option<String>,
+    /// How many proxies you run in front of Hora, for a `client_ip_header`
+    /// that lists several addresses (`x-forwarded-for`): each proxy appends
+    /// the address it saw, so the client's is the Nth from the *right* - the
+    /// entries before it are whatever the client sent and prove nothing.
+    /// 1 (the default) reads the last entry: what your one proxy saw.
+    #[serde(default = "default_trusted_proxies")]
+    pub trusted_proxies: u8,
     /// Per-IP API rate limit: one request slot is replenished every N seconds.
     #[serde(default = "default_rate_limit_refill")]
     pub rate_limit_refill_secs: u64,
     /// Per-IP API rate limit: maximum burst of requests.
     #[serde(default = "default_rate_limit_burst")]
     pub rate_limit_burst: u32,
-    /// Token required to view private monitors (those with `public = false`).
-    /// Sent as `Authorization: Bearer <token>` or `?token=` query parameter.
+    /// How many HTTP connections are served at once; further ones wait
+    /// their turn in the kernel's queue. Unset: 1024, fewer when the memory
+    /// limit is small (128 in a 64 MiB container). Never more than half of
+    /// the process's open-files limit: the other half is the checks' own
+    /// sockets and the database. Read at startup.
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+    /// The operator token: views private monitors (those with
+    /// `public = false`) and authorizes the write endpoints (silence,
+    /// maintenance, announce, event, alert). Sent as `Authorization: Bearer <token>`; the
+    /// read-only views also take it as a `?token=` query parameter.
     #[serde(default)]
     pub auth_token: Option<Secret>,
+    /// A read-only token: every monitor, private ones and their failure
+    /// detail included, on the read-only views - and nothing else. It never
+    /// authorizes a write, nor the operator's own streams (event markers,
+    /// silences, channel health, the mesh). The one to put in a kiosk URL or
+    /// hand to a colleague: leaked, it shows the page and cannot mute an alert.
+    #[serde(default)]
+    pub view_token: Option<Secret>,
     /// Per-group viewer tokens for the `/status/{group}` pages (lightweight
     /// multi-tenancy): a token here reveals the *full* view of its group -
     /// private monitors included - and nothing else. The global `auth_token`
@@ -365,7 +407,8 @@ pub struct Server {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Alerts {
-    /// Consecutive failed checks before a monitor is alerted as down.
+    /// Consecutive failed checks before a monitor is alerted as down. A
+    /// monitor may set its own (`fail_threshold` on the `[[monitors]]` entry).
     #[serde(default = "default_threshold")]
     pub fail_threshold: u32,
     /// Also alert when a monitor is *degraded* - up, but slower than its
@@ -404,10 +447,12 @@ pub struct Alerts {
     #[serde(default = "default_channel_fail_threshold")]
     pub channel_fail_threshold: u32,
     /// Where a *local-only* down goes: a monitor down from this node while
-    /// every peer that answered the confirmation sees it up. Such a down never
-    /// reaches the monitor's own channels (it is a problem near this node, not
-    /// an outage); it goes to these channels, or, without this key, is only
-    /// recorded (incident, timeline, the status page's "Not an outage").
+    /// every peer that answered the confirmation sees it up. Unset, it goes
+    /// to the monitor's own channels, flagged as local-only: a peer's "up" is
+    /// one answer over the network, and it must not be able to silence an
+    /// alert on its own. Set, it goes to these (quiet) channels instead; an
+    /// empty list means it is only recorded (incident, timeline, the status
+    /// page's "Not an outage").
     #[serde(default)]
     pub notify_unconfirmed: Option<Vec<String>>,
 }
@@ -461,6 +506,12 @@ pub struct Health {
     /// slow, broken or unreachable never blocks or suppresses the alert.
     #[serde(default)]
     pub confirm_with_peers: bool,
+    /// The machine this node runs on (`host = "frank"`), the label its
+    /// peers give it in their `[[peers]]` entry. A maintenance window
+    /// planned here for that host is announced to the peers as this node's
+    /// own; a window for any other host stays local.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 impl Health {
@@ -494,6 +545,10 @@ fn default_domain_expiry_days() -> u16 {
 fn default_retention_days() -> u16 {
     90
 }
+fn default_trusted_proxies() -> u8 {
+    1
+}
+
 fn default_rate_limit_refill() -> u64 {
     1
 }
@@ -542,7 +597,20 @@ pub fn load() -> anyhow::Result<Config> {
 pub fn load_from(path: &Path) -> anyhow::Result<Config> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    let mut config = parse(&raw)?;
+    parse_at(&raw, path)
+}
+
+/// [`parse`] the text of the config file at `path`, then resolve what the
+/// file only points to: the logos, read relative to its directory. Startup
+/// and hot reload both go through here, so a reload keeps the logos (and
+/// their checks) instead of dropping what `parse` alone cannot see.
+///
+/// # Errors
+///
+/// Returns an error if the TOML is invalid, a monitor is misconfigured, or
+/// the logo cannot be read.
+pub fn parse_at(raw: &str, path: &Path) -> anyhow::Result<Config> {
+    let mut config = parse(raw)?;
     let dir = path.parent().unwrap_or(Path::new(""));
     let page = &mut config.page;
     anyhow::ensure!(
@@ -579,14 +647,28 @@ pub fn parse_with_exec_dir(
     toml_str: &str,
     exec_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<Config> {
+    parse_with_env(toml_str, exec_dir, &env::process_env)
+}
+
+/// [`parse_with_exec_dir`] with the `${VAR}` references resolved by `lookup`
+/// instead of the process environment, for the same reason.
+fn parse_with_env(
+    toml_str: &str,
+    exec_dir: Option<std::path::PathBuf>,
+    lookup: Lookup<'_>,
+) -> anyhow::Result<Config> {
     // Parse first, expand `${VAR}` afterwards - in string values only - so
     // secrets (channel tokens/URLs) can stay out of the file:
     // `webhook_url = "${OPS_DISCORD}"`. Expanding the raw text instead would
     // also hydrate comments (warning about unset variables in commented-out
     // examples) and let a syntax error echo an already-expanded secret back,
-    // since TOML errors quote the offending line.
+    // since TOML errors quote the offending line. A reference that does not
+    // resolve (a variable that is not set) never fails the load: it is
+    // warned about, with the key that holds it.
     let mut table: toml::Table = toml::from_str(toml_str).context("parsing config TOML")?;
-    expand_env_table(&mut table);
+    for warning in expand_env_table(&mut table, lookup) {
+        tracing::warn!("{warning}");
+    }
     let mut config: Config = table.try_into().map_err(read_error)?;
     apply_env_overrides(&mut config);
     // Canonicalized once, here: the exec probe's escape check compares the

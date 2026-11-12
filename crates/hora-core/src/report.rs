@@ -5,7 +5,7 @@
 //! one-year aggregate retention.
 //!
 //! Served as a printable page (`/report/2026-05`) and as text
-//! (`hora report 2026-05`) - the "here is your May report, 99.95%" feature
+//! (`hora report 2026-05`) - the "here is your May report, 99.95 %" feature
 //! for operators hosting other people's services.
 
 use crate::db::Store;
@@ -67,6 +67,9 @@ pub struct MonthReport {
     /// `"May 2026"`.
     pub label: String,
     pub rows: Vec<MonitorMonth>,
+    /// The maintenance windows that touched the month, from every source
+    /// (see [`crate::planned`]): they mark its days.
+    pub maintenance: Vec<crate::planned::Window>,
 }
 
 /// Parse `"YYYY-MM"` into `(month_start, month_end)` unix seconds (UTC).
@@ -201,10 +204,18 @@ pub async fn build(store: &Store, config: &Config, month: &str) -> anyhow::Resul
         });
     }
 
+    // Every window that touched the month: the config's, and the ones
+    // planned at runtime or announced by a peer that overlap it.
+    let maintenance = crate::planned::schedule_between(store, config, start, end - 1)
+        .await
+        .windows()
+        .to_vec();
+
     Ok(MonthReport {
         month: month.to_owned(),
         label: month_label(start),
         rows,
+        maintenance,
     })
 }
 

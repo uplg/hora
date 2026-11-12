@@ -5,6 +5,7 @@ pub(crate) mod annotations;
 pub(crate) mod api;
 pub(crate) mod assets;
 pub(crate) mod badges;
+pub(crate) mod maintenance;
 pub(crate) mod pages;
 pub(crate) mod peer;
 pub(crate) mod push;
@@ -48,7 +49,7 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
 #[openapi(
     info(
         title = "Hora API",
-        description = "JSON API of a Hora uptime monitor: read-only status views, plus token-gated writes (heartbeats, alerts, silences, announcements, events) and the peer-mesh endpoints."
+        description = "JSON API of a Hora uptime monitor: read-only status views, plus token-gated writes (heartbeats, alerts, silences, planned maintenance, announcements, events) and the peer-mesh endpoints."
     ),
     modifiers(&SecuritySchemes),
     paths(
@@ -60,6 +61,9 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         announce,
         announce_clear,
         post_event,
+        maintenance::plan,
+        maintenance::list,
+        maintenance::cancel,
         peer_probe,
         peer_monitors,
         status_badge,
@@ -82,6 +86,10 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         push::AlertRequest,
         push::AlertResponse,
         annotations::EventResponse,
+        maintenance::PlannedWindow,
+        maintenance::PlannedWindows,
+        hora_core::mesh::wire::HeartbeatBody,
+        hora_core::mesh::wire::AnnouncedWindow,
         hora_core::mesh::wire::ProbeRequest,
         hora_core::mesh::wire::ProbeResponse,
         hora_core::mesh::wire::PeerMonitors,
@@ -91,9 +99,10 @@ pub(crate) static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
 )]
 struct ApiDoc;
 
-/// The two credentials the API understands: the viewer/operator token as
-/// `Authorization: Bearer`, and an item token (push monitor, alerting
-/// monitor, mesh peer) as `X-Push-Token`.
+/// The two credentials the API understands: the operator, read-only or
+/// group token as `Authorization: Bearer`, and an item token (push monitor,
+/// alerting monitor, mesh peer) as `X-Push-Token`. Headers only: the write
+/// endpoints refuse `?token=`, so none of them documents it.
 struct SecuritySchemes;
 
 impl utoipa::Modify for SecuritySchemes {
@@ -122,7 +131,7 @@ impl utoipa::Modify for SecuritySchemes {
 )]
 pub(crate) async fn healthz(State(state): State<AppState>) -> Response {
     let config = state.config.borrow().clone();
-    let report = hora_core::mesh::peer::report(&state.store, &config, &state.last_tick).await;
+    let report = hora_core::mesh::peer::report(&state.core, &config, &state.last_tick).await;
     // A degraded node answers 503 so plain health checks (Docker's
     // HEALTHCHECK, a load balancer) notice; the body is unchanged for the
     // peers and keyword monitors that read it.

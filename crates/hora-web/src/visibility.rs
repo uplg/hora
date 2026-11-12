@@ -20,6 +20,11 @@ pub(crate) enum Audience {
     /// but never the operator's streams (deploy markers, silences, channel
     /// health) nor the name of a private monitor outside the group.
     Group(String),
+    /// The `server.view_token` holder: every configured monitor with its
+    /// full failure detail, private ones included - a group token for the
+    /// whole instance. Read-only, and like a group it never gets the
+    /// operator's streams.
+    Reader,
     /// The `server.auth_token` holder: everything.
     Operator,
 }
@@ -51,8 +56,11 @@ impl<'a> Visibility<'a> {
         let mut published = HashSet::new();
         if *audience != Audience::Operator {
             for monitor in &config.monitors {
-                let in_group = matches!(audience, Audience::Group(group)
-                    if monitor.group.as_deref() == Some(group.as_str()));
+                let in_group = match audience {
+                    Audience::Reader => true,
+                    Audience::Group(group) => monitor.group.as_deref() == Some(group.as_str()),
+                    Audience::Public | Audience::Operator => false,
+                };
                 if !(monitor.public || in_group) {
                     continue;
                 }
@@ -83,7 +91,8 @@ impl<'a> Visibility<'a> {
 
     /// Whether the operator-only streams are shown: event markers (deploy
     /// titles), silences, notification-channel health, alert-free-text of
-    /// monitors that did not opt in.
+    /// monitors that did not opt in. Not for the read-only token: it opens
+    /// the monitors, not the operator's desk.
     pub(crate) fn sees_operator_streams(&self) -> bool {
         self.is_operator()
     }
@@ -183,6 +192,7 @@ mod tests {
             [page]
             [server]
             auth_token = "0123456789abcdef"
+            view_token = "fedcba9876543210"
             [server.group_tokens]
             A = "aaaaaaaaaaaaaaaa"
             [[monitors]]
@@ -229,7 +239,7 @@ mod tests {
             reason: None,
             note: Some("fiber cut".to_owned()),
             snapshot: Some("HTTP/2 503".to_owned()),
-            event: Some("deploy api v2.3, 3m before".to_owned()),
+            event: Some("deploy api v2.3, 3 min before".to_owned()),
             vantage: Some("seen UP by Hora B".to_owned()),
             created_at: 0,
         }
@@ -276,6 +286,32 @@ mod tests {
         assert!(row.event.is_none() && row.vantage.is_none());
         assert!(row.cause.is_none());
         assert_eq!(row.impacted.as_deref(), Some(r#"["A Private","Open"]"#));
+    }
+
+    #[test]
+    fn reader_gets_every_monitor_in_detail_but_no_operator_streams() {
+        let config = config();
+        let audience = Audience::Reader;
+        let vis = Visibility::new(&config, &audience);
+        for id in ["a-pub", "a-priv", "b-priv", "open"] {
+            assert!(vis.can_see(id) && vis.detailed(id), "{id}");
+        }
+        assert!(vis.can_name("A Private") && vis.can_name("B Private"));
+        // Not the operator: no streams, and no monitor the config forgot.
+        assert!(!vis.is_operator() && !vis.sees_operator_streams());
+        assert!(!vis.can_see("gone"));
+
+        let mut row = incident("b-priv");
+        vis.sanitize_incident(&mut row);
+        assert_eq!(row.error.as_deref(), Some("HTTP 503: stack trace"));
+        assert!(row.snapshot.is_some());
+        assert_eq!(row.cause.as_deref(), Some("B Private"));
+        assert_eq!(
+            row.impacted.as_deref(),
+            Some(r#"["A Private","B Private","Open"]"#)
+        );
+        // The deploy title and the mesh's node names stay the operator's.
+        assert!(row.event.is_none() && row.vantage.is_none());
     }
 
     #[test]

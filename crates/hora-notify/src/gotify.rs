@@ -27,10 +27,11 @@ impl GotifyNotifier {
 
     fn payload(event: Event<'_>) -> Payload {
         let message = Message::render(event).fit(HEAD_MAX, BODY_MAX, Unit::Chars);
+        let (title, text) = message.titled();
         Payload {
-            title: "Hora Alert".to_owned(),
+            title,
             priority: priority(message.urgency()),
-            message: message.plain(),
+            message: text,
         }
     }
 }
@@ -90,8 +91,19 @@ mod tests {
             event: None,
             local_only: false,
         });
-        assert_eq!(down.message, "API is DOWN\nno response");
+        // The headline is the title, so the body does not say it again.
+        assert_eq!(down.title, "API is DOWN");
+        assert_eq!(down.message, "no response");
         assert_eq!(down.priority, 8);
+
+        // Gotify refuses an empty message: an event without detail says its
+        // headline twice.
+        let recovered = GotifyNotifier::payload(Event::Recovered {
+            monitor: "API",
+            local_only: false,
+        });
+        assert_eq!(recovered.title, "API recovered");
+        assert_eq!(recovered.message, "API recovered");
 
         let release = GotifyNotifier::payload(Event::ReleaseAvailable(crate::Release {
             monitor: "Chat",

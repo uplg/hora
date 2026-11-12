@@ -17,7 +17,7 @@
 {%- else %}
 <ul class="past">
 {%- for incident in incidents %}
-  <li><time>{{ incident.day }}</time><span class="t"><a href="/incident/{{ incident.id }}{{ chrome.q()|safe }}">{{ incident.headline }}</a><small>{{ incident.span }}{% if let Some(error) = incident.error %} · {{ error }}{% endif %}{% if let Some(cause) = incident.cause %} · caused by {{ cause }}{% endif %}{% if let Some((_, verdict)) = incident.verdict %} · {{ verdict }}{% endif %}</small></span><span class="r">{% if incident.resolved %}{% call m::state("up", "Resolved") %}{% endcall %}{% else %}{% call m::state("down", "Ongoing") %}{% endcall %}{% endif %}</span></li>
+  <li><time datetime="{{ incident.started_iso }}">{{ incident.day }}</time><span class="t"><a href="/incident/{{ incident.id }}{{ chrome.q()|safe }}">{{ incident.headline }}</a><small>{{ incident.span }}{% if let Some(error) = incident.error %} · {{ error }}{% endif %}{% if let Some(cause) = incident.cause %} · caused by {{ cause }}{% endif %}{% if let Some((_, verdict)) = incident.verdict %} · {{ verdict }}{% endif %}</small></span><span class="r">{% if incident.resolved %}{% call m::state("up", "Resolved") %}{% endcall %}{% else %}{% call m::state("down", "Ongoing") %}{% endcall %}{% endif %}</span></li>
 {%- endfor %}
 </ul>
 {%- endif %}
@@ -28,7 +28,7 @@
 <div class="section-head"><h2 id="alerts">Alerts from your systems</h2><span class="fact">Sent to Hora by the services themselves</span></div>
 <ul class="past">
 {%- for alert in pushed_alerts %}
-  <li><time>{{ alert.at }}</time><span class="t">{{ alert.monitor }}: {{ alert.title }}{% if let Some(message) = alert.message %}<small>{{ message }}</small>{% endif %}</span><span class="r">{% call m::state(alert.state, alert.severity) %}{% endcall %}</span></li>
+  <li><time datetime="{{ alert.iso }}">{{ alert.at }}</time><span class="t">{{ alert.monitor }}: {{ alert.title }}{% if let Some(message) = alert.message %}<small>{{ message }}</small>{% endif %}</span><span class="r">{% call m::state(alert.state, alert.severity) %}{% endcall %}</span></li>
 {%- endfor %}
 </ul>
 </section>
@@ -39,7 +39,7 @@
 <div class="section-head"><h2 id="events">Changes</h2><span class="fact">Deploys and other events, operators only</span></div>
 <ul class="past">
 {%- for event in events %}
-  <li><time>{{ event.at }}</time><span class="t">{{ event.title }}</span><span class="r">{% call m::state("info", "Change") %}{% endcall %}</span></li>
+  <li><time datetime="{{ event.iso }}">{{ event.at }}</time><span class="t">{{ event.title }}</span><span class="r">{% call m::state("info", "Change") %}{% endcall %}</span></li>
 {%- endfor %}
 </ul>
 </section>

@@ -318,10 +318,28 @@ pub async fn last_heartbeat_time(store: &Store, monitor_id: &str) -> sqlx::Resul
         .map(|beat| beat.time))
 }
 
-/// Current status from the recent checks (newest first): a single failure only
-/// counts as `degraded` until `threshold` consecutive failures confirm `down`.
+/// A monitor's current status from its recent checks (newest first): a single
+/// failure only counts as `degraded` until `threshold` consecutive failures
+/// confirm `down` - except a missed heartbeat, which is down at once, as the
+/// scheduler alerts on it at once (see `FailureKind::is_missed_heartbeat`).
 #[must_use]
 pub fn derive_status(recent: &[Latest], threshold: i64) -> MonitorState {
+    let missed = recent.first().is_some_and(|latest| {
+        latest.status == CheckStatus::Down
+            && latest.reason.is_some_and(FailureKind::is_missed_heartbeat)
+    });
+    if missed {
+        MonitorState::Down
+    } else {
+        derive_status_by_threshold(recent, threshold)
+    }
+}
+
+/// [`derive_status`] without the missed-heartbeat rule: every failure, a
+/// miss included, needs `threshold` in a row. A watched peer's status: its
+/// alert keeps the threshold (a peer's silence is weighed with the mesh).
+#[must_use]
+pub fn derive_status_by_threshold(recent: &[Latest], threshold: i64) -> MonitorState {
     let Some(latest) = recent.first() else {
         return MonitorState::Unknown;
     };

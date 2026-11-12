@@ -89,6 +89,20 @@ impl Flood {
             Admission::Send
         }
     }
+
+    /// Give back the window [`Self::admit`] just opened: the alert it admitted
+    /// was not recorded after all (the insert failed), so the producer's retry
+    /// must be admitted again instead of being coalesced into an alert that
+    /// never went out.
+    pub(crate) fn release(&self, monitor_id: &str, dedup_key: Option<&str>) {
+        let Some(dedup_key) = dedup_key.filter(|key| !key.is_empty()) else {
+            return;
+        };
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(monitor_id.to_owned(), dedup_key.to_owned()));
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +142,26 @@ mod tests {
                 retry_after: 100
             }
         );
+    }
+
+    #[test]
+    fn a_released_window_admits_the_retry() {
+        let flood = Flood::default();
+        assert!(matches!(
+            flood.admit("m", Some("k"), 0, 60),
+            Admission::Send
+        ));
+        flood.release("m", Some("k"));
+        assert!(matches!(
+            flood.admit("m", Some("k"), 1, 60),
+            Admission::Send
+        ));
+        // Releasing without a key (never coalesced) is a no-op.
+        flood.release("m", None);
+        assert!(matches!(
+            flood.admit("m", Some("k"), 2, 60),
+            Admission::Coalesce { suppressed: 1, .. }
+        ));
     }
 
     #[test]

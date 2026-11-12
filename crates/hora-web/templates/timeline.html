@@ -12,7 +12,7 @@
 {%- else %}
 <ol class="tl">
 {%- for entry in entries %}
-  <li>{% call m::glyph(entry.state) %}{% endcall %}<time>{{ entry.at }}</time><span class="e"><b>{{ entry.title }}</b><span><span class="word {{ entry.state }}">{{ entry.word }}</span>{% if let Some(detail) = entry.detail %} · {{ detail }}{% endif %}{% if let Some(incident) = entry.incident %} · <a href="/incident/{{ incident }}{{ chrome.q()|safe }}">Read the post-mortem</a>{% endif %}</span></span></li>
+  <li>{% call m::glyph(entry.state) %}{% endcall %}<time datetime="{{ entry.iso }}">{{ entry.at }}</time><span class="e"><b>{{ entry.title }}</b><span><span class="word {{ entry.state }}">{{ entry.word }}</span>{% if let Some(detail) = entry.detail %} · {{ detail }}{% endif %}{% if let Some(incident) = entry.incident %} · <a href="/incident/{{ incident }}{{ chrome.q()|safe }}">Read the post-mortem</a>{% endif %}</span></span></li>
 {%- endfor %}
 </ol>
 {%- endif %}

@@ -105,6 +105,130 @@ async fn peer_probe_reports_its_own_vantage() {
     assert!(verdict.error.is_some());
 }
 
+/// A local HTTP server answering every request `200 ok`. Returns its port.
+async fn http_ok_server() -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = [0; 4096];
+                if socket.read(&mut request).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+            });
+        }
+    });
+    port
+}
+
+/// Node B with two monitors on one URL (credentials in it): `wants-200`
+/// passes against [`http_ok_server`], `wants-204` fails.
+fn two_checks_config(port: u16) -> String {
+    format!(
+        r#"
+            [page]
+            [server]
+            [health]
+            id = "hora-b"
+            [[peers]]
+            id = "hora-a"
+            name = "A"
+            expect_every_secs = 60
+            listen_token = "tok-a-to-b-16char"
+            [[monitors]]
+            id = "wants-200"
+            name = "Wants 200"
+            target = "http://127.0.0.1:{port}/health?api_key=s3cret"
+            expected_status = 200
+            interval_secs = 60
+            timeout_secs = 2
+            [[monitors]]
+            id = "wants-204"
+            name = "Wants 204"
+            target = "http://127.0.0.1:{port}/health?api_key=s3cret"
+            expected_status = 204
+            interval_secs = 60
+            timeout_secs = 2
+            "#
+    )
+}
+
+async fn probe_verdict(config: &str, body: &str) -> Result<bool, StatusCode> {
+    let res = app_from(config)
+        .await
+        .oneshot(probe_request(body, Some("tok-a-to-b-16char")))
+        .await
+        .unwrap();
+    if res.status() != StatusCode::OK {
+        return Err(res.status());
+    }
+    let verdict: hora_core::mesh::wire::ProbeResponse =
+        serde_json::from_str(&body_text(res).await).unwrap();
+    Ok(verdict.up)
+}
+
+/// The responder used to answer with the first monitor on the target,
+/// whatever it asserted: a requester whose check wants a 204 was told "up" by
+/// the monitor that wants a 200.
+#[tokio::test]
+async fn peer_probe_answers_with_the_monitor_that_checks_the_same_way() {
+    use hora_core::mesh::fingerprint::check_fingerprint;
+
+    let port = http_ok_server().await;
+    let config = two_checks_config(port);
+    let parsed = hora_core::config::parse(&config).expect("config");
+    let wants_200 = check_fingerprint(&parsed.monitors[0]).unwrap();
+    let wants_204 = check_fingerprint(&parsed.monitors[1]).unwrap();
+    assert_ne!(wants_200, wants_204);
+    let masked = format!("http://127.0.0.1:{port}/health?api_key=***");
+    let request = |check: &str| {
+        format!(r#"{{"from":"hora-a","kind":"http","target":"{masked}","check":"{check}"}}"#)
+    };
+
+    assert_eq!(probe_verdict(&config, &request(&wants_200)).await, Ok(true));
+    assert_eq!(
+        probe_verdict(&config, &request(&wants_204)).await,
+        Ok(false)
+    );
+    // A check this node does not run on the target: the same answer as a
+    // target it does not have.
+    assert_eq!(
+        probe_verdict(&config, &request(&"0".repeat(64))).await,
+        Err(StatusCode::NOT_FOUND)
+    );
+}
+
+/// A 0.11 node sends no fingerprint, and its target verbatim: it is answered
+/// as before, by the first monitor on the target. A 0.12 node's masked target
+/// finds the same monitor.
+#[tokio::test]
+async fn peer_probe_without_fingerprint_matches_on_the_target_alone() {
+    let port = http_ok_server().await;
+    let config = two_checks_config(port);
+    for target in [
+        format!("http://127.0.0.1:{port}/health?api_key=s3cret"),
+        format!("http://127.0.0.1:{port}/health?api_key=***"),
+    ] {
+        let body = format!(r#"{{"from":"hora-a","kind":"http","target":"{target}"}}"#);
+        assert_eq!(probe_verdict(&config, &body).await, Ok(true), "{target}");
+    }
+    // Another path is another target, masked or not.
+    let body = format!(
+        r#"{{"from":"hora-a","kind":"http","target":"http://127.0.0.1:{port}/other?api_key=***"}}"#
+    );
+    assert_eq!(
+        probe_verdict(&config, &body).await,
+        Err(StatusCode::NOT_FOUND)
+    );
+}
+
 #[tokio::test]
 async fn peer_monitors_authenticates_and_discloses_probeable_targets() {
     // Same strict auth as the probe endpoint: wrong token, missing token
@@ -112,7 +236,7 @@ async fn peer_monitors_authenticates_and_discloses_probeable_targets() {
     for (from, token) in [
         ("peer-x", Some("wrong")),
         ("peer-x", None),
-        ("nobody", Some("peertok")),
+        ("nobody", Some("peertok-peertok-1")),
     ] {
         let mut builder = Request::builder()
             .uri(format!("/api/peer/monitors?from={from}"))
@@ -135,7 +259,7 @@ async fn peer_monitors_authenticates_and_discloses_probeable_targets() {
         .oneshot(
             Request::builder()
                 .uri("/api/peer/monitors?from=peer-x")
-                .header("x-push-token", "peertok")
+                .header("x-push-token", "peertok-peertok-1")
                 .extension(fake_peer())
                 .body(Body::empty())
                 .unwrap(),
@@ -184,7 +308,7 @@ async fn peer_monitors_match_the_full_summary() {
         .oneshot(
             Request::builder()
                 .uri("/api/peer/monitors?from=peer-x")
-                .header("x-push-token", "peertok")
+                .header("x-push-token", "peertok-peertok-1")
                 .extension(fake_peer())
                 .body(Body::empty())
                 .unwrap(),
@@ -383,4 +507,59 @@ async fn multi_vantage_confirms_across_two_real_nodes() {
     );
     // No answer is no contradiction: the alert goes out as usual.
     assert!(!verdict.local_only);
+}
+
+/// A maintenance window mutes this node's alerts, never what it sees: asked
+/// by a peer about a monitor it has in maintenance, it still probes and
+/// answers what it found. The peer's alert is the peer's to decide (the one
+/// that is rebooting is not asking anyone), and nothing is recorded here.
+#[tokio::test]
+async fn peer_probe_answers_honestly_for_a_monitor_in_maintenance() {
+    // A port nothing listens on: the service is down with its host.
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let toml = vantage_config(port);
+    let (app, store) = app_with_pool(&toml).await;
+    let config = hora_core::config::parse(&toml).expect("config");
+    let now = chrono::Utc::now().timestamp();
+    hora_core::planned::plan(
+        &store,
+        &config,
+        hora_core::planned::Plan {
+            monitors: Some("svc"),
+            duration: "10m",
+            reason: "kernel reboot",
+            ..hora_core::planned::Plan::default()
+        },
+        now,
+    )
+    .await
+    .expect("planned");
+    let at = chrono::DateTime::from_timestamp(now, 0).expect("time");
+    assert!(hora_core::planned::in_maintenance(&store, &config, "svc", at).await);
+
+    let body = format!(r#"{{"from":"hora-a","kind":"tcp","target":"127.0.0.1:{port}"}}"#);
+    let res = app
+        .oneshot(probe_request(&body, Some("tok-a-to-b-16char")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let verdict: hora_core::mesh::wire::ProbeResponse =
+        serde_json::from_str(&body_text(res).await).unwrap();
+    assert!(!verdict.up, "down is down, window or not");
+    // Answering a peer is not an alert of this node's: no incident, no check.
+    assert_eq!(
+        hora_core::db::find_open_incident(&store, "svc")
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        hora_core::db::recent_checks(&store, "svc", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -5,17 +5,73 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, TimeDelta, Utc};
 
+use hora_core::SECONDS_PER_DAY;
 use hora_core::db::DayRow;
 use hora_core::status::MonitorState;
 
 use super::view::DayCell;
 
 /// Whether the measured p95 meets the configured latency objective.
-pub(crate) fn slo_state(target: Option<i64>, p95: Option<i64>) -> &'static str {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SloState {
+    /// No objective, or nothing measured yet.
+    None,
+    Met,
+    Breached,
+}
+
+impl SloState {
+    /// As the operator's details say it.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Met => "met",
+            Self::Breached => "breached",
+            Self::None => "no data",
+        }
+    }
+}
+
+/// Whether the measured p95 meets the configured latency objective.
+pub(crate) fn slo_state(target: Option<i64>, p95: Option<i64>) -> SloState {
     match (target, p95) {
-        (Some(target), Some(p95)) if p95 <= target => "met",
-        (Some(_), Some(_)) => "breached",
-        _ => "none",
+        (Some(target), Some(p95)) if p95 <= target => SloState::Met,
+        (Some(_), Some(_)) => SloState::Breached,
+        (None, _) | (_, None) => SloState::None,
+    }
+}
+
+/// How much of a monitor's error budget is left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BudgetState {
+    /// No availability objective.
+    None,
+    Met,
+    /// A quarter of the budget or less is left.
+    Low,
+    /// Nothing is left.
+    Breached,
+}
+
+/// Where a monitor's TLS certificate stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CertState {
+    /// No certificate recorded (not an `https://` monitor, or not read yet).
+    None,
+    Ok,
+    /// Valid, but inside the warning threshold (`alerts.cert_expiry_days`).
+    Warn,
+    Expired,
+}
+
+impl CertState {
+    /// As the operator's details say it.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+            Self::Expired => "expired",
+        }
     }
 }
 
@@ -47,21 +103,45 @@ pub(crate) fn overall_label(status: MonitorState) -> &'static str {
     }
 }
 
-pub(crate) fn cert_state_for(days: Option<i64>, threshold: i64) -> &'static str {
-    match days {
-        None => "none",
-        Some(remaining) if remaining <= 0 => "expired",
-        Some(remaining) if remaining <= threshold => "warn",
-        Some(_) => "ok",
+/// The days left on a certificate that expires `secs_left` seconds from now
+/// (negative once it has), as a whole number that never lies about which
+/// side of the expiry it is on: at least 1 while the certificate is valid,
+/// at most -1 once it has expired. Truncating to days said 0 for both 23
+/// hours left and 23 hours gone, and 0 read as "expired".
+pub(crate) fn cert_days_left(secs_left: i64) -> i64 {
+    if secs_left >= 0 {
+        (secs_left / SECONDS_PER_DAY).max(1)
+    } else {
+        // Floors: one second past is a day gone, like one second short of a
+        // day left is no day left.
+        secs_left.div_euclid(SECONDS_PER_DAY)
     }
 }
 
-pub(crate) fn cert_label(days: i64) -> String {
-    if days <= 0 {
-        "expired".to_owned()
-    } else {
-        format!("{days}d")
+/// Where a certificate stands, from the seconds until it expires (negative
+/// once it has; its last second of validity is still valid). `threshold` is
+/// the warning's lead, in days.
+pub(crate) fn cert_state_for(secs_left: Option<i64>, threshold: i64) -> CertState {
+    match secs_left {
+        None => CertState::None,
+        Some(left) if left < 0 => CertState::Expired,
+        Some(left) if left / SECONDS_PER_DAY <= threshold => CertState::Warn,
+        Some(_) => CertState::Ok,
     }
+}
+
+/// The certificate's time left, short, for the operator's details: `40 d`,
+/// `23 h` under a day, `12 min` under an hour - one unit, rounded down.
+pub(crate) fn cert_label(secs_left: i64) -> String {
+    if secs_left < 0 {
+        return "expired".to_owned();
+    }
+    let unit = match secs_left {
+        SECONDS_PER_DAY.. => SECONDS_PER_DAY,
+        3600.. => 3600,
+        _ => 60,
+    };
+    hora_core::fmt::duration(secs_left - secs_left % unit)
 }
 
 pub(crate) fn iso(timestamp: i64) -> Option<String> {

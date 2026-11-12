@@ -10,6 +10,7 @@ use reqwest::{Client, RequestBuilder};
 use super::snapshot::{MAX_SNAPSHOT_BODY_CHARS, render_snapshot, snapshot_head, snippet};
 use super::{Outcome, millis, over_threshold};
 use crate::config::{HttpSpec, JsonAssert, Monitor, NumberAssert, Secret};
+use crate::http::{RedirectGuard, is_downgrade};
 
 pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) -> Outcome {
     let start = Instant::now();
@@ -21,8 +22,8 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
         let mut response = send_following_redirects(client, monitor, spec).await?;
         let latency = millis(start.elapsed());
         let code = response.status().as_u16();
-        let status_ok = match spec.expected_status {
-            Some(expected) => code == expected,
+        let status_ok = match &spec.expected_status {
+            Some(expected) => expected.matches(code),
             None => response.status().is_success(),
         };
         // Read the body only when we need it: to detail a failure, or to run
@@ -111,24 +112,13 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
             FailureKind::InsecureRedirect,
             format!("redirected to plain http ({to})"),
         ),
-        Ok(Err(HttpError::Request(err))) => {
-            // A proxy that refused us (407 on CONNECT, SOCKS credentials) is
-            // not the target failing: say so.
-            if spec.proxy.is_some()
-                && let Some(cause) = proxy_failure(&err)
-            {
-                return Outcome::down(FailureKind::ConnectionFailed, cause);
-            }
-            let (kind, detail) = describe(&err);
-            // The category alone ("connection failed") reads the same for a
-            // refused port and an expired certificate: name the cause when the
-            // error chain carries one (never the URL, which may hold secrets).
-            let detail = match transport_cause(&err) {
-                Some(cause) => format!("{detail}: {cause}"),
-                None => detail.to_owned(),
-            };
-            Outcome::down(kind, detail)
-        }
+        // The category only: where the redirect pointed is the operator's
+        // network as an outsider described it, not something to store.
+        Ok(Err(HttpError::PrivateRedirect)) => Outcome::down(
+            FailureKind::PrivateRedirect,
+            "redirected to a private address".to_owned(),
+        ),
+        Ok(Err(HttpError::Request(err))) => request_failure(spec, &err),
         Err(_elapsed) => Outcome::down(FailureKind::Timeout, "request timed out".to_owned()),
     }
 }
@@ -145,15 +135,25 @@ enum HttpError {
     TooManyRedirects,
     /// An `https` hop redirected to plain `http`; holds the target origin.
     InsecureRedirect(String),
+    /// A public target redirected to an internal address.
+    PrivateRedirect,
 }
 
-/// Send the monitor's GET, following redirects manually so the configured
+/// Send the monitor's request, following redirects manually so the configured
 /// headers - which may carry credentials (an API key, a bearer token) - are
 /// re-attached only while the redirect stays on the original origin. reqwest
 /// strips its own well-known sensitive headers across hosts but not arbitrary
 /// custom ones, so without this a malicious or compromised target could 30x us
 /// to an attacker host and harvest the header. Cross-origin hops are still
-/// followed, just without the headers.
+/// followed, just without the headers - unless they lead a public target to
+/// an internal address, which is refused (see
+/// [`RedirectGuard`](crate::http::RedirectGuard), which also states what a DNS
+/// rebinding or a proxy leaves open).
+///
+/// The method does not change along the chain: a `HEAD` monitor sends `HEAD`
+/// to every hop, a `GET` one `GET`. The rule that turns a request into a
+/// `GET` on a 301, 302 or 303 is about methods with a body, which a monitor
+/// cannot have.
 async fn send_following_redirects(
     client: &Client,
     monitor: &Monitor,
@@ -162,20 +162,32 @@ async fn send_following_redirects(
     let target = &spec.url;
     // A monitor expecting a 3xx asserts the redirect itself (HTTP -> HTTPS,
     // apex -> www): following it would judge the destination instead, and the
-    // probe could never pass.
+    // probe could never pass. One 3xx among the accepted statuses is enough:
+    // with `[200, 301]` a followed 301 could never count either.
     let follow = !spec
         .expected_status
-        .is_some_and(|status| (300..400).contains(&status));
+        .as_ref()
+        .is_some_and(crate::config::ExpectedStatus::accepts_redirect);
     let mut url = target.clone();
+    let mut guard: Option<RedirectGuard> = None;
     for _ in 0..=MAX_REDIRECTS {
         // The per-request timeout overrides the client's 15s notifier backstop,
         // which may be *shorter* than the monitor's own; the caller's outer
         // deadline still bounds the whole chain.
-        let mut request = client.get(url.clone()).timeout(monitor.timeout());
+        let mut request = client
+            .request(spec.method.into(), url.clone())
+            .timeout(monitor.timeout());
         if same_origin(target, &url) {
             request = with_headers(request, &spec.headers);
         }
         let response = request.send().await.map_err(HttpError::Request)?;
+        // A redirected hop that reached an internal address after all is
+        // dropped here, before anything reads its body.
+        if let Some(guard) = guard {
+            guard
+                .check_peer(&response)
+                .map_err(|_| HttpError::PrivateRedirect)?;
+        }
         if !follow || !response.status().is_redirection() {
             return Ok(response);
         }
@@ -195,16 +207,25 @@ async fn send_following_redirects(
                     next.origin().ascii_serialization(),
                 ));
             }
-            Some(next) => url = next,
+            Some(next) => {
+                // The first redirect of the chain: `response` is the
+                // target's own answer, which tells where the target is.
+                let checked = if let Some(guard) = guard {
+                    guard
+                } else {
+                    let proxied = spec.proxy.is_some();
+                    *guard.insert(RedirectGuard::new(target, &response, proxied).await)
+                };
+                checked
+                    .check_target(&next)
+                    .await
+                    .map_err(|_| HttpError::PrivateRedirect)?;
+                url = next;
+            }
             None => return Ok(response),
         }
     }
     Err(HttpError::TooManyRedirects)
-}
-
-/// Whether a redirect from `from` to `to` drops TLS.
-pub(super) fn is_downgrade(from: &reqwest::Url, to: &reqwest::Url) -> bool {
-    from.scheme() == "https" && to.scheme() == "http"
 }
 
 /// Whether `url` shares an origin (scheme + host + port) with the original
@@ -311,6 +332,30 @@ pub(super) fn with_headers(
         request = request.header(name, value.as_ref());
     }
     request
+}
+
+/// The outcome of a request that got no response.
+fn request_failure(spec: &HttpSpec, err: &reqwest::Error) -> Outcome {
+    // Out of descriptors or memory here: no verdict on the target.
+    if let Some(detail) = super::local::exhaustion_in(err) {
+        return Outcome::down(FailureKind::Local, detail);
+    }
+    // A proxy that refused us (407 on CONNECT, SOCKS credentials) is not the
+    // target failing: say so.
+    if spec.proxy.is_some()
+        && let Some(cause) = proxy_failure(err)
+    {
+        return Outcome::down(FailureKind::ConnectionFailed, cause);
+    }
+    let (kind, detail) = describe(err);
+    // The category alone ("connection failed") reads the same for a refused
+    // port and an expired certificate: name the cause when the error chain
+    // carries one (never the URL, which may hold secrets).
+    let detail = match transport_cause(err) {
+        Some(cause) => format!("{detail}: {cause}"),
+        None => detail.to_owned(),
+    };
+    Outcome::down(kind, detail)
 }
 
 /// The root cause of a transport error worth naming - a TLS failure

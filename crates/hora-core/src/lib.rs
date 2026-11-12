@@ -1,9 +1,11 @@
 //! Core of Hora: configuration, probing, storage, TLS-expiry and scheduling.
 
+mod alert_once;
 pub mod announce;
 pub mod cert;
 pub mod coalesce;
 pub mod config;
+pub mod config_watch;
 mod connect;
 pub mod db;
 pub mod digest;
@@ -18,6 +20,7 @@ pub mod import;
 pub mod maintenance;
 pub mod mesh;
 pub mod notifications;
+pub mod planned;
 pub mod postmortem;
 pub mod probe;
 mod rdap;

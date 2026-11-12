@@ -17,6 +17,9 @@ pub enum FailureKind {
     TooManyRedirects,
     /// An `https` request was redirected to plain `http`.
     InsecureRedirect,
+    /// A public target redirected to a loopback, link-local or private
+    /// address (see `crate::http::RedirectGuard`).
+    PrivateRedirect,
     /// The body could not be read or decoded.
     InvalidBody,
     /// Any other HTTP client error.
@@ -53,17 +56,22 @@ pub enum FailureKind {
     NoHeartbeatYet,
     /// A push reported down or degraded; the detail is the job's own message.
     Pushed,
+    /// The check could not run for lack of resources on this host (file
+    /// descriptors, memory): nothing is known about the target. Never
+    /// stored: the scheduler skips such a check (see `probe::local`).
+    Local,
     /// Anything else: raw socket errors, setup failures.
     Other,
 }
 
 impl FailureKind {
-    pub(crate) const ALL: [Self; 24] = [
+    pub(crate) const ALL: [Self; 26] = [
         Self::Timeout,
         Self::ConnectionFailed,
         Self::ConnectionTimedOut,
         Self::TooManyRedirects,
         Self::InsecureRedirect,
+        Self::PrivateRedirect,
         Self::InvalidBody,
         Self::RequestError,
         Self::Unresolvable,
@@ -82,8 +90,21 @@ impl FailureKind {
         Self::MissedSchedule,
         Self::NoHeartbeatYet,
         Self::Pushed,
+        Self::Local,
         Self::Other,
     ];
+
+    /// Whether this is a heartbeat that did not come (a push monitor's or a
+    /// peer's), as opposed to a check that ran and failed. A miss is a
+    /// verdict already: the interval or the grace was the tolerance, so it
+    /// is not a sample to see repeated before believing it.
+    #[must_use]
+    pub fn is_missed_heartbeat(self) -> bool {
+        matches!(
+            self,
+            Self::MissingHeartbeat | Self::MissedSchedule | Self::NoHeartbeatYet
+        )
+    }
 
     /// The code stored in the `reason` columns.
     #[must_use]
@@ -94,6 +115,7 @@ impl FailureKind {
             Self::ConnectionTimedOut => "connection_timeout",
             Self::TooManyRedirects => "too_many_redirects",
             Self::InsecureRedirect => "insecure_redirect",
+            Self::PrivateRedirect => "private_redirect",
             Self::InvalidBody => "invalid_body",
             Self::RequestError => "request_error",
             Self::Unresolvable => "unresolvable",
@@ -112,6 +134,7 @@ impl FailureKind {
             Self::MissedSchedule => "missed_schedule",
             Self::NoHeartbeatYet => "no_heartbeat_yet",
             Self::Pushed => "pushed",
+            Self::Local => "local",
             Self::Other => "other",
         }
     }
@@ -167,6 +190,7 @@ pub fn public_reason(kind: Option<FailureKind>, reason: &str) -> &str {
         FailureKind::TooManyRedirects => "too many redirects",
         // The detail names the plain-http origin; the category is enough.
         FailureKind::InsecureRedirect => "redirected to plain http",
+        FailureKind::PrivateRedirect => "redirected to a private address",
         FailureKind::InvalidBody => "invalid response body",
         FailureKind::RequestError => "request error",
         FailureKind::Unresolvable => "could not resolve host",
@@ -183,10 +207,11 @@ pub fn public_reason(kind: Option<FailureKind>, reason: &str) -> &str {
         FailureKind::Ipv6Failing => "IPv6 failing (IPv4 ok)",
         FailureKind::BothFamiliesFailing => "IPv4 and IPv6 failing",
         FailureKind::MissingHeartbeat => "missing heartbeat",
-        // "(was due 03:00 UTC + 30m grace)" reveals the job's schedule.
+        // "(was due 03:00 UTC + 30 min grace)" reveals the job's schedule.
         FailureKind::MissedSchedule => "missed scheduled heartbeat",
         FailureKind::NoHeartbeatYet => "no heartbeat received yet",
         // The job's message is free text from whoever holds the push token.
+        FailureKind::Local => "check could not run",
         FailureKind::Pushed | FailureKind::Other => "check failed",
     }
 }
@@ -240,7 +265,7 @@ fn legacy_public_reason(reason: &str) -> &str {
     if let Some(reason) = no_records(reason) {
         return reason;
     }
-    // "missed scheduled heartbeat (was due 03:00 UTC + 30m grace)" reveals the
+    // "missed scheduled heartbeat (was due 03:00 UTC + 30 min grace)" reveals the
     // job's schedule; keep the category only.
     if reason.starts_with("missed scheduled heartbeat") {
         return "missed scheduled heartbeat";

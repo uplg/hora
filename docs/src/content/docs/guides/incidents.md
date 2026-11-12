@@ -84,7 +84,7 @@ curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
 A marker shows as a dashed line on each monitor's response-time chart
 (`/monitor/{id}`) and a line on `/history` (for you, not for visitors). When a monitor confirms down within
 the hour after a marker, the alert and the incident record say so: *"recent
-change: deploy api v2.3, 3m before"*.
+change: deploy api v2.3, 3 min before"*.
 
 ## Post-mortems
 
@@ -105,9 +105,10 @@ the sanitized version (and a 404 for a private monitor's incident).
 
 `hora timeline` (default 7 days, `--days N`) and the `/timeline` page merge
 everything into one chronology, newest first: downs and recoveries, event
-markers, pushed alerts, announcements and silences. *"What happened this
-week?"* in one command. Visitors see public incidents and announcements
-only.
+markers, pushed alerts, announcements, silences and the maintenance
+windows planned at runtime (with who planned them: this node, or the peer
+that announced it). *"What happened this week?"* in one command. Visitors
+see public incidents and announcements only.
 
 ## Latency heatmaps
 

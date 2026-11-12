@@ -19,8 +19,18 @@ config.
   (→ `icmp`), dns and push.
 - **Assertions**: keywords (including inverted) and JSONPath queries with
   their expected values.
-- **Details**: custom headers, intervals and timeouts, expected status codes,
-  push tokens.
+- **Details**: custom headers, intervals and timeouts, push tokens.
+- **Accepted status codes**: single codes and whole classes become
+  `expected_status` (`["200-299", "401"]` → `expected_status = ["2xx", 401]`).
+  A range that is not a whole class (`301-302`) has no equivalent and comes
+  out as a comment.
+- **Method**: `HEAD` becomes `method = "HEAD"`. Any other method than `GET`
+  comes out as a comment (Hora sends no request body), and so does a `HEAD`
+  on a monitor with a keyword or JSON assertion, which needs the body.
+- **Retries**: `maxretries = N` becomes `fail_threshold = N + 1` on the
+  monitor, the same number of failed checks in a row. Kuma retries at its
+  own `retryInterval`, Hora at the monitor's interval; at 0 the line is left
+  out and `[alerts] fail_threshold` applies.
 - **Groups**: Kuma groups become Hora display groups on the status page.
 
 Anything Hora does not support comes out as a **commented stub** with the

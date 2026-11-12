@@ -25,7 +25,10 @@ pub(super) async fn icmp_family(
     spec: &IcmpSpec,
     family: Option<Family>,
 ) -> Outcome {
-    let Some(addr) = resolve(&spec.target, family).await else {
+    // Resolution counts against the monitor's timeout, like the probe: a
+    // resolver that never answers must not park this monitor's loop.
+    let resolved = tokio::time::timeout(monitor.timeout(), resolve(&spec.target, family));
+    let Some(addr) = resolved.await.ok().flatten() else {
         return match family {
             Some(family) => Outcome::down(
                 FailureKind::Other,

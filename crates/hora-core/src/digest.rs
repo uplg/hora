@@ -1,6 +1,6 @@
 //! The periodic digest: a recap of the last seven days through the
-//! notification channels - "this week: 99.97%, 2 incidents, budget 18m of
-//! 43m left". All the data already exists (checks, incidents, SLOs); this
+//! notification channels - "this week: 99.97 %, 2 incidents, budget 18 min of
+//! 43 min left". All the data already exists (checks, incidents, SLOs); this
 //! just words it. By construction it never alerts, so it carries zero
 //! false-positive risk - the one notification that is allowed to be routine.
 
@@ -217,7 +217,7 @@ pub async fn build_summary(
     Ok((period, summary))
 }
 
-/// `", budget 18m of 43m left (30d)"` for a monitor with an SLO - or how far
+/// `", budget 18 min of 43 min left (30 d)"` for a monitor with an SLO - or how far
 /// over budget it is. An unreadable history drops the clause rather than
 /// publishing a wrong number.
 async fn budget_phrase(
@@ -234,9 +234,16 @@ async fn budget_phrase(
     let budget = slo::budget_minutes(window_days, slo_bp);
     let remaining = slo::remaining_minutes(window_days, slo_bp, available, total);
     if remaining >= 0 {
-        format!(", budget {remaining}m of {budget}m left ({window_days}d)")
+        format!(
+            ", budget {} of {} left ({window_days} d)",
+            fmt::duration(remaining.saturating_mul(60)),
+            fmt::duration(budget.saturating_mul(60))
+        )
     } else {
-        format!(", budget exhausted ({}m over, {window_days}d)", -remaining)
+        format!(
+            ", budget exhausted ({} over, {window_days} d)",
+            fmt::duration(remaining.saturating_neg().saturating_mul(60))
+        )
     }
 }
 

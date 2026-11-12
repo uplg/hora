@@ -50,7 +50,8 @@ services down behind one database send one alert: the cause.
    ```
 
 3. **Open <http://localhost:8787/>.** Edit the file and Hora reloads it
-   live; `docker exec hora hora check` validates it and
+   live (mount the directory, as above, not the file alone: a file mounted
+   on its own stops following the first time it is replaced by a rename); `docker exec hora hora check` validates it and
    `docker exec hora hora test-alert` tests your channels.
 
 History lives on the `hora-data` volume: to upgrade, pull the new image and

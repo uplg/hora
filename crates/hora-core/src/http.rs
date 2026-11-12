@@ -1,6 +1,7 @@
 //! Shared reqwest client construction (user-agent, timeout backstops, proxy),
 //! the redirect policies, and bounded body reads.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use reqwest::redirect::{Attempt, Policy};
@@ -136,6 +137,189 @@ fn redirect_allowed(initial: &Url, next: &Url) -> bool {
     initial.scheme() == "http" && next.scheme() == "https" && next.port().is_none()
 }
 
+/// Whether a redirect from `from` to `to` leaves TLS: an `https` hop sent
+/// anywhere but to `https`. The one downgrade rule of both redirect followers
+/// (the probe's and [`get_json_following`]).
+pub(crate) fn is_downgrade(from: &Url, to: &Url) -> bool {
+    from.scheme() == "https" && to.scheme() != "https"
+}
+
+/// Whether `ip` is an address of the inside: loopback (`127.0.0.0/8`, `::1`),
+/// link-local (`169.254.0.0/16`, `fe80::/10`), private (`10.0.0.0/8`,
+/// `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`), carrier-grade NAT
+/// (`100.64.0.0/10`) or unspecified (`0.0.0.0/8`, `::`). An IPv4 address
+/// carried in an IPv6 one (`::ffff:a.b.c.d`, NAT64's `64:ff9b::a.b.c.d`) is
+/// judged as the IPv4 address it reaches.
+pub(crate) fn is_internal(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            a == 0
+                || v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_internal(IpAddr::V4(v4));
+            }
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = segments[6].to_be_bytes();
+                let [c, d] = segments[7].to_be_bytes();
+                return is_internal(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
+            }
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || segments[0] & 0xffc0 == 0xfe80
+                || segments[0] & 0xfe00 == 0xfc00
+        }
+    }
+}
+
+/// Where a URL's host leads, as far as this host can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// At least one of its addresses [`is_internal`].
+    Internal,
+    Public,
+    /// The name does not resolve here.
+    Unknown,
+}
+
+/// Classify `url`'s host: an IP literal by itself, a name by every address it
+/// resolves to - one internal address among public ones makes it internal,
+/// since the connector may pick any of them.
+async fn reach(url: &Url) -> Reach {
+    let of = |internal: bool| {
+        if internal {
+            Reach::Internal
+        } else {
+            Reach::Public
+        }
+    };
+    let Some(host) = url.host_str() else {
+        return Reach::Unknown;
+    };
+    // An IPv6 literal comes bracketed; odd IPv4 spellings (`0x7f.1`, `2130706433`)
+    // were already normalised by the URL parser.
+    let literal = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+    if let Ok(ip) = literal.unwrap_or(host).parse::<IpAddr>() {
+        return of(is_internal(ip));
+    }
+    let port = url.port_or_known_default().unwrap_or(80);
+    let Ok(addrs) = tokio::net::lookup_host((host, port)).await else {
+        return Reach::Unknown;
+    };
+    let mut resolved = false;
+    for addr in addrs {
+        if is_internal(addr.ip()) {
+            return Reach::Internal;
+        }
+        resolved = true;
+    }
+    if resolved {
+        Reach::Public
+    } else {
+        Reach::Unknown
+    }
+}
+
+/// A redirect refused because it leads from a public target to an internal
+/// address (see [`RedirectGuard`]).
+#[derive(Debug)]
+pub(crate) struct InternalRedirect;
+
+impl std::fmt::Display for InternalRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("redirected to a private address")
+    }
+}
+
+impl std::error::Error for InternalRedirect {}
+
+/// Keeps a redirect chain that started on a public target from ending on an
+/// internal one. A monitored site that is compromised (or merely hostile) can
+/// answer `302 Location: http://169.254.169.254/...` or `http://10.0.0.5/admin`:
+/// the probe would fetch it from inside the operator's network, then store and
+/// show what it answered. A target that is itself internal - the usual case of
+/// monitoring one's own services - may redirect anywhere, as before.
+///
+/// Two checks, one on each side of the connection:
+///
+/// - [`check_target`](Self::check_target), before a hop is requested: the
+///   redirect's host is resolved here and refused if any of its addresses
+///   [`is_internal`];
+/// - [`check_peer`](Self::check_peer), on the hop's response: the address the
+///   connection actually reached is judged again, and an internal one is
+///   refused before a byte of the body is read.
+///
+/// The client resolves the name a second time to connect, so a DNS answer
+/// that changes between the two (rebinding) gets one request - a `GET`
+/// without the monitor's headers - sent to the internal address; the second
+/// check then drops the response, so nothing it says is read, stored or
+/// shown. Closing that too needs a resolver inside the client that pins the
+/// checked address.
+///
+/// Through a proxy the proxy resolves and connects, and the peer of the
+/// connection is the proxy: only the first check runs, on this host's view of
+/// DNS, and a name that does not resolve here (the target's or the
+/// redirect's) is let through - Hora cannot tell where the proxy takes it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RedirectGuard {
+    /// The original target is internal (or, proxied, unknown): no restriction.
+    open: bool,
+    proxied: bool,
+}
+
+impl RedirectGuard {
+    /// The guard for a chain that started at `target` and got `first` as its
+    /// first response. Unproxied, the target's reach is the address that
+    /// response came from - what was connected to, not what DNS says now.
+    pub(crate) async fn new(target: &Url, first: &Response, proxied: bool) -> Self {
+        let open = match first.remote_addr().filter(|_| !proxied) {
+            Some(peer) => is_internal(peer.ip()),
+            None => match reach(target).await {
+                Reach::Internal => true,
+                Reach::Public => false,
+                Reach::Unknown => proxied,
+            },
+        };
+        Self { open, proxied }
+    }
+
+    /// Whether the chain may go on to `next`.
+    ///
+    /// # Errors
+    ///
+    /// [`InternalRedirect`] when `next` leads to an internal address and the
+    /// original target did not.
+    pub(crate) async fn check_target(self, next: &Url) -> Result<(), InternalRedirect> {
+        if !self.open && reach(next).await == Reach::Internal {
+            return Err(InternalRedirect);
+        }
+        Ok(())
+    }
+
+    /// Whether the response of a redirected hop may be used.
+    ///
+    /// # Errors
+    ///
+    /// [`InternalRedirect`] when the hop connected to an internal address
+    /// after all (the name changed its answer since
+    /// [`check_target`](Self::check_target)).
+    pub(crate) fn check_peer(self, response: &Response) -> Result<(), InternalRedirect> {
+        let internal = response
+            .remote_addr()
+            .is_some_and(|peer| is_internal(peer.ip()));
+        if !self.open && !self.proxied && internal {
+            return Err(InternalRedirect);
+        }
+        Ok(())
+    }
+}
+
 /// A response body read under a byte cap.
 #[derive(Debug)]
 pub struct CappedBody {
@@ -195,9 +379,12 @@ pub(crate) async fn read_all_capped(mut response: Response, cap: usize) -> anyho
 /// whatever the client's own redirect policy, a 30x that reaches us is
 /// followed here, with a relative `Location` resolved against the current
 /// URL (`Url::join`). A hop from `https` down to plain `http` is refused, so
-/// a redirect can never strip transport security. `headers` are sent on
-/// every hop, cross-origin included, so they must never carry a secret.
-/// Used by the RDAP lookup and the release watch.
+/// a redirect can never strip transport security (the probes' rule,
+/// [`is_downgrade`]), and so is one from a public server to an internal
+/// address ([`RedirectGuard`], also shared with the probes). `headers` are
+/// sent on every hop, cross-origin included, so they must never carry a
+/// secret. Used by the RDAP lookup and the release watch, on the unproxied
+/// shared client.
 ///
 /// Returns the parsed body of a 2xx answer (read up to [`MAX_JSON_BYTES`]),
 /// or `Err(status)` for any other final status, for the caller to word.
@@ -205,21 +392,30 @@ pub(crate) async fn read_all_capped(mut response: Response, cap: usize) -> anyho
 /// # Errors
 ///
 /// Returns an error on a network failure, a redirect without a usable
-/// `Location`, a downgrade, too many redirects, or an oversized or invalid
-/// JSON body.
+/// `Location`, a downgrade, a redirect to an internal address, too many
+/// redirects, or an oversized or invalid JSON body.
 pub(crate) async fn get_json_following(
     client: &Client,
     url: &str,
     headers: &[(&'static str, &'static str)],
     max_redirects: usize,
 ) -> anyhow::Result<Result<serde_json::Value, reqwest::StatusCode>> {
-    let mut url = Url::parse(url)?;
+    let target = Url::parse(url)?;
+    let mut url = target.clone();
+    let mut guard: Option<RedirectGuard> = None;
     for _ in 0..=max_redirects {
         let mut request = client.get(url.clone());
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
         let response = request.send().await?;
+        let guard = match guard {
+            Some(guard) => {
+                guard.check_peer(&response)?;
+                guard
+            }
+            None => *guard.insert(RedirectGuard::new(&target, &response, false).await),
+        };
         let status = response.status();
         if status.is_redirection() {
             let location = response
@@ -229,10 +425,11 @@ pub(crate) async fn get_json_following(
                 .ok_or_else(|| anyhow::anyhow!("redirect without a Location header"))?;
             let next = url.join(location)?;
             anyhow::ensure!(
-                !(url.scheme() == "https" && next.scheme() != "https"),
+                !is_downgrade(&url, &next),
                 "refusing a redirect from https to {}",
                 next.scheme()
             );
+            guard.check_target(&next).await?;
             url = next;
             continue;
         }
@@ -369,6 +566,91 @@ mod tests {
         // The 302 comes back unfollowed, and the other origin never saw the token.
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
         assert_eq!(evil_tokens.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn internal_addresses_are_the_listed_ranges() {
+        let internal = [
+            "127.0.0.1",
+            "127.255.255.254",
+            "10.0.0.5",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "100.127.255.255",
+            "0.0.0.0",
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "::ffff:10.0.0.5",
+            "64:ff9b::7f00:1",
+        ];
+        for ip in internal {
+            assert!(is_internal(ip.parse().unwrap()), "{ip}");
+        }
+        let public = [
+            "1.1.1.1",
+            "172.32.0.1",
+            "100.128.0.1",
+            "100.63.255.255",
+            "169.253.0.1",
+            "192.169.0.1",
+            "2606:4700:4700::1111",
+            "::ffff:1.1.1.1",
+            "64:ff9b::101:101",
+            "fe00::1",
+        ];
+        for ip in public {
+            assert!(!is_internal(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_public_chain_may_not_turn_inwards() {
+        let guard = RedirectGuard {
+            open: false,
+            proxied: false,
+        };
+        for inward in [
+            "http://127.0.0.1:8080/admin",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+            "http://[::ffff:192.168.0.10]/",
+            "http://localhost:9000/",
+        ] {
+            assert!(guard.check_target(&url(inward)).await.is_err(), "{inward}");
+        }
+        assert!(guard.check_target(&url("https://1.1.1.1/")).await.is_ok());
+        // A target that is itself internal redirects wherever it likes.
+        let open = RedirectGuard {
+            open: true,
+            proxied: false,
+        };
+        assert!(open.check_target(&url("http://10.0.0.5/")).await.is_ok());
+    }
+
+    /// The response of a hop that reached an internal address is refused when
+    /// the chain started outside, whatever the name resolved to beforehand.
+    #[tokio::test]
+    async fn a_hop_that_connected_inwards_is_dropped() {
+        let (inside, _) = serve(
+            "HTTP/1.1 200 OK\r\ncontent-length: 6\r\nconnection: close\r\n\r\nsecret".to_owned(),
+        )
+        .await;
+        let response = client(None).unwrap().get(&inside).send().await.unwrap();
+        let closed = RedirectGuard {
+            open: false,
+            proxied: false,
+        };
+        assert!(closed.check_peer(&response).is_err());
+        // The same response as the first of a chain: its target is internal.
+        let guard = RedirectGuard::new(&url(&inside), &response, false).await;
+        assert!(guard.open);
+        assert!(guard.check_peer(&response).is_ok());
     }
 
     #[tokio::test]

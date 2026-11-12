@@ -2,6 +2,7 @@
 
 mod auth;
 mod cache;
+mod display;
 mod error;
 mod flood;
 mod handlers;
@@ -36,7 +37,7 @@ use tower_governor::key_extractor::{KeyExtractor, PeerIpKeyExtractor};
 use crate::cache::{Memo, ProbeClients};
 use crate::snapshot::{Refresher, Snapshot};
 
-pub use routes::router;
+pub use routes::{REQUEST_TIMEOUT, router};
 
 pub(crate) const SECONDS_PER_HOUR: i64 = 3_600;
 pub(crate) const MAX_LATENCY_HOURS: i64 = 24 * 30;
@@ -70,7 +71,12 @@ pub(crate) const PERMISSIONS_POLICY: &str = "accelerometer=(), camera=(), geoloc
 /// Shared application state handed to every handler.
 #[derive(Clone)]
 pub struct AppState {
+    /// What the pages read through: connections of their own (see
+    /// `Store::pages`), which a crowd of visitors may exhaust.
     store: Store,
+    /// The daemon's own pool, for what must not wait behind that crowd: the
+    /// heartbeats received, the writes of the API, `/healthz`.
+    core: Store,
     config: watch::Receiver<Arc<Config>>,
     /// The status summary, rebuilt in the background (see [`snapshot`]).
     refresher: Arc<Refresher>,
@@ -113,7 +119,8 @@ impl AppState {
         notifier: Notifiers,
     ) -> Self {
         Self {
-            store,
+            store: store.pages(),
+            core: store,
             config,
             refresher: Arc::new(Refresher::default()),
             heatmaps: Arc::new(Memo::new(VIEW_CACHE_TTL)),
@@ -181,6 +188,9 @@ impl AppState {
 #[derive(Clone)]
 pub(crate) struct ConfiguredIp {
     header: Option<HeaderName>,
+    /// Proxies of ours in front (`server.trusted_proxies`): which entry of a
+    /// list-valued header is the client's, counted from the right.
+    trusted_proxies: usize,
     /// Set once the "behind an unnamed proxy" warning was logged.
     proxy_hint: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -198,8 +208,8 @@ impl KeyExtractor for ConfiguredIp {
                 .headers()
                 .get(header)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|raw| raw.split(',').next())
-                .and_then(|first| first.trim().parse::<IpAddr>().ok())
+                .and_then(|raw| client_entry(raw, self.trusted_proxies))
+                .and_then(|entry| entry.trim().parse::<IpAddr>().ok())
         {
             return Ok(bucket(ip));
         }
@@ -208,6 +218,22 @@ impl KeyExtractor for ConfiguredIp {
         }
         PeerIpKeyExtractor.extract(req).map(bucket)
     }
+}
+
+/// The client's entry in a forwarding header's value. A single-valued header
+/// (`x-real-ip`, `cf-connecting-ip`) is that value. In a list
+/// (`x-forwarded-for: client, proxy1, proxy2`) every proxy *appends* the
+/// address it received the request from, so only the last `trusted_proxies`
+/// entries were written by proxies we run; the client's address is the first
+/// of those, counted from the right. Everything to its left came with the
+/// request: reading the leftmost entry, as this did, let a client behind an
+/// appending proxy name a new address - and get a fresh rate-limit bucket -
+/// on every request. A list shorter than the proxies configured (one of them
+/// overwrites the header instead of appending) gives its first entry.
+fn client_entry(raw: &str, trusted_proxies: usize) -> Option<&str> {
+    let entries: Vec<&str> = raw.split(',').collect();
+    let index = entries.len().saturating_sub(trusted_proxies.max(1));
+    entries.get(index).copied()
 }
 
 /// The rate-limit bucket of a client address: an IPv4 address as is, an
@@ -240,8 +266,15 @@ impl ConfiguredIp {
         });
         Self {
             header,
+            trusted_proxies: 1,
             proxy_hint: Arc::default(),
         }
+    }
+
+    /// With `server.trusted_proxies` proxies of ours in front.
+    pub(crate) fn trusting(mut self, proxies: u8) -> Self {
+        self.trusted_proxies = usize::from(proxies);
+        self
     }
 
     /// Log, once per process, that requests come through a proxy that no
@@ -298,6 +331,36 @@ mod tests {
             .body(())
             .expect("request");
         assert_eq!(extractor.extract(&without_header).unwrap(), peer.ip());
+    }
+
+    /// Behind a proxy that appends to `x-forwarded-for`, the client cannot
+    /// pick its own rate-limit key: what it sent sits to the left of the
+    /// entry our proxy wrote.
+    #[test]
+    fn a_forwarded_list_is_read_from_the_right() {
+        let key = |proxies: u8, value: &str| {
+            let request = Request::builder()
+                .header("x-forwarded-for", value)
+                .body(())
+                .expect("request");
+            ConfiguredIp::from_config(Some("x-forwarded-for"))
+                .trusting(proxies)
+                .extract(&request)
+                .unwrap()
+        };
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        // One proxy: its entry is the last, whatever the client prepended.
+        assert_eq!(key(1, "203.0.113.7"), ip("203.0.113.7"));
+        assert_eq!(key(1, "10.9.9.9, 203.0.113.7"), ip("203.0.113.7"));
+        assert_eq!(key(1, "1.1.1.1,2.2.2.2 , 203.0.113.7"), ip("203.0.113.7"));
+        // Two (a CDN, then ours): the CDN wrote the client's, ours the CDN's.
+        assert_eq!(
+            key(2, "10.9.9.9, 203.0.113.7, 198.51.100.1"),
+            ip("203.0.113.7")
+        );
+        // A shorter list than proxies configured: its first entry.
+        assert_eq!(key(2, "203.0.113.7"), ip("203.0.113.7"));
+        assert_eq!(key(0, "10.9.9.9, 203.0.113.7"), ip("203.0.113.7"));
     }
 
     #[test]

@@ -5,17 +5,47 @@ description: HTTP, TCP, ICMP, DNS and push probes - assertions, dual-stack, topo
 
 A monitor is a `[[monitors]]` entry with an `id`, a `name`, a `kind` and a
 probing cadence (`interval_secs`, `timeout_secs`). Failed probes are retried
-once (after 1s) before anything is recorded - override with
+once (after 1 s) before anything is recorded - override with
 `probe_retries = 0..5` - so a one-off network blip never pollutes the history
 or the error budget. Every failure that survives its retry is logged with its
 reason and shown as a tooltip on the status dot (plus `last_error` in the
 API).
 
+## A monitor's own `fail_threshold`
+
+`[alerts] fail_threshold` (3 by default) is how many failed checks in a row
+confirm a monitor down. Any monitor, of any kind, may set its own:
+
+```toml
+[[monitors]]
+id = "payments"
+name = "Payments"
+target = "https://pay.example.com/health"
+interval_secs = 30
+fail_threshold = 1        # the first failed check is already an outage
+
+[[monitors]]
+id = "legacy-erp"
+name = "Legacy ERP"
+target = "https://erp.example.com"
+interval_secs = 60
+fail_threshold = 6        # known to hiccup: 6 min of failures before a page
+```
+
+It decides the alert, the status on the page and the badge alike, and
+`alert_on_degraded` counts slow checks against it too. `probe_retries` still
+runs first: with `fail_threshold = 1`, a failure that survives its immediate
+retry alerts. A monitor used as an upstream (`depends_on`) is the cause of
+its dependents' alerts once it is down by its own threshold. A missed
+heartbeat on a push monitor never waits for any threshold (see
+[push](#push-heartbeat)). [`hora tune`](../../reference/cli/#hora-tune) recommends a
+value per monitor from its recorded history.
+
 ## Kinds
 
 ### `http` (default)
 
-`target` is a URL; up = 2xx, or exactly `expected_status` if set. TLS
+`target` is a URL; up = 2xx, or what `expected_status` lists if set. TLS
 certificate expiry is checked automatically for `https://` targets.
 
 ```toml
@@ -25,11 +55,33 @@ name = "API"
 target = "https://api.example.com/health"
 interval_secs = 30
 timeout_secs = 10
-# expected_status = 200
+# expected_status = 200     # or a list: [200, 401], ["2xx", 401]
+# method = "HEAD"           # "GET" (default) or "HEAD"
 # degraded_over_ms = 800    # up but slower than this = degraded (yellow)
 # headers = { Authorization = "Bearer ${TOKEN}" }
 # proxy = "socks5://127.0.0.1:9050"
 ```
+
+**`expected_status`** is a status (`200`), a class (`"2xx"`, any of `"1xx"`
+to `"5xx"`) or a list of either. An API behind authentication that answers
+401 when it is healthy, without giving Hora a credential:
+
+```toml
+expected_status = [200, 401]      # or ["2xx", 401]: any 2xx, or a 401
+```
+
+Anything the list leaves out is down, a 2xx included once the list does not
+name it. A monitor whose list holds a 3xx (`301`, `[200, 301]`, `"3xx"`)
+judges the first answer and does not follow redirects: see below.
+
+**`method = "HEAD"`** asks for the headers alone: for a large page or a
+download you do not want fetched every minute, or an endpoint that counts
+its `GET`s. The answer to a `HEAD` has no body, so a monitor with `keyword`,
+`json_query` or `number_regex` and `method = "HEAD"` is refused at load.
+`"GET"` is the default and the only other method: Hora sends no request
+body, so there is no `POST` or `PUT`. Some servers answer a `HEAD` with a
+405 or another status than their `GET`: check with
+`hora probe https://example.com --method HEAD` first.
 
 **Body assertions** turn a reachability check into a correctness check:
 
@@ -54,9 +106,17 @@ Redirects are followed (up to 10), but configured headers, which may carry
 credentials, are only re-attached while the redirect stays on the original
 origin, so a compromised target can't bounce your API key to another host.
 A redirect from `https://` to plain `http://` is not followed: the monitor
-is down, *redirected to plain http*. A monitor that expects a 3xx
-(`expected_status = 301`) does **not** follow redirects: it checks the
-redirect itself, such as HTTP to HTTPS or apex to `www`.
+is down, *redirected to plain http*. Nor is a redirect from a target on a
+public address to a loopback, link-local, private (RFC 1918, `fc00::/7`) or
+carrier-grade NAT address: the monitor is down, *redirected to a private
+address*, so a compromised site cannot have Hora fetch something inside
+your network and show you the answer. A target that is itself on such an
+address may redirect anywhere. (Through a `proxy`, the check uses this
+host's view of DNS: the proxy does the resolving.) A monitor that expects a 3xx
+(`expected_status = 301`, or a list or class that holds one) does **not**
+follow redirects: it checks the redirect itself, such as HTTP to HTTPS or
+apex to `www`. Every hop of a followed chain is sent with the monitor's
+method: a `HEAD` stays a `HEAD`.
 
 Compressed bodies (`gzip`, `br`, `deflate`, `zstd`) are decoded before the
 assertions run, and `max_body_kb` caps the decoded size; an assertion that
@@ -219,6 +279,13 @@ curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \
   "https://status.example.com/api/push/nightly-backup"
 ```
 
+A push monitor **must** set a `push_token` (at least 16 characters), sent as
+the `X-Push-Token` header: its id is on the status page, so the id alone
+must not be enough to fake a heartbeat and hide a job that stopped. A config
+without one fails to load. On a network where everyone who can reach
+`/api/push` is trusted, `allow_unauthenticated = true` on the monitor is the
+explicit opt-out; `?token=` in the URL is refused either way.
+
 The **cron-aware variant** declares *when* the job runs, and alerts only when
 a scheduled run misses its grace window - a 03:00 backup pinging at 03:05 is
 fine, one still silent at 03:30 + grace is down:
@@ -231,7 +298,7 @@ kind = "push"
 interval_secs = 60           # with `schedule`, just the re-evaluation cadence
 push_token = "${BACKUP_TOKEN}"
 schedule = "0 3 * * *"       # five-field cron, UTC
-grace_secs = 1800            # how late a ping may be (default 30m)
+grace_secs = 1800            # how late a ping may be (default 30 min)
 ```
 
 :::caution[The schedule is UTC]
@@ -250,10 +317,18 @@ Optional query parameters: `?status=up|down|degraded`, `msg=...` (recorded
 with the heartbeat), `ping=<ms>` (round-trip latency). An unknown `status`
 or a negative `ping` is refused with a 400, so a typo never reads as up.
 
+**A heartbeat that does not come is down at once.** Hora looks at a push
+monitor at least every minute; once the last heartbeat is older than
+`interval_secs` (or a scheduled run is later than `grace_secs`), the
+monitor is down and alerted, without waiting for `fail_threshold` (the
+global one or the monitor's own): the
+interval or the grace is the tolerance. Size them for the job, not for the
+threshold.
+
 **The job's own verdict drives alerting.** A heartbeat that says
 `status=down` counts as a failure on the next tick, with the job's `msg` as
-the reason, and the monitor is confirmed down after `fail_threshold` of
-them, like any other check. `status=degraded` counts as degraded, so
+the reason, and the monitor is confirmed down after `fail_threshold`
+evaluations (a few minutes; at once with `fail_threshold = 1` on the monitor), like any other check that ran and failed. `status=degraded` counts as degraded, so
 `alert_on_degraded` works for push monitors, and the alert carries the
 `msg`:
 
@@ -339,7 +414,7 @@ name instead.
 
 ## Domain expiry (RDAP)
 
-The natural sibling of the TLS warnings: *"your domain expires in 14 days"*.
+The natural sibling of the TLS warnings: *"your domain expires in 14 d"*.
 
 ```toml
 domain_expiry = "example.com"
@@ -397,8 +472,8 @@ public_error_detail = true   # publish raw failure reasons to anonymous viewers
 
 A monitor with `public = false` disappears from the unauthenticated status
 page, API, badges and history (its latency endpoint answers 404, exactly like
-a missing monitor); the viewer token (`server.auth_token`) reveals the full
-view. By default anonymous viewers see only a **safe category** of a failure
+a missing monitor); the operator token (`server.auth_token`) or the
+read-only one (`server.view_token`) reveals the full view. By default anonymous viewers see only a **safe category** of a failure
 ("HTTP 500", "content check failed") - the stored detail can carry response
 snippets, DNS answers or asserted keywords; `public_error_detail = true` opts
 a monitor into publishing the full reason (and the
@@ -408,7 +483,7 @@ a monitor into publishing the full reason (and the
 
 ```toml
 degraded_over_ms = 800   # up but slower = degraded
-slo_latency_ms = 500     # the 24h p95 is flagged met/breached against this
+slo_latency_ms = 500     # the 24 h p95 is flagged met/breached against this
 slo_uptime = 99.9        # availability SLO; shows error budget, arms burn-rate alerts
 slo_window_days = 30     # SLO window (default 30)
 retention_days = 30      # how long this monitor's raw history is kept

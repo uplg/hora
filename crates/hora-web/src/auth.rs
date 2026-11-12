@@ -1,26 +1,25 @@
 //! Request authentication: the credential helpers and the axum extractors
 //! every handler starts from, so the "who is asking" preamble lives once.
 
-use std::collections::HashSet;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::Arc;
 
-use axum::extract::{FromRequestParts, MatchedPath, Query, Request};
+use axum::extract::{FromRequestParts, MatchedPath, Query, Request, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use tower_governor::key_extractor::KeyExtractor;
 
 use hora_core::config::Config;
 
-use crate::AppState;
 use crate::error::AppError;
 use crate::visibility::Audience;
+use crate::{AppState, ConfiguredIp};
 
 /// The header carrying a push monitor's, a peer's or a pushed alert's item
-/// token. Preferred over `?token=` because it stays out of access logs.
+/// token. A header, because it stays out of access logs.
 pub(crate) const PUSH_TOKEN_HEADER: &str = "x-push-token";
 
 /// The `Authorization: Bearer <token>` credential, if any.
@@ -60,132 +59,106 @@ struct TokenQuery {
     token: Option<String>,
 }
 
-/// The `Link` answered to a write authenticated with `?token=`: where its
-/// deprecation is documented (RFC 9745's `deprecation` relation).
-const QUERY_TOKEN_DEPRECATION_LINK: &str =
-    "<https://uplg.github.io/hora/reference/api/#authentication>; rel=\"deprecation\"";
+/// What a write answers to a `?token=`, whatever the token.
+const QUERY_TOKEN_REFUSED: &str = "?token= is not accepted on write endpoints: send the token \
+    in the Authorization: Bearer header (or X-Push-Token for a push or peer token)";
 
-/// Set by a write endpoint whose caller authenticated with `?token=` rather
-/// than a header; read back by [`deprecate_query_token`]. A shared flag rather
-/// than a response value so it holds whatever the handler answers afterwards
-/// (a 400 on a bad body still tells the client to move its token).
-#[derive(Clone, Debug, Default)]
-pub(crate) struct QueryTokenAuth(Arc<AtomicBool>);
-
-impl QueryTokenAuth {
-    /// Record that this request authenticated through `?token=`.
-    pub(crate) fn mark(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    fn marked(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
+/// Whether the query string carries a `token` parameter, valid or not.
+/// Decoded like the extractors decode it, so `%74oken=` is one too. A query
+/// that does not parse yields no token to any extractor either.
+fn has_query_token(uri: &Uri) -> bool {
+    uri.query().is_some_and(|query| !query.is_empty())
+        && Query::<Vec<(String, String)>>::try_from_uri(uri)
+            .is_ok_and(|Query(pairs)| pairs.iter().any(|(key, _)| key == "token"))
 }
 
-/// The request's flag - a detached one (that nothing reads) on routes outside
-/// [`deprecate_query_token`], such as the read-only views, where `?token=`
-/// stays a first-class credential.
-impl<S: Send + Sync> FromRequestParts<S> for QueryTokenAuth {
-    type Rejection = std::convert::Infallible;
-
-    fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(Ok(parts
-            .extensions
-            .get::<Self>()
-            .cloned()
-            .unwrap_or_default()))
-    }
+/// Whether the request presents a credential at all: `Authorization`,
+/// `X-Push-Token` or `?token=`.
+pub(crate) fn presents_credential<B>(request: &axum::http::Request<B>) -> bool {
+    request.headers().contains_key(header::AUTHORIZATION)
+        || request.headers().contains_key(PUSH_TOKEN_HEADER)
+        || has_query_token(request.uri())
 }
 
-/// Write-endpoint middleware: `?token=` still authenticates (for now), but a
-/// request that relied on it is answered with `Deprecation: true` and a
-/// `Link` to the documentation, and the first such request per endpoint is
-/// logged - without the token, which is the very thing that should not be in
-/// logs. Headers keep secrets out of access logs, proxies and browser history.
-pub(crate) async fn deprecate_query_token(mut request: Request, next: Next) -> Response {
-    let flag = QueryTokenAuth::default();
-    request.extensions_mut().insert(flag.clone());
-    let endpoint = format!(
-        "{} {}",
-        request.method(),
-        request
-            .extensions()
-            .get::<MatchedPath>()
-            .map_or_else(|| request.uri().path(), MatchedPath::as_str)
-    );
-    let mut response = next.run(request).await;
-    if flag.marked() {
-        let headers = response.headers_mut();
-        headers.insert(
-            HeaderName::from_static("deprecation"),
-            HeaderValue::from_static("true"),
-        );
-        headers.append(
-            header::LINK,
-            HeaderValue::from_static(QUERY_TOKEN_DEPRECATION_LINK),
-        );
-        if WARNED_ENDPOINTS.first(&endpoint) {
-            let header = if endpoint.contains("/api/push/") || endpoint.contains("/alert") {
-                "Authorization: Bearer (or X-Push-Token)"
-            } else {
-                "Authorization: Bearer"
-            };
-            tracing::warn!(
-                %endpoint,
-                "a client authenticated with ?token=, which is deprecated on write endpoints: \
-                 send the token in the {header} header instead"
-            );
-        }
+/// API middleware: a write (anything but `GET`/`HEAD`) never takes its
+/// credential from the URL. A token in a query string ends up in access
+/// logs, proxies and shell histories, and on a write that token can mute an
+/// alert; so the request is refused outright - even when the token is right,
+/// even next to a valid header - rather than served with a hint nobody reads.
+/// The read-only views keep `?token=` (a kiosk cannot set a header).
+pub(crate) async fn refuse_query_token(request: Request, next: Next) -> Response {
+    let read_only = matches!(*request.method(), Method::GET | Method::HEAD);
+    if !read_only && has_query_token(request.uri()) {
+        return AppError::Unauthorized(QUERY_TOKEN_REFUSED).into_response();
+    }
+    next.run(request).await
+}
+
+/// Log a failed authentication: a request that presented a credential and
+/// was answered 401. The line names the client address (the rate limiter's
+/// key, so an IPv6 /64) and the matched route - never the credential, nor
+/// the query string that may carry it. It runs behind the rate limiter, so a
+/// guessing loop logs at most what the limiter lets through; a request
+/// without a credential costs one header lookup.
+pub(crate) async fn log_failed_auth(
+    State(key): State<ConfiguredIp>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = presents_credential(&request).then(|| {
+        (
+            key.extract(&request).ok(),
+            request.method().clone(),
+            request.extensions().get::<MatchedPath>().cloned(),
+        )
+    });
+    let response = next.run(request).await;
+    if response.status() == StatusCode::UNAUTHORIZED
+        && let Some((client, method, route)) = presented
+    {
+        let client = client.map_or_else(|| "unknown".to_owned(), |ip| ip.to_string());
+        let route = route.as_ref().map_or("unmatched", MatchedPath::as_str);
+        tracing::warn!(%client, %method, route, "authentication failed");
     }
     response
 }
 
-/// The endpoints already warned about, so each logs once per process.
-static WARNED_ENDPOINTS: LazyLock<WarnOnce> = LazyLock::new(WarnOnce::default);
-
-/// A set of keys, each reported "first" exactly once.
-#[derive(Default)]
-struct WarnOnce(Mutex<HashSet<String>>);
-
-impl WarnOnce {
-    /// Whether this is the first time `key` is seen.
-    fn first(&self, key: &str) -> bool {
-        let mut seen = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        !seen.contains(key) && seen.insert(key.to_owned())
-    }
-}
-
-/// The caller of a read-only view: the config snapshot the request is served
-/// from and the audience its credential (Bearer, else `?token=`) resolves to.
-/// With no `server.auth_token` configured nothing is private (config
+/// The caller of a request: the config snapshot it is served from and the
+/// audience its credential (Bearer, else `?token=`) resolves to -
+/// `server.auth_token` is the operator, `server.view_token` the read-only
+/// [`Audience::Reader`]. With neither configured nothing is private (config
 /// validation enforces that), so every caller is [`Audience::Public`].
+///
+/// On a write the query never reaches here with a token (see
+/// [`refuse_query_token`]), so there the credential is the header's.
 pub(crate) struct Viewer {
     pub(crate) config: Arc<Config>,
     pub(crate) audience: Audience,
     /// The presented credential (Bearer first, then `?token=`), kept so a
     /// group page can check it against its own group token.
     token: Option<String>,
-    /// Operator only through `?token=` (no matching Bearer header), and the
-    /// request's flag to report it with on a write endpoint.
-    operator_by_query: bool,
-    query_auth: QueryTokenAuth,
 }
 
 impl Viewer {
     fn from_parts(parts: &Parts, config: Arc<Config>) -> Self {
+        // A write never reads its credential from the URL: the middleware
+        // already refused the request, and this keeps it true wherever a
+        // handler is mounted.
+        let read_only = matches!(parts.method, Method::GET | Method::HEAD);
         let query_token = Query::<TokenQuery>::try_from_uri(&parts.uri)
-            .map(|Query(query)| query.token)
-            .unwrap_or_default();
+            .ok()
+            .filter(|_| read_only)
+            .and_then(|Query(query)| query.token);
         let bearer = bearer(&parts.headers).map(str::to_owned);
-        let expected = config.server.auth_token.as_ref();
-        let by_bearer = matches(bearer.as_deref(), expected);
-        let by_query = matches(query_token.as_deref(), expected);
-        let audience = if by_bearer || by_query {
+        let presented = |expected: Option<&hora_core::config::Secret>| {
+            matches(bearer.as_deref(), expected) || matches(query_token.as_deref(), expected)
+        };
+        // The operator token first: config validation keeps the two apart,
+        // and if it ever did not, the stronger reading is the configured one.
+        let audience = if presented(config.server.auth_token.as_ref()) {
             Audience::Operator
+        } else if presented(config.server.view_token.as_ref()) {
+            Audience::Reader
         } else {
             Audience::Public
         };
@@ -194,33 +167,22 @@ impl Viewer {
             config,
             audience,
             token: bearer.or(query_token),
-            operator_by_query: by_query && !by_bearer,
-            query_auth: parts
-                .extensions
-                .get::<QueryTokenAuth>()
-                .cloned()
-                .unwrap_or_default(),
         }
     }
 
+    /// Whether the caller holds `server.auth_token`: the only audience that
+    /// may write, and the only one shown the operator's streams.
     pub(crate) fn is_operator(&self) -> bool {
         self.audience == Audience::Operator
     }
 
-    /// A write endpoint authorized this request as the operator: flag it for
-    /// the `?token=` deprecation when that is how it authenticated.
-    pub(crate) fn note_operator_write(&self) {
-        if self.operator_by_query {
-            self.query_auth.mark();
-        }
-    }
-
-    /// The audience on `group`'s own pages: the operator stays the operator,
-    /// the group's `server.group_tokens` entry yields [`Audience::Group`], and
-    /// anyone else is public. A group token is never accepted anywhere else.
+    /// The audience on `group`'s own pages: the operator stays the operator
+    /// and the read-only token keeps its view of everything, the group's
+    /// `server.group_tokens` entry yields [`Audience::Group`], and anyone
+    /// else is public. A group token is never accepted anywhere else.
     pub(crate) fn audience_for_group(&self, group: &str) -> Audience {
-        if self.is_operator() {
-            return Audience::Operator;
+        if matches!(self.audience, Audience::Operator | Audience::Reader) {
+            return self.audience.clone();
         }
         let expected = self.config.server.group_tokens.get(group);
         if matches(self.token.as_deref(), expected) {
@@ -245,8 +207,10 @@ impl FromRequestParts<AppState> for Viewer {
 }
 
 /// An operator action (announce, silence, event): requires the configured
-/// `server.auth_token`. Without one configured the endpoint is closed - unlike
-/// the read-only views, where "no token" just means "everything is public".
+/// `server.auth_token`, as `Authorization: Bearer`. Without one configured the
+/// endpoint is closed - unlike the read-only views, where "no token" just
+/// means "everything is public". The read-only `server.view_token` is refused
+/// like any other wrong token: reading the page is all it is for.
 pub(crate) struct Operator {
     pub(crate) config: Arc<Config>,
 }
@@ -260,13 +224,12 @@ impl FromRequestParts<AppState> for Operator {
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         let viewer = Viewer::from_parts(parts, state.config.borrow().clone());
         std::future::ready(if viewer.is_operator() {
-            viewer.note_operator_write();
             Ok(Self {
                 config: viewer.config,
             })
         } else {
             Err(AppError::Unauthorized(
-                "this endpoint requires server.auth_token and a matching token",
+                "this endpoint requires server.auth_token, sent as Authorization: Bearer",
             ))
         })
     }
@@ -298,11 +261,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_endpoint_warns_once() {
-        let warned = WarnOnce::default();
-        assert!(warned.first("POST /api/push/{id}"));
-        assert!(!warned.first("POST /api/push/{id}"));
-        assert!(warned.first("POST /api/event"));
-        assert!(!warned.first("POST /api/event"));
+    fn a_query_token_is_found_wherever_it_sits() {
+        let uri = |query: &str| format!("/api/event?{query}").parse::<Uri>().unwrap();
+        for query in [
+            "token=x",
+            "title=a&token=x",
+            "token",
+            "a=1&token=&b=2",
+            "%74oken=x",
+        ] {
+            assert!(has_query_token(&uri(query)), "{query}");
+        }
+        for query in ["", "title=token", "mytoken=x", "tokens=x"] {
+            assert!(!has_query_token(&uri(query)), "{query}");
+        }
+        assert!(!has_query_token(&Uri::from_static("/api/event")));
     }
 }

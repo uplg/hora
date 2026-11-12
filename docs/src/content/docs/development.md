@@ -39,11 +39,25 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo deny check      # licences, advisories, banned crates
 cargo audit
 cargo test --workspace --locked
+python3 brand/src/tokens.py --check   # design tokens in step with their source
 ```
 
 `just fix` applies formatting and the machine-applicable lints. `just deps`
 reports what is behind on every surface (crates, these docs, pinned Actions,
 base images) without changing anything.
+
+## Changing a design token
+
+Colours, fonts, the type scale, spacing and radii live once, in
+`brand/tokens.json`. Edit that file, then run `just tokens`
+(`python3 brand/src/tokens.py`, standard library only): it rewrites the marked
+`tokens:begin` / `tokens:end` region of every copy, which are the stylesheet
+(`crates/hora-web/assets/hora.css`), the brand gallery, this site's theme
+(`docs/src/styles/custom.css`, `docs/src/code-themes.mjs`) and the few Rust
+constants (the heatmap's tiers, `theme-color`). Never edit between the
+markers: `just tokens-check`, part of the gate and of CI, fails with a diff
+when a copy and the source disagree. Commit `tokens.json` and the regenerated
+files together.
 
 ## These docs
 

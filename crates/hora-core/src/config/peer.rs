@@ -30,9 +30,16 @@ pub struct Peer {
     #[serde(default)]
     pub listen_id: Option<String>,
     /// Token required on the inbound `/api/push/{listen_id}` (the peer's
-    /// `ping_token` for me).
+    /// `ping_token` for me). A watched peer must set one, or opt out with
+    /// `allow_unauthenticated`.
     #[serde(default)]
     pub listen_token: Option<Secret>,
+    /// Watched peer without a `listen_token`: its id alone authorizes a
+    /// heartbeat. The explicit opt-out for a private network; peer ids are
+    /// served on `/healthz`, so anyone who can reach `/api/push` can then
+    /// forge its heartbeats.
+    #[serde(default)]
+    pub allow_unauthenticated: bool,
     /// Watch the peer: mark it down if no inbound heartbeat arrives within this
     /// window. Setting it enables the IN side; leaving it unset makes this an
     /// OUT-only peer (a plain dead-man to an external receiver).
@@ -46,6 +53,18 @@ pub struct Peer {
     /// Restrict this peer's alerts to these channel names. Unset = every channel.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
+    /// The machine this peer runs on (`host = "frank"`), the same label the
+    /// monitors of the services hosted there carry. It bounds what the peer
+    /// may declare maintenance for: its own host, never another.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Accept the maintenance windows this peer announces on its heartbeat,
+    /// each for at most this many seconds (a longer one is cut to it). A
+    /// trust decision: for that long the peer can keep this node from
+    /// alerting that it went silent, and that the services on its `host`
+    /// are down. Unset = its announcements are ignored.
+    #[serde(default)]
+    pub accept_maintenance_secs: Option<u64>,
 }
 
 impl Peer {
@@ -53,6 +72,15 @@ impl Peer {
     #[must_use]
     pub fn listen_id(&self) -> &str {
         self.listen_id.as_deref().unwrap_or(&self.id)
+    }
+
+    /// For how long a maintenance window announced by this peer may mute
+    /// alerts here, in seconds; `None` when its announcements are ignored.
+    #[must_use]
+    pub fn accepted_maintenance_secs(&self) -> Option<i64> {
+        self.accept_maintenance_secs
+            .filter(|secs| *secs > 0)
+            .map(|secs| i64::try_from(secs).unwrap_or(i64::MAX))
     }
 
     /// Whether the IN side is active (I watch this peer for missed heartbeats).

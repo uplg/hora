@@ -13,7 +13,7 @@ async fn incident_page_sanitizes_for_anonymous_and_serves_markdown() {
         None,
         &[],
         Some("HTTP/2 503\n\nsecret body"),
-        Some("deploy api v2.3, 3m before"),
+        Some("deploy api v2.3, 3 min before"),
     )
     .await
     .unwrap();
@@ -44,7 +44,7 @@ async fn incident_page_sanitizes_for_anonymous_and_serves_markdown() {
     )
     .await;
     assert!(full.contains("secret stack trace") && full.contains("secret body"));
-    assert!(full.contains("deploy api v2.3, 3m before"));
+    assert!(full.contains("deploy api v2.3, 3 min before"));
     assert!(full.contains("seen UP by Hora B"));
     assert!(full.contains("# Post-mortem"), "{full}");
 
@@ -130,7 +130,7 @@ async fn timeline_merges_and_keeps_operator_streams_private() {
     .await;
     for shown in [
         "deploy api v2.3",
-        "silenced Web for 10m",
+        "silenced Web for 10 min",
         "deploying",
         "secret detail",
         "Fiber cut",
@@ -596,13 +596,22 @@ async fn a_down_seen_from_here_only_reads_as_up_with_the_notice() {
     assert!(body.contains("Everything is running."), "{body}");
     assert!(!body.contains("Web is down."), "{body}");
     assert!(
-        body.contains(">Web</a><span class=\"state\"><span class=\"word up\">Up</span>"),
+        body.contains("</a><span class=\"state\"><span class=\"word up\">Up</span>"),
+        "{body}"
+    );
+    // One tab stop a row: the name's link carries the bar's words, the bar's
+    // own link (the same page) is out of the tab order and the reading order.
+    assert!(body.contains(">Web<span class=\"vh\">. "), "{body}");
+    assert!(
+        body.contains(
+            "<a class=\"bar\" href=\"/monitor/web\" tabindex=\"-1\" aria-hidden=\"true\">"
+        ),
         "{body}"
     );
     assert!(!body.contains("Needs attention"), "{body}");
     assert!(!body.contains("Down ·"), "{body}");
     // Who saw what is the operator's business.
-    assert!(!body.contains("Why nobody was woken"), "{body}");
+    assert!(!body.contains("Why this is not an outage"), "{body}");
     let operator = body_text(
         app.clone()
             .oneshot(get("/?token=0123456789abcdef"))
@@ -610,10 +619,10 @@ async fn a_down_seen_from_here_only_reads_as_up_with_the_notice() {
             .unwrap(),
     )
     .await;
-    assert!(operator.contains("Why nobody was woken"), "{operator}");
+    assert!(operator.contains("Why this is not an outage"), "{operator}");
     // The footnote says what this config does with such a down.
     assert!(
-        operator.contains("does not page the usual channels: it is only recorded"),
+        operator.contains("channels, marked as seen from here only"),
         "{operator}"
     );
     // The monitor's own page agrees.
@@ -931,5 +940,128 @@ async fn monitor_page_never_shows_target_credentials() {
         let page = body_text(app.clone().oneshot(get(&uri)).await.unwrap()).await;
         assert!(page.contains("api.example.com/health"), "{page}");
         assert!(!page.contains("hunter2") && !page.contains("k3y"), "{page}");
+    }
+}
+
+/// A group token opens what its group's pages link to (the incident, the
+/// latency series, the heatmap of a private monitor of the group), and the
+/// group page lists the group's own recent incidents even when the newest
+/// ones overall all belong to someone else.
+#[tokio::test]
+async fn group_token_follows_its_pages_links_and_sees_its_own_incidents() {
+    let (app, store) = app_with_pool(TENANTS).await;
+    let start = |monitor: &'static str| {
+        let store = store.clone();
+        async move {
+            hora_core::db::insert_incident_start(&store, monitor, None, None, None, &[], None, None)
+                .await
+                .unwrap()
+        }
+    };
+    let ours = start("intra").await;
+    let mut theirs = 0;
+    for _ in 0..3 {
+        theirs = start("db").await;
+    }
+    let token = "token=appappappappapp1";
+
+    let page = body_text(
+        app.clone()
+            .oneshot(get(&format!("/status/App?{token}")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(page.contains(&format!("/incident/{ours}")), "{page}");
+    assert!(!page.contains(&format!("/incident/{theirs}")), "{page}");
+
+    for uri in [
+        format!("/incident/{ours}?{token}"),
+        format!("/api/monitors/intra/latency?{token}"),
+        format!("/api/monitors/intra/heatmap.svg?{token}"),
+    ] {
+        let res = app.clone().oneshot(get(&uri)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+    }
+    // Another group's incident and monitor stay unknown to it, and the
+    // group's private monitor stays unknown without the token.
+    for uri in [
+        format!("/incident/{theirs}?{token}"),
+        format!("/api/monitors/db/latency?{token}"),
+        format!("/incident/{ours}"),
+        "/api/monitors/intra/heatmap.svg".to_owned(),
+    ] {
+        let res = app.clone().oneshot(get(&uri)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+/// The page and the badge go by the threshold the alert goes by: a monitor
+/// with its own is down, or not yet, when its alert says so - not when the
+/// global threshold would.
+#[tokio::test]
+async fn a_monitor_is_down_on_the_page_by_its_own_fail_threshold() {
+    let monitor = |id: &str, more: &str| {
+        format!(
+            "[[monitors]]\nid = \"{id}\"\nname = \"{id}\"\n\
+             target = \"https://{id}.example.com\"\ninterval_secs = 60\n{more}\n"
+        )
+    };
+    let (app, store) = app_with_pool(&format!(
+        "[page]\n[server]\n{}{}{}",
+        monitor("strict", "fail_threshold = 1"),
+        monitor("lenient", ""),
+        monitor("patient", "fail_threshold = 5"),
+    ))
+    .await;
+    let now = chrono::Utc::now().timestamp();
+    // One failed check for the first two, three in a row for the third:
+    // what the global threshold (3) calls degraded, degraded and down.
+    for (id, failures) in [("strict", 1), ("lenient", 1), ("patient", 3)] {
+        for ago in 0..failures {
+            sqlx::query(
+                "INSERT INTO checks (time, monitor_id, status, error) VALUES (?, ?, 0, 'HTTP 503')",
+            )
+            .bind(now - 60 * ago)
+            .bind(id)
+            .execute(store.fixture_pool())
+            .await
+            .unwrap();
+        }
+    }
+
+    let summary: serde_json::Value = serde_json::from_str(
+        &body_text(app.clone().oneshot(get("/api/summary")).await.unwrap()).await,
+    )
+    .unwrap();
+    let status = |id: &str| {
+        summary["monitors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|view| view["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is on the page"))["status"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(status("strict"), "down", "confirmed on its first failure");
+    assert_eq!(status("lenient"), "degraded", "the global three");
+    assert_eq!(status("patient"), "degraded", "three of its five");
+    assert_eq!(summary["overall"], "down");
+
+    for (id, word) in [
+        ("strict", "down"),
+        ("lenient", "degraded"),
+        ("patient", "degraded"),
+    ] {
+        let badge = body_text(
+            app.clone()
+                .oneshot(get(&format!("/api/badge/{id}/status")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(badge.contains(&format!(">{word}<")), "{id}: {badge}");
     }
 }

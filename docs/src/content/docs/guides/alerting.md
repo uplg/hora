@@ -1,6 +1,6 @@
 ---
 title: Alerting & notifications
-description: Channels, routing, thresholds, root-cause grouping, maintenance windows and ad-hoc silences.
+description: Channels, routing, thresholds, root-cause grouping, maintenance windows (configured or planned at runtime) and ad-hoc silences.
 ---
 
 Hora's alerting philosophy is **flapping never wakes you up**: probes are
@@ -39,12 +39,19 @@ type = "discord"
 webhook_url = "${DISCORD_WEBHOOK}"
 ```
 
-An empty secret (an unset `${VAR}`) simply disables that channel. Delivery
-retries transient failures, and down alerts include a snippet of the failing
+An empty secret (an unset `${VAR}`) disables that channel; the others keep
+working. It is never silent: the load warns about the variable and about the
+channel by name, `hora check` prints both (and `hora check --strict` fails
+on them), and `hora doctor` lists the channel as disabled. Delivery retries
+transient failures, and down alerts include a snippet of the failing
 response body.
 
+On Gotify, ntfy and Pushover the notification's title is the event's headline
+("API is DOWN") and its message the detail, so a phone's notification list
+names the monitor on every line.
+
 Every channel renders the same neutral message (`API is DOWN`,
-`API is slow (812ms)`, `API recovered`) and only adds its own markup and
+`API is slow (812 ms)`, `API recovered`) and only adds its own markup and
 priority, so the wording never drifts between channels. Email subjects read
 `[DOWN] API is DOWN`. A message longer than a service accepts (Discord,
 Telegram, Pushover, ntfy...) is cut to its limit with an ellipsis rather
@@ -58,8 +65,9 @@ elsewhere fails delivery.
 
 **Routing**: a monitor (or a peer) selects channels with
 `notify = ["ops-telegram"]`; without it, every configured channel is used.
-A down seen from this node only, while the peers see the target up, goes to
-`alerts.notify_unconfirmed` instead (or nowhere): see
+A down seen from this node only, while the peers see the target up, is
+flagged as local-only; it goes to `alerts.notify_unconfirmed` instead when
+that key is set (an empty list: nowhere). See
 [local-only downs](../peers/#local-only-downs).
 
 **The webhook payload** is a JSON object with `event` (`down`, `degraded`,
@@ -67,8 +75,10 @@ A down seen from this node only, while the peers see the target up, goes to
 `domain_expiring`, `release_available`, `peer_link_degraded`,
 `budget_burn`, `digest`, `alert`) and `monitor`, plus the fields that event
 carries: `message`, `cause`, `impacted`, `vantage` and `change` on a down;
-`local_only` (bool) on `down` and `recovered`; `days_left` on expiry
-events; the fingerprints on `cert_changed`; the read error as `message` on
+`local_only` (bool) on `down` and `recovered`; `days_left` and `secs_left`
+on expiry events (`days_left` is rounded down: 0 during the last day, -1
+once the expiry has passed; `secs_left` is the exact figure, negative once
+expired); the fingerprints on `cert_changed`; the read error as `message` on
 `cert_unreadable`. Fields are only ever added: ignore the ones you do not
 know.
 
@@ -91,7 +101,7 @@ Hora counts consecutive delivery failures per channel and, at
 `alerts.channel_fail_threshold` (default 3), alerts the **other** channels:
 
 ```
-channel 'telegram' is failing — 3 consecutive delivery failures since 2h
+channel 'telegram' is failing — 3 consecutive delivery failures since 2 h
 ```
 
 The dead-man's switch applied to notifications themselves. Each delivery
@@ -133,10 +143,25 @@ A single failure shows the monitor as *degraded* on the page; only
 Degraded alerts (up, but slower than the monitor's `degraded_over_ms`) are
 opt-in and use the same anti-flap threshold.
 
+The value in `[alerts]` is the default. A monitor that needs another sets
+its own:
+
+```toml
+[[monitors]]
+id = "payments"
+# ...
+fail_threshold = 1       # alert on the first failed check
+```
+
+The page and the badge follow the same value, so a monitor shows **down**
+exactly when its alert goes out. Watched [peers](../peers/) keep the global
+one. See [a monitor's own `fail_threshold`](../monitors/#a-monitors-own-fail_threshold).
+
 Not sure what to set these to? [`hora tune`](../../reference/cli/#hora-tune)
 replays your own history and recommends a `fail_threshold` and
 `degraded_over_ms` per monitor - "with `fail_threshold = 5` you would have had
-4 alerts instead of 11, same real outages, +40s to detect".
+4 alerts instead of 11, same real outages, +40 s to detect" - and says where
+to set it: on that monitor.
 
 ## Root-cause grouping
 
@@ -167,6 +192,41 @@ monitors = ["database"]          # empty = all monitors
 
 `monitors` takes monitor ids and the `listen_id` of watched
 [peers](../peers/), so a planned reboot of another node stays quiet too.
+
+### Planned at runtime
+
+The same window can be planned while the daemon runs, with no config edit
+and no reload - for a start time only a script knows (a reboot scheduled by
+unattended upgrades):
+
+```sh
+hora maintenance plan --monitors api,web --at 2026-11-13T05:00:00Z --for 10m "storage move"
+hora maintenance plan --host frank --for 10m "kernel reboot"   # every monitor with host = "frank"
+hora maintenance list
+hora maintenance cancel 3
+```
+
+or over HTTP, with the operator token:
+
+```sh
+curl -fsS -X POST -H "Authorization: Bearer $HORA_TOKEN" \
+  "https://status.example.com/api/maintenance?monitors=api,web&starts_at=2026-11-13T05:00:00Z&duration=10m&reason=storage%20move"
+```
+
+It is a maintenance window like the config's, from its start to its end:
+alerts muted, checks recorded, *Planned maintenance* on the status page
+(and *Next* before it starts), the day marked in the daily bars and in the
+monthly report, a line in the timeline. Unlike a silence it is planned
+ahead, has a reason the visitors read, and is announced.
+
+A window lasts at most 7 days and starts at most a year ahead. Planning
+the same one again (same selector, start and end) returns the one already
+planned. With `host = "<name>"` on your monitors, `--host` covers all the
+services of a machine at once; and a node tells its
+[peers](../peers/#planned-maintenance-of-a-host) about the windows of its
+own host, so the node that watches it stays quiet too. When a window ends
+and a monitor is still down, the down is confirmed and announced from
+there.
 
 ## Ad-hoc silences (deploy hooks)
 
@@ -230,7 +290,8 @@ Two things Hora does for you here:
   structured.
 
 Authenticate with the monitor's `push_token` (`X-Push-Token`) or
-`server.auth_token` (`Authorization: Bearer`). See the
+`server.auth_token` (`Authorization: Bearer`) - in a header, never as
+`?token=`. See the
 [API reference](../../reference/api/#post-apimonitorsidalert) for the full
 request/response shape.
 
@@ -246,9 +307,9 @@ notify = ["ops-telegram"]  # optional; default: every configured channel
 ```
 
 ```
-99.97% overall, 2 incidents
-- API: 99.99%, 1 incident, budget 41m of 43m left (30d)
-- Web: 100.00%
+99.97 % overall, 2 incidents
+- API: 99.99 %, 1 incident, budget 41 min of 43 min left (30 d)
+- Web: 100.00 %
 ```
 
 One line per monitor: uptime, incidents in the window, and the error budget
@@ -304,7 +365,8 @@ at = "2026-06-07T12:00:00Z"
 
 `https://` monitors are warned `alerts.cert_expiry_days` before their
 certificate expires (default 14), through the same channels and routing.
-Under a day the warning counts hours (*expires in 10 hours*). A proxied
+Under two days the warning counts hours (*expires in 10 h*), and minutes
+in the last hour. A proxied
 monitor's certificate is read through its proxy (HTTP `CONNECT`, `socks5`,
 `socks5h`), like its probe. A certificate that cannot be read at all (the
 STARTTLS dialogue changed, a server down to TLS 1.0, a firewall) alerts

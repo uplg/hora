@@ -16,11 +16,12 @@
 //! the history stays complete whatever is folded here.
 //!
 //! A *local-only* down (every peer that answered sees the target up) is not an
-//! outage: it skips the grouping, covers nothing, and goes to the
-//! `alerts.notify_unconfirmed` channels instead of the monitor's own (or
-//! nowhere without them). If the peers later confirm it, the real down follows
-//! as usual. A recovery goes to whoever received a down: the usual channels,
-//! the quiet ones, or both.
+//! outage: it skips the grouping, covers nothing, and is flagged as such. It
+//! goes to the monitor's own channels unless `alerts.notify_unconfirmed` names
+//! quiet ones to take it instead (an empty list: nowhere, it is only
+//! recorded) - a peer's answer alone never silences a down by default. If the
+//! peers later confirm it, the real down follows as usual. A recovery goes to
+//! whoever received a down: the usual channels, the quiet ones, or both.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -28,10 +29,11 @@ use std::time::Duration;
 
 use hora_notify::Event;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
-use tracing::info;
+use tokio::task::{JoinHandle, JoinSet};
+use tracing::{error, info};
 
 use crate::config::Config;
+use crate::db::{self, Store};
 use crate::notifications::Notifiers;
 
 /// One alert routed through the coalescer.
@@ -68,27 +70,29 @@ pub struct DownAlert {
     /// Multi-vantage verdict, when peers were asked before this alert.
     pub vantage: Option<String>,
     /// Correlated event marker, when one was recorded shortly before the down
-    /// ("deploy api v2.3, 3m before").
+    /// ("deploy api v2.3, 3 min before").
     pub event: Option<String>,
     /// Down from this node only (see [`crate::mesh::confirm::DownVerdict`]).
     pub local_only: bool,
+    /// The incident this down belongs to, marked announced once a channel
+    /// takes the alert (or once it is settled without one, by design).
+    pub incident: Option<i64>,
 }
 
 /// Who receives a recovery: whoever received the down it ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Recipients {
-    /// Nobody: the down was folded, dropped as a flap, or local-only with no
-    /// quiet channel configured.
+    /// Nobody: the down was folded or dropped as a flap.
     Nobody,
     /// The monitor's own channels.
     Usual,
-    /// Only the `notify_unconfirmed` channels: the down was local-only.
+    /// Only where the local-only down went (see [`LocalOnlyRoute`]).
     Quiet,
     /// Both: a local-only down later confirmed by the peers.
     Both,
 }
 
-/// A local-only down announced (to the quiet channels, if any).
+/// A local-only down announced (wherever [`LocalOnlyRoute`] sent it).
 #[derive(Debug, Clone, Copy, Default)]
 struct Quiet {
     /// The peers later confirmed it: the usual down went out too.
@@ -116,6 +120,9 @@ struct Coalescer {
     suppressed: HashSet<String>,
     /// Monitors whose current down was announced as local-only.
     quiet: HashMap<String, Quiet>,
+    /// Incidents of downs folded since the driver last looked: settled
+    /// without a notification, for it to record (see `settle`).
+    settled: Vec<i64>,
 }
 
 struct Pending {
@@ -271,6 +278,7 @@ impl Coalescer {
     /// cover itself, so a whole dependency chain collapses into one alert.
     fn fold(&mut self, alert: DownAlert, now: i64) {
         info!(monitor = %alert.id, "down alert folded into its root cause");
+        self.settled.extend(alert.incident);
         self.covered.insert(alert.id.clone(), now);
         self.suppressed.insert(alert.id);
     }
@@ -284,22 +292,39 @@ impl Coalescer {
     }
 }
 
-/// Spawn the coalescer: receives alerts from every monitor loop, dispatches
-/// the grouped notifications. The grouping window is read live from the
-/// config (`alerts.group_window_secs`; 0 disables grouping entirely).
+/// Spawn the coalescer: receives alerts from every monitor loop, groups them,
+/// and hands the notifications to the per-channel delivery [`Lanes`]. The
+/// grouping window is read live from the config (`alerts.group_window_secs`;
+/// 0 disables grouping entirely).
+///
+/// It runs until its inbox closes. On shutdown the monitor loops are still
+/// finishing their tick, and a down they confirm then must not be lost: the
+/// inbox stays open for [`SHUTDOWN_GRACE`], then whatever waits in the
+/// grouping window is released and the lanes get a bounded time to deliver.
 pub fn spawn(
     config: watch::Receiver<Arc<Config>>,
     notifier: Notifiers,
+    store: Store,
     mut alerts: mpsc::UnboundedReceiver<AlertMsg>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut state = Coalescer::default();
+        let mut lanes = Lanes::new(notifier, store.clone());
+        // Set once shutdown began: when the inbox stops being read.
+        let mut closing: Option<tokio::time::Instant> = None;
         loop {
             let now = chrono::Utc::now().timestamp();
-            let sleep_for = state.next_deadline().map_or(IDLE_SWEEP, |deadline| {
+            let mut sleep_for = state.next_deadline().map_or(IDLE_SWEEP, |deadline| {
                 Duration::from_secs(u64::try_from(deadline - now).unwrap_or(0).max(1))
             });
+            if let Some(until) = closing {
+                let left = until.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                sleep_for = sleep_for.min(left);
+            }
             tokio::select! {
                 message = alerts.recv() => {
                     let now = chrono::Utc::now().timestamp();
@@ -311,12 +336,12 @@ pub fn spawn(
                         Some(AlertMsg::Down(alert)) => {
                             let window = config.borrow().alerts.group_window_secs;
                             if let Some(alert) = state.on_down(alert, now, window) {
-                                send_down(&notifier, &config, &alert).await;
+                                send_down(&mut lanes, &config, alert).await;
                             }
                         }
                         Some(AlertMsg::Recovered { id, name, notify }) => {
                             let recipients = state.on_recovered(&id, now);
-                            send_recovered(&notifier, &config, &name, notify, recipients).await;
+                            send_recovered(&mut lanes, &config, &name, notify, recipients);
                         }
                         Some(AlertMsg::ResumedLocalOnly { id, confirmed }) => {
                             state.resume_local_only(id, confirmed);
@@ -325,72 +350,254 @@ pub fn spawn(
                     }
                 }
                 () = tokio::time::sleep(sleep_for) => {}
-                _ = shutdown.changed() => break,
+                // A dropped sender reads as "changed" forever: once is enough.
+                _ = shutdown.changed(), if closing.is_none() => {
+                    closing = Some(tokio::time::Instant::now() + SHUTDOWN_GRACE);
+                }
             }
             let now = chrono::Utc::now().timestamp();
             for alert in state.flush(now) {
-                send_down(&notifier, &config, &alert).await;
+                send_down(&mut lanes, &config, alert).await;
             }
+            settle(&store, &mut state).await;
         }
         for alert in state.drain(chrono::Utc::now().timestamp()) {
-            send_down(&notifier, &config, &alert).await;
+            send_down(&mut lanes, &config, alert).await;
         }
+        settle(&store, &mut state).await;
+        lanes.close().await;
     })
 }
 
-/// The quiet channels for local-only alerts, read live; `None` when the key
-/// is not set (local-only alerts are then only recorded).
-fn quiet_routes(config: &watch::Receiver<Arc<Config>>) -> Option<Vec<String>> {
-    config.borrow().alerts.notify_unconfirmed.clone()
+/// How long the inbox stays open once shutdown began, for the monitor loops
+/// finishing their last tick. The supervisor closes it sooner (it drops the
+/// last sender once those loops are done); this bounds the wait when a sender
+/// outlives them.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
+
+/// Record the folded downs as settled: they are not announced by design, so a
+/// restart must not take their open incident for an alert that never left.
+async fn settle(store: &Store, state: &mut Coalescer) {
+    for incident in std::mem::take(&mut state.settled) {
+        mark_notified(store, incident).await;
+    }
 }
 
-async fn send_down(notifier: &Notifiers, config: &watch::Receiver<Arc<Config>>, alert: &DownAlert) {
+async fn mark_notified(store: &Store, incident: i64) {
+    if let Err(err) = db::mark_incident_notified(store, incident).await {
+        error!("failed to record incident {incident} as announced: {err:#}");
+    }
+}
+
+/// How many notifications one channel may have waiting. A host that falls
+/// takes every monitor on it down within seconds, and each is one
+/// notification on a channel that may take a second to deliver one: the
+/// depth has to hold a whole fleet's downs and recoveries. Beyond it the
+/// channel has been stuck for a long while, and the memory spent queueing
+/// for it has to stop somewhere (a queued notification is a few hundred
+/// bytes).
+const LANE_DEPTH: usize = 4096;
+
+/// How long the lanes get to empty on shutdown.
+const LANES_CLOSE: Duration = Duration::from_secs(30);
+
+/// One notification queued for a channel.
+#[derive(Clone)]
+enum Delivery {
+    Down(Arc<DownAlert>),
+    Recovered { name: Arc<str>, local_only: bool },
+}
+
+/// One delivery queue per channel, each drained by its own task. A channel
+/// that is slow or silent (every attempt running into its timeout) delays only
+/// its own notifications: the coalescer never waits on a delivery, and the
+/// alerts behind it reach the healthy channels at once. Within a channel the
+/// order is kept, so a recovery never overtakes its down.
+struct Lanes {
+    notifier: Notifiers,
+    store: Store,
+    senders: HashMap<String, mpsc::Sender<Delivery>>,
+    workers: JoinSet<()>,
+}
+
+impl Lanes {
+    fn new(notifier: Notifiers, store: Store) -> Self {
+        Self {
+            notifier,
+            store,
+            senders: HashMap::new(),
+            workers: JoinSet::new(),
+        }
+    }
+
+    /// Queue `delivery` on every configured channel `routes` selects (all of
+    /// them for `None`). Returns whether there was any: with none, nothing
+    /// will ever be delivered.
+    fn send(&mut self, delivery: &Delivery, routes: Option<&[String]>) -> bool {
+        let dispatcher = self.notifier.load_full();
+        // A channel removed by a reload: closing its lane ends its task once
+        // what it still holds is flushed.
+        self.senders
+            .retain(|name, _| dispatcher.names().any(|known| known == name));
+        let mut targets: Vec<&str> = dispatcher
+            .names()
+            .filter(|name| routes.is_none_or(|routes| routes.iter().any(|route| route == name)))
+            .collect();
+        targets.sort_unstable();
+        targets.dedup();
+        for &name in &targets {
+            let sender = if let Some(sender) = self.senders.get(name) {
+                sender.clone()
+            } else {
+                let (sender, inbox) = mpsc::channel(LANE_DEPTH);
+                self.workers.spawn(lane(
+                    name.to_owned(),
+                    Arc::clone(&self.notifier),
+                    self.store.clone(),
+                    inbox,
+                ));
+                self.senders.insert(name.to_owned(), sender.clone());
+                sender
+            };
+            if sender.try_send(delivery.clone()).is_err() {
+                error!(channel = %name, "notification dropped: {LANE_DEPTH} already wait for this channel");
+            }
+        }
+        !targets.is_empty()
+    }
+
+    /// Stop accepting and let every lane deliver what it holds, for at most
+    /// [`LANES_CLOSE`].
+    async fn close(mut self) {
+        self.senders.clear();
+        let emptied = tokio::time::timeout(LANES_CLOSE, async {
+            while self.workers.join_next().await.is_some() {}
+        });
+        if emptied.await.is_err() {
+            error!("shutdown: some notifications were still waiting for a slow channel");
+        }
+    }
+}
+
+/// One channel's delivery task: its queue, in order, one at a time.
+async fn lane(
+    channel: String,
+    notifier: Notifiers,
+    store: Store,
+    mut inbox: mpsc::Receiver<Delivery>,
+) {
+    let only = [channel];
+    while let Some(delivery) = inbox.recv().await {
+        let dispatcher = notifier.load_full();
+        let configured = dispatcher.names().any(|name| name == only[0]);
+        match delivery {
+            Delivery::Down(alert) => {
+                let impacted: Vec<&str> = alert.impacted.iter().map(String::as_str).collect();
+                let event = Event::Down {
+                    monitor: &alert.name,
+                    error: alert.error.as_deref(),
+                    cause: alert.cause_name.as_deref(),
+                    impacted: &impacted,
+                    vantage: alert.vantage.as_deref(),
+                    event: alert.event.as_deref(),
+                    local_only: alert.local_only,
+                };
+                let failed = dispatcher.dispatch(event, Some(&only)).await;
+                // Announced as soon as one channel took it: from here on a
+                // restart resumes the outage instead of alerting again.
+                if let Some(incident) = alert.incident
+                    && configured
+                    && failed.is_empty()
+                {
+                    mark_notified(&store, incident).await;
+                }
+            }
+            Delivery::Recovered { name, local_only } => {
+                let event = Event::Recovered {
+                    monitor: &name,
+                    local_only,
+                };
+                dispatcher.dispatch(event, Some(&only)).await;
+            }
+        }
+    }
+}
+
+/// Where local-only alerts go, as `alerts.notify_unconfirmed` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalOnlyRoute {
+    /// The key is not set: the monitor's own channels. The default errs on
+    /// the side of telling someone - "a peer answered up" must not be enough
+    /// to silence a down.
+    Monitor,
+    /// The quiet channels the operator named.
+    Quiet(Vec<String>),
+    /// An explicitly empty list: recorded, never sent.
+    RecordOnly,
+}
+
+/// The local-only routing, read live.
+fn local_only_route(config: &watch::Receiver<Arc<Config>>) -> LocalOnlyRoute {
+    match &config.borrow().alerts.notify_unconfirmed {
+        None => LocalOnlyRoute::Monitor,
+        Some(quiet) if quiet.is_empty() => LocalOnlyRoute::RecordOnly,
+        Some(quiet) => LocalOnlyRoute::Quiet(quiet.clone()),
+    }
+}
+
+/// Queue a down for its channels. One that has nowhere to go by design
+/// (local-only and record-only, or no channel at all) is settled on its
+/// incident right away.
+async fn send_down(lanes: &mut Lanes, config: &watch::Receiver<Arc<Config>>, alert: DownAlert) {
+    let incident = alert.incident;
     let routes = if alert.local_only {
-        let Some(quiet) = quiet_routes(config) else {
-            info!(monitor = %alert.id, "down seen from this node only: recorded, not sent");
-            return;
-        };
-        info!(monitor = %alert.id, "down seen from this node only: sent to notify_unconfirmed");
-        Some(quiet)
+        match local_only_route(config) {
+            LocalOnlyRoute::Monitor => {
+                info!(monitor = %alert.id, "down seen from this node only: sent to the monitor's channels, flagged");
+                alert.notify.clone()
+            }
+            LocalOnlyRoute::Quiet(quiet) => {
+                info!(monitor = %alert.id, "down seen from this node only: sent to notify_unconfirmed");
+                Some(quiet)
+            }
+            LocalOnlyRoute::RecordOnly => {
+                info!(monitor = %alert.id, "down seen from this node only: recorded, not sent");
+                if let Some(incident) = incident {
+                    mark_notified(&lanes.store, incident).await;
+                }
+                return;
+            }
+        }
     } else {
         alert.notify.clone()
     };
-    let impacted: Vec<&str> = alert.impacted.iter().map(String::as_str).collect();
-    notifier
-        .load_full()
-        .dispatch(
-            Event::Down {
-                monitor: &alert.name,
-                error: alert.error.as_deref(),
-                cause: alert.cause_name.as_deref(),
-                impacted: &impacted,
-                vantage: alert.vantage.as_deref(),
-                event: alert.event.as_deref(),
-                local_only: alert.local_only,
-            },
-            routes.as_deref(),
-        )
-        .await;
+    let queued = lanes.send(&Delivery::Down(Arc::new(alert)), routes.as_deref());
+    if let Some(incident) = incident
+        && !queued
+    {
+        mark_notified(&lanes.store, incident).await;
+    }
 }
 
 /// Announce a recovery to whoever received the down (see [`Recipients`]).
-async fn send_recovered(
-    notifier: &Notifiers,
+fn send_recovered(
+    lanes: &mut Lanes,
     config: &watch::Receiver<Arc<Config>>,
     name: &str,
     notify: Option<Vec<String>>,
     recipients: Recipients,
 ) {
-    let routes = match recipients {
-        Recipients::Nobody => return,
-        Recipients::Usual => notify,
-        Recipients::Quiet => match quiet_routes(config) {
-            Some(quiet) => Some(quiet),
-            None => return,
-        },
+    let routes = match (recipients, local_only_route(config)) {
+        (Recipients::Nobody, _) | (Recipients::Quiet, LocalOnlyRoute::RecordOnly) => return,
+        // The local-only down went to the monitor's own channels, so that is
+        // where "whoever received it" is, confirmed later or not.
+        (Recipients::Usual, _)
+        | (Recipients::Quiet | Recipients::Both, LocalOnlyRoute::Monitor)
+        | (Recipients::Both, LocalOnlyRoute::RecordOnly) => notify,
+        (Recipients::Quiet, LocalOnlyRoute::Quiet(quiet)) => Some(quiet),
         // `None` is every channel, which includes the quiet ones.
-        Recipients::Both => notify.map(|mut routes| {
-            for route in quiet_routes(config).unwrap_or_default() {
+        (Recipients::Both, LocalOnlyRoute::Quiet(quiet)) => notify.map(|mut routes| {
+            for route in quiet {
                 if !routes.contains(&route) {
                     routes.push(route);
                 }
@@ -398,16 +605,13 @@ async fn send_recovered(
             routes
         }),
     };
-    notifier
-        .load_full()
-        .dispatch(
-            Event::Recovered {
-                monitor: name,
-                local_only: recipients == Recipients::Quiet,
-            },
-            routes.as_deref(),
-        )
-        .await;
+    lanes.send(
+        &Delivery::Recovered {
+            name: Arc::from(name),
+            local_only: recipients == Recipients::Quiet,
+        },
+        routes.as_deref(),
+    );
 }
 
 #[cfg(test)]
@@ -426,6 +630,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            incident: None,
         }
     }
 
@@ -575,105 +780,274 @@ mod tests {
         assert_eq!(sent.len(), 1);
     }
 
-    /// The whole route, through real channels: a local-only down reaches the
-    /// quiet channel only (flagged in the webhook), its confirmation by the
-    /// peers reaches the usual one, and each recovery goes to whoever got a
-    /// down.
+    /// A coalescer over two real channels, `main` (the monitor's own) and
+    /// `quiet`, for the local-only routing tests.
+    struct Routed {
+        main: crate::testing::Posts,
+        quiet: crate::testing::Posts,
+        tx: mpsc::UnboundedSender<AlertMsg>,
+        config_tx: watch::Sender<Arc<Config>>,
+        shutdown_tx: watch::Sender<bool>,
+        task: JoinHandle<()>,
+        toml: Box<dyn Fn(&str) -> String>,
+    }
+
+    impl Routed {
+        /// `unconfirmed`: the `[alerts]` line setting `notify_unconfirmed`,
+        /// or nothing.
+        async fn new(unconfirmed: &str) -> Self {
+            let (main_url, main) = crate::testing::webhook_sink().await;
+            let (quiet_url, quiet) = crate::testing::webhook_sink().await;
+            let toml = Box::new(move |unconfirmed: &str| {
+                format!(
+                    r#"
+                    [page]
+                    [server]
+                    [alerts]
+                    group_window_secs = 0
+                    {unconfirmed}
+                    [[channels]]
+                    name = "main"
+                    type = "webhook"
+                    url = "{main_url}"
+                    [[channels]]
+                    name = "quiet"
+                    type = "webhook"
+                    url = "{quiet_url}"
+                    [[monitors]]
+                    id = "api"
+                    name = "API"
+                    target = "https://example.com"
+                    interval_secs = 60
+                    notify = ["main"]
+                    "#
+                )
+            });
+            let config = Arc::new(crate::config::parse(&toml(unconfirmed)).unwrap());
+            let client = crate::http::client(None).unwrap();
+            let notifier = crate::notifications::shared(&config, &client);
+            let (config_tx, config_rx) = watch::channel(Arc::clone(&config));
+            let (tx, rx) = mpsc::unbounded_channel();
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let task = spawn(
+                config_rx,
+                notifier,
+                Store::in_memory().await,
+                rx,
+                shutdown_rx,
+            );
+            Self {
+                main,
+                quiet,
+                tx,
+                config_tx,
+                shutdown_tx,
+                task,
+                toml,
+            }
+        }
+
+        fn reload(&self, unconfirmed: &str) {
+            self.config_tx
+                .send(Arc::new(
+                    crate::config::parse(&(self.toml)(unconfirmed)).unwrap(),
+                ))
+                .unwrap();
+        }
+
+        fn down(&self, local_only: bool) {
+            self.tx
+                .send(AlertMsg::Down(DownAlert {
+                    name: "API".to_owned(),
+                    notify: Some(vec!["main".to_owned()]),
+                    local_only,
+                    ..down("api", &[])
+                }))
+                .unwrap();
+        }
+
+        fn recovered(&self) {
+            self.tx
+                .send(AlertMsg::Recovered {
+                    id: "api".to_owned(),
+                    name: "API".to_owned(),
+                    notify: Some(vec!["main".to_owned()]),
+                })
+                .unwrap();
+        }
+
+        /// Wait until the coalescer has dispatched everything sent so far.
+        async fn settle(&self) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        /// Shutdown, then the inbox closing, ends it at once.
+        async fn close(self) {
+            self.shutdown_tx.send(true).unwrap();
+            drop(self.tx);
+            self.task.await.unwrap();
+        }
+    }
+
+    /// The whole route, through real channels: with quiet channels named, a
+    /// local-only down reaches them only (flagged in the webhook), its
+    /// confirmation by the peers reaches the usual one, and each recovery
+    /// goes to whoever got a down.
     #[tokio::test]
     async fn local_only_downs_page_the_quiet_channel_only() {
-        let (main_url, main) = crate::testing::webhook_sink().await;
-        let (quiet_url, quiet) = crate::testing::webhook_sink().await;
-        let toml = |unconfirmed: &str| {
-            format!(
+        let routed = Routed::new(r#"notify_unconfirmed = ["quiet"]"#).await;
+        let (main, quiet) = (&routed.main, &routed.quiet);
+
+        // Seen up by the peers: the quiet channel only, flagged.
+        routed.down(true);
+        routed.settle().await;
+        assert_eq!(crate::testing::events(main), Vec::<String>::new());
+        assert_eq!(crate::testing::events(quiet), ["down"]);
+        assert_eq!(quiet.lock().unwrap()[0]["local_only"], true);
+        // Its recovery: the quiet channel only, flagged too.
+        routed.recovered();
+        routed.settle().await;
+        assert_eq!(crate::testing::events(main), Vec::<String>::new());
+        assert_eq!(crate::testing::events(quiet), ["down", "recovered"]);
+        assert_eq!(quiet.lock().unwrap()[1]["local_only"], true);
+
+        // Local-only, then confirmed when the peers are asked again: one
+        // real down on the usual channel; the recovery reaches both.
+        routed.down(true);
+        routed.down(false);
+        routed.recovered();
+        routed.settle().await;
+        assert_eq!(crate::testing::events(main), ["down", "recovered"]);
+        assert_eq!(main.lock().unwrap()[0]["local_only"], false);
+        assert_eq!(
+            crate::testing::events(quiet),
+            ["down", "recovered", "down", "recovered"]
+        );
+
+        // An explicitly empty notify_unconfirmed: only recorded.
+        routed.reload("notify_unconfirmed = []");
+        routed.down(true);
+        routed.recovered();
+        routed.settle().await;
+        assert_eq!(crate::testing::events(main).len(), 2);
+        assert_eq!(crate::testing::events(quiet).len(), 4);
+        routed.close().await;
+    }
+
+    /// Without `notify_unconfirmed` a local-only down is never silent: a
+    /// peer's "up" alone must not hide it. It reaches the monitor's own
+    /// channels, flagged, and so does its recovery.
+    #[tokio::test]
+    async fn local_only_downs_default_to_the_monitors_own_channels() {
+        let routed = Routed::new("").await;
+        let (main, quiet) = (&routed.main, &routed.quiet);
+
+        routed.down(true);
+        routed.recovered();
+        routed.settle().await;
+        assert_eq!(crate::testing::events(main), ["down", "recovered"]);
+        assert_eq!(main.lock().unwrap()[0]["local_only"], true);
+        assert_eq!(main.lock().unwrap()[1]["local_only"], true);
+
+        // Confirmed later: the real down follows on the same channels, and
+        // the recovery is no longer a local-only one.
+        routed.down(true);
+        routed.down(false);
+        routed.recovered();
+        routed.settle().await;
+        let sent = main.lock().unwrap().clone();
+        assert_eq!(sent.len(), 5);
+        assert_eq!(sent[2]["local_only"], true);
+        assert_eq!(sent[3]["local_only"], false);
+        assert_eq!(sent[4]["local_only"], false);
+
+        // The quiet channel is only one more channel until it is named.
+        assert_eq!(crate::testing::events(quiet), Vec::<String>::new());
+        routed.close().await;
+    }
+
+    /// A channel that accepts the connection and never answers holds only its
+    /// own lane: the other channel gets every alert at once, in order, and
+    /// the incident is marked announced as soon as that one took the down.
+    #[tokio::test]
+    async fn a_silent_channel_delays_only_its_own_lane() {
+        let (healthy_url, healthy) = crate::testing::webhook_sink().await;
+        // Accepts, reads nothing, answers nothing.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_url = format!("http://{}/hook", silent.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                held.push(socket);
+            }
+        });
+        let config = Arc::new(
+            crate::config::parse(&format!(
                 r#"
                 [page]
                 [server]
-                [alerts]
-                group_window_secs = 0
-                {unconfirmed}
                 [[channels]]
-                name = "main"
+                name = "healthy"
                 type = "webhook"
-                url = "{main_url}"
+                url = "{healthy_url}"
                 [[channels]]
-                name = "quiet"
+                name = "silent"
                 type = "webhook"
-                url = "{quiet_url}"
+                url = "{silent_url}"
                 [[monitors]]
                 id = "api"
                 name = "API"
                 target = "https://example.com"
                 interval_secs = 60
-                notify = ["main"]
                 "#
-            )
-        };
-        let config =
-            Arc::new(crate::config::parse(&toml(r#"notify_unconfirmed = ["quiet"]"#)).unwrap());
+            ))
+            .unwrap(),
+        );
+        let store = Store::in_memory().await;
+        let incident = db::insert_incident_start(&store, "api", None, None, None, &[], None, None)
+            .await
+            .unwrap();
         let client = crate::http::client(None).unwrap();
         let notifier = crate::notifications::shared(&config, &client);
-        let (config_tx, config_rx) = watch::channel(Arc::clone(&config));
+        let (_config_tx, config_rx) = watch::channel(Arc::clone(&config));
         let (tx, rx) = mpsc::unbounded_channel();
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let task = spawn(config_rx, notifier, rx, shutdown_rx);
-        let api = |local_only| {
-            AlertMsg::Down(DownAlert {
-                id: "api".to_owned(),
-                name: "API".to_owned(),
-                notify: Some(vec!["main".to_owned()]),
-                local_only,
-                ..down("api", &[])
-            })
-        };
-        let recovered = || AlertMsg::Recovered {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = spawn(config_rx, notifier, store.clone(), rx, shutdown_rx);
+
+        tx.send(AlertMsg::Down(DownAlert {
+            incident: Some(incident),
+            ..down("api", &[])
+        }))
+        .unwrap();
+        tx.send(AlertMsg::Recovered {
             id: "api".to_owned(),
             name: "API".to_owned(),
-            notify: Some(vec!["main".to_owned()]),
-        };
-        // Wait until the coalescer has dispatched everything sent so far.
-        let settle = || async {
-            for _ in 0..100 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        };
+            notify: None,
+        })
+        .unwrap();
+        tx.send(AlertMsg::Down(down("api", &[]))).unwrap();
 
-        // Seen up by the peers: the quiet channel only, flagged.
-        tx.send(api(true)).unwrap();
-        settle().await;
-        assert_eq!(crate::testing::events(&main), Vec::<String>::new());
-        assert_eq!(crate::testing::events(&quiet), ["down"]);
-        assert_eq!(quiet.lock().unwrap()[0]["local_only"], true);
-        // Its recovery: the quiet channel only, flagged too.
-        tx.send(recovered()).unwrap();
-        settle().await;
-        assert_eq!(crate::testing::events(&main), Vec::<String>::new());
-        assert_eq!(crate::testing::events(&quiet), ["down", "recovered"]);
-        assert_eq!(quiet.lock().unwrap()[1]["local_only"], true);
-
-        // Local-only, then confirmed when the peers are asked again: one
-        // real down on the usual channel; the recovery reaches both.
-        tx.send(api(true)).unwrap();
-        tx.send(api(false)).unwrap();
-        tx.send(recovered()).unwrap();
-        settle().await;
-        assert_eq!(crate::testing::events(&main), ["down", "recovered"]);
-        assert_eq!(main.lock().unwrap()[0]["local_only"], false);
+        // Well inside the silent channel's first timeout (15s per attempt).
+        let started = std::time::Instant::now();
+        while crate::testing::events(&healthy).len() < 3 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the healthy channel waited on the silent one"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(
-            crate::testing::events(&quiet),
-            ["down", "recovered", "down", "recovered"]
+            crate::testing::events(&healthy),
+            ["down", "recovered", "down"]
         );
-
-        // Without notify_unconfirmed a local-only down is only recorded.
-        config_tx
-            .send(Arc::new(crate::config::parse(&toml("")).unwrap()))
-            .unwrap();
-        tx.send(api(true)).unwrap();
-        tx.send(recovered()).unwrap();
-        settle().await;
-        assert_eq!(crate::testing::events(&main).len(), 2);
-        assert_eq!(crate::testing::events(&quiet).len(), 4);
-
-        shutdown_tx.send(true).unwrap();
-        task.await.unwrap();
+        for _ in 0..100 {
+            if db::incident_notified(&store, incident).await.unwrap() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(db::incident_notified(&store, incident).await.unwrap());
+        // The silent lane is still on its first delivery: don't wait for it.
+        task.abort();
     }
 }

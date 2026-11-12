@@ -33,7 +33,8 @@ pub(crate) async fn heatmap_svg(
 ) -> Result<impl IntoResponse, AppError> {
     let config = &viewer.config;
     // Same visibility rule as the latency endpoint.
-    let visibility = Visibility::new(config, &viewer.audience);
+    let audience = super::pages::audience_for_monitor(&viewer, &id);
+    let visibility = Visibility::new(config, &audience);
     let monitor = visible_monitor(config, &visibility, &id)?;
     // The image does not depend on who asks (visibility is settled above), and
     // it groups 28 days of checks: one render per monitor serves everyone for
@@ -84,7 +85,7 @@ pub(crate) async fn status_badge(
     // not pay for, or wait on, a full status-page rebuild.
     let config = state.config.borrow().clone();
     badge_monitor(&config, &id)?;
-    let threshold = i64::from(config.alerts.fail_threshold.max(1));
+    let threshold = i64::from(config.fail_threshold(&id));
     let recent = db::recent_checks(&state.store, &id, threshold).await?;
     let status = db::derive_status(&recent, threshold).as_str();
     Ok(svg_response(badge(
@@ -103,7 +104,7 @@ pub(crate) async fn status_badge(
         ("style" = Option<String>, Query, description = "Badge style: flat, flat-square, or for-the-badge")
     ),
     responses(
-        (status = 200, description = "24h uptime badge (SVG)"),
+        (status = 200, description = "24 h uptime badge (SVG)"),
         (status = 404, description = "Unknown monitor")
     )
 )]

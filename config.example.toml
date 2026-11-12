@@ -1,8 +1,12 @@
 # Hora configuration. Copy to config.toml and edit.
 # The path is resolved from $HORA_CONFIG (default: ./config.toml).
 #
-# Any `VAR` in this file is replaced with the environment variable at load,
-# so secrets can stay out of the file.
+# Any `${VAR}` in this file is replaced with the environment variable at load,
+# so secrets can stay out of the file. A variable that is not set expands to
+# nothing, with a warning that names the key (`hora check` shows it, and
+# `hora check --strict` fails on it). `${VAR:-fallback}` gives a default (also
+# used when the variable is empty), `${VAR:-}` says the value is optional,
+# and `$${` is a literal `${`.
 
 [page]
 # Title shown on the public status page and in the browser tab.
@@ -30,22 +34,45 @@ allowed_origins = []
 # Unset = the TCP peer address (forwarded headers are never trusted by default).
 # client_ip_header = "x-real-ip"          # nginx: proxy_set_header X-Real-IP $remote_addr;
 # client_ip_header = "cf-connecting-ip"   # behind Cloudflare
+# With a header that lists several addresses (x-forwarded-for), how many
+# proxies of yours stand in front of Hora: each appends the address it saw, so
+# the client's is that many entries from the right; anything further left is
+# whatever the client sent. Default 1 (one reverse proxy). 2 for a CDN in front
+# of your proxy, when both append.
+# trusted_proxies = 1
 # Per-IP rate limit. One request slot is replenished every
 # `rate_limit_refill_secs` seconds, up to a burst of `rate_limit_burst`, on /api/*;
 # pages, badges, reports and /metrics get four times both. Read once at startup.
 rate_limit_refill_secs = 1
 rate_limit_burst = 30
-# Token required to view private monitors (those with `public = false`), sent
-# as `Authorization: Bearer <token>` (preferred - a `?token=` query also works,
-# but URLs end up in browser history and intermediary logs). It gates the full
-# view on the status page, /api/summary, /api/monitors/{id}/latency, /metrics,
-# /history and /history.atom; without it those endpoints only show public
-# monitors. Read live: a change applies on the next reload.
+# How many HTTP connections are served at once; the ones beyond wait their
+# turn. Default 1024, fewer when the memory limit is small (128 in a 64 MiB
+# container), and never more than half the open-files limit: the other half is
+# for the checks' own sockets. Read once at startup.
+# max_connections = 1024
+# The operator token: required to view private monitors (those with
+# `public = false`) and to call the write endpoints (/api/silence,
+# /api/maintenance, /api/announce, /api/event, /api/monitors/{id}/alert). Sent as
+# `Authorization: Bearer <token>`. The read-only views also take it as a
+# `?token=` query (URLs end up in browser history and intermediary logs);
+# the write endpoints refuse `?token=`. It gates the full view on the status
+# page, /api/summary, /api/monitors/{id}/latency, /metrics, /history and
+# /history.atom; without it those endpoints only show public monitors.
+# Every access token (this one, view_token, group tokens, push_token,
+# listen_token) must be at least 16 characters: `openssl rand -hex 16`.
+# Read live: a change applies on the next reload.
 # auth_token = "${HORA_AUTH_TOKEN}"
+# A read-only token: every monitor, private ones and their failure detail
+# included, on the same read-only views - and nothing else. It never
+# authorizes a write, and does not show the operator's streams (event
+# markers, silences, channel health, /watchers). The one for a wall display's
+# `?token=` URL or a colleague: leaked, it cannot mute an alert.
+# view_token = "${HORA_VIEW_TOKEN}"
 # Per-group viewer tokens for the /status/{group} pages (lightweight
 # multi-tenancy): the token reveals the FULL view of its group - private
 # monitors included - and nothing else. Also accepted by the group-scoped
-# SLA report (/report/2026-05?group=...). The global auth_token always works.
+# SLA report (/report/2026-05?group=...). The global auth_token and
+# view_token always work.
 # [server.group_tokens]
 # "Clients ACME" = "${ACME_TOKEN}"
 
@@ -53,7 +80,8 @@ rate_limit_burst = 30
 # Each channel has a unique `name` and a `type`. Several channels may share a
 # type (e.g. two Discord webhooks). A monitor routes to specific channels with
 # its `notify = ["name", ...]` field; without it, every channel is used.
-# An empty secret (e.g. an unset VAR) simply disables that channel.
+# A channel whose token or URL is empty (e.g. an unset ${VAR}) is disabled,
+# with a warning at load that names it; the others keep working.
 
 # [[channels]]
 # name = "ops-telegram"
@@ -103,7 +131,7 @@ rate_limit_burst = 30
 # name = "ntfy-alerts"
 # type = "ntfy"                    # ntfy.sh or self-hosted ntfy server
 # url = "https://ntfy.sh/my-topic" # topic URL
-# token = "${NTFY_TOKEN}"          # optional; for private ntfy servers
+# token = "${NTFY_TOKEN:-}"        # optional; for private ntfy servers
 
 # [[channels]]
 # name = "gotify-alerts"
@@ -120,6 +148,8 @@ rate_limit_burst = 30
 # Alerting and retention policy, independent of any channel.
 [alerts]
 # Consecutive failed checks before a monitor is alerted as down. Kills flapping / false positives.
+# The default for every monitor; one that needs another sets its own
+# `fail_threshold` (see the monitors below).
 fail_threshold = 3
 # Also alert when a monitor is *degraded* (up, but slower than its `degraded_over_ms`),
 # not only when it is down. Uses the same fail_threshold. Requires `degraded_over_ms`
@@ -132,7 +162,7 @@ cert_expiry_days = 14
 # domain_expiry_days = 14
 # Default history retention in days, overridable per monitor via `retention_days`.
 default_retention_days = 90
-# Failed probes are re-tried once (after 1s) before being recorded, so a
+# Failed probes are re-tried once (after 1 s) before being recorded, so a
 # single network blip between Hora and the target never lands in the history,
 # the uptime numbers or the error budget. Override per monitor with
 # `probe_retries = 0..5` (0 = record every raw result).
@@ -159,15 +189,17 @@ default_retention_days = 90
 # channel_fail_threshold = 3
 #
 # Local-only downs: with peers and confirm_with_peers, a down that every peer
-# that answered sees UP is a problem near this node, not an outage. It never
-# goes to the monitor's own channels: it goes to these (a quiet channel), or,
-# without this key, is only recorded (incident, timeline, "Not an outage").
-# The peers are asked again every 5 minutes; once they no longer all see it
-# up, the real down alert goes out. Default: unset.
-# notify_unconfirmed = ["ntfy-low"]
+# that answered sees UP is a problem near this node, not an outage. Unset
+# (the default), it still goes to the monitor's own channels, flagged as
+# local-only: a peer's answer alone never silences an alert. Name a quiet
+# channel here to send it there instead, or set an empty list to only record
+# it (incident, timeline, "Not an outage"). The peers are asked again every 5
+# minutes; once they no longer all see it up, the real down alert goes out.
+# notify_unconfirmed = ["ntfy-low"]   # a quiet channel instead
+# notify_unconfirmed = []             # record only, notify nobody
 
 # --- Weekly digest ----------------------------------------------------------
-# A recap of the last 7 days through the notification channels: "99.97%
+# A recap of the last 7 days through the notification channels: "99.97 %
 # overall, 2 incidents" plus one line per monitor (uptime, incidents, error
 # budget when an SLO is set). Informational only - it never alerts. Preview
 # the exact text anytime with `hora digest`.
@@ -192,6 +224,12 @@ default_retention_days = 90
 # start = "2026-06-08T00:00:00Z"   # RFC 3339, quoted
 # end   = "2026-06-08T02:00:00Z"
 # monitors = ["database"]
+#
+# A window can also be planned while the daemon runs, with no config edit:
+#   hora maintenance plan --host frank --at 2026-11-13T05:00:00Z --for 10m "kernel reboot"
+#   POST /api/maintenance?host=frank&starts_at=...&duration=10m&reason=...
+# It behaves like the ones above, and a node announces the ones for its own
+# host to its peers (see `host` and `accept_maintenance_secs` below).
 
 # --- Incidents / announcements --------------------------------------------
 # Shown as a banner at the top of the status page. Edit and reload to update.
@@ -203,7 +241,7 @@ default_retention_days = 90
 
 # --- Monitors -------------------------------------------------------------
 # kind = "http" (default), "tcp", "icmp", "push" or "dns".
-# For http: target is a URL; up = 2xx (or expected_status if set).
+# For http: target is a URL; up = 2xx (or what expected_status lists if set).
 # For tcp:  target is "host:port"; up = TCP connect succeeds.
 # For icmp: target is a host or IP (no port); up = ICMP echo reply. Uses an
 #           unprivileged datagram socket, so it works in rootless Docker without
@@ -216,13 +254,18 @@ default_retention_days = 90
 # Topology (optional):
 #   group = "infra"              # display group on the status page
 #   depends_on = ["db", "cache"] # upstream monitors this one depends on
+#   host = "frank"               # the machine the service runs on (a free label):
+#                                # a maintenance window planned for that host
+#                                # (`hora maintenance plan --host frank ...`)
+#                                # covers every monitor that carries it
 # When a monitor goes down, the alert is annotated:
 #   - "caused by X" if an upstream it depends on is also down (symptom)
 #   - "impacts: A, B, C" if all its upstreams are up (root cause, blast radius)
 # The dependency graph must be acyclic (validated at load).
 #
 # Visibility (optional):
-#   public = false               # hide from unauthenticated viewers (requires auth_token)
+#   public = false               # hide from unauthenticated viewers (requires
+#                                # auth_token or view_token)
 #   public_error_detail = true   # show the raw failure reason to anonymous viewers;
 #                                # by default they only see a safe category ("HTTP 500",
 #                                # "content check failed") since the stored detail can
@@ -237,12 +280,20 @@ interval_secs = 60
 timeout_secs = 10
 group = "app"
 depends_on = ["api"]
-# expected_status = 200   # optional; default: any 2xx counts as up
+# expected_status = 200   # optional; default: any 2xx counts as up. A status, a
+#                         # class or a list of them: [200, 401], ["2xx", 401], "4xx".
+#                         # With a 3xx among them the first answer is judged:
+#                         # redirects are not followed.
+# method = "HEAD"         # optional; "GET" (default) or "HEAD". A HEAD has no
+#                         # response body: not with keyword / json_query /
+#                         # number_regex. No other method: Hora sends no body.
+# fail_threshold = 1      # optional; consecutive failed checks before THIS monitor
+#                         # is down, instead of [alerts] fail_threshold. Any kind.
 # degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)
-# slo_latency_ms = 500    # optional; the 24h p95 is flagged met/breached against this
+# slo_latency_ms = 500    # optional; the 24 h p95 is flagged met/breached against this
 # slo_uptime = 99.9        # optional; availability SLO (%). Shows the error budget
 #                          # left on the status page and arms burn-rate alerts
-#                          # ("burning error budget at 14.4x - exhausted in ~6h").
+#                          # ("burning error budget at 14.4x - exhausted in ~6 h").
 # slo_window_days = 30     # optional; the SLO window (default 30 days)
 # check_cert = false      # optional; override TLS expiry checking
 # retention_days = 30     # optional; override how long this monitor's history is kept
@@ -333,7 +384,11 @@ group = "infra"
 # Heartbeat / push monitor: down if no ping arrives within `interval_secs`.
 # The job calls: curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \
 #   "https://status.example.com/api/push/nightly-backup"
-# The header keeps the token out of proxy/access logs (`?token=` also works).
+# The header keeps the token out of proxy/access logs (`?token=` is refused).
+# A push monitor must set a push_token (at least 16 characters): its id is
+# public, so the id alone must not be enough to fake a heartbeat. The only way
+# around it is the explicit `allow_unauthenticated = true` below, for a
+# network where everyone who can reach /api/push is trusted.
 # Optional query: ?status=down&msg=...&ping=<ms>
 #
 # Cron-aware variant: declare WHEN the job runs and Hora alerts only if a
@@ -344,11 +399,12 @@ group = "infra"
 id = "nightly-backup"
 name = "Nightly backup"
 kind = "push"
-interval_secs = 90000        # max gap before "down" (~25h for a daily job)
-# push_token = "${BACKUP_TOKEN}"   # optional but recommended
+interval_secs = 90000        # max gap before "down" (~25 h for a daily job)
+# push_token = "${BACKUP_TOKEN}"   # set it, then remove the line below
+allow_unauthenticated = true     # accepts heartbeats from anyone: example only
 # schedule = "0 3 * * *"     # five-field cron, UTC (not local time: DST moves a
 #                            # local crontab by an hour); replaces the fixed-gap rule
-# grace_secs = 1800          # how late a scheduled ping may be (default 30m)
+# grace_secs = 1800          # how late a scheduled ping may be (default 30 min)
 
 # Exec monitor: run an external check, monitoring-plugins convention (exit
 # 0 = up, 1 = degraded, anything else = down; first stdout line = message).
@@ -404,21 +460,30 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 #                           # alerting. The alert says "confirmed down from 3/3
 #                           # vantage points" (real outage) or "seen UP by hora-b"
 #                           # (network issue near this node) - such a local-only
-#                           # down goes to alerts.notify_unconfirmed (or nowhere),
-#                           # not to the monitor's channels. A peer only probes
+#                           # down is flagged, and goes to
+#                           # alerts.notify_unconfirmed instead of the monitor's
+#                           # channels when that is set. A peer only probes
 #                           # targets in its OWN config (never an arbitrary one),
 #                           # and its [[peers]] entry for this node must set a
-#                           # listen_token. Strictly fail-open: unreachable peers
-#                           # never block or suppress the alert. Override per
-#                           # monitor with confirm_with_peers = true/false.
+#                           # listen_token. Every peer's ping_url must then be
+#                           # https (http only for localhost): a forged "up"
+#                           # would hide an outage. Strictly fail-open:
+#                           # unreachable peers never block or suppress the
+#                           # alert. Override per monitor with
+#                           # confirm_with_peers = true/false.
 # heartbeat_url = "${HC_PING_URL}"   # optional extra dead-man target (e.g. healthchecks.io)
+# host = "frank"            # the machine THIS node runs on (the label its monitors
+#                           # and its peers use for it). A maintenance window
+#                           # planned here for that host is announced to the
+#                           # peers on the heartbeat, so they stay quiet while
+#                           # it reboots; a window for another host stays local.
 
 # Each [[peers]] entry has two independent halves; set either or both:
 #   OUT  (ping_url)            - I heartbeat the peer when I'm healthy.
 #   IN   (expect_every_secs)   - I watch the peer and alert if it stops pinging me.
-# Peers with a ping_url are also polled (60s, fail-open) for their view of the
+# Peers with a ping_url are also polled (60 s, fail-open) for their view of the
 # targets both nodes monitor: the status page then shows per-vantage latency
-# ("Hora B: 220ms") on each shared monitor's card, and `hora peers diff`
+# ("Hora B: 220 ms") on each shared monitor's card, and `hora peers diff`
 # verifies the mesh's configs stayed aligned (non-zero exit on drift, for CI).
 # [[peers]]
 # id = "hora-b"             # the peer's [health].id (must match across the mesh)
@@ -427,9 +492,22 @@ interval_secs = 90000        # max gap before "down" (~25h for a daily job)
 # ping_token = "${PEER_B_TOKEN}"                   # sent as the X-Push-Token header
 # expect_every_secs = 90   # IN: mark the peer down if it goes silent this long
 # listen_token = "${PEER_B_IN}"   # token the peer must present when it pings me
-#                           # (peer pings POST /api/push/hora-b; listen_id defaults to id)
+#                           # (peer pings POST /api/push/hora-b; listen_id defaults to id).
+#                           # Required with expect_every_secs, 16 characters at least;
+#                           # `allow_unauthenticated = true` is the explicit opt-out.
 # witness_url = "https://b.example/healthz"   # optional; default = origin(ping_url)/healthz
 # notify = ["ops-telegram"]                   # optional; route this peer's alerts
+# host = "yuki"             # the machine that peer runs on: the only host it may
+#                           # declare maintenance for
+# accept_maintenance_secs = 900   # a TRUST decision, off unless set: accept the
+#                           # maintenance windows this peer announces on its
+#                           # heartbeat, each for at most this long (a longer one
+#                           # is cut, max 604800). For that time the peer keeps
+#                           # this node from alerting that it went silent, and -
+#                           # when the window is for its `host` - that the
+#                           # monitors labelled with that host are down. Never
+#                           # any other monitor. Needs expect_every_secs and a
+#                           # listen_token (refused with allow_unauthenticated).
 
 # OUT-only peer: a plain dead-man to an external receiver (no watching).
 # [[peers]]

@@ -84,7 +84,7 @@ pub async fn apply(
 
 /// The validated id list: `["*"]` for `all` / `*`, otherwise every listed id,
 /// each a configured monitor or watched peer.
-fn resolve_ids(config: &Config, ids: &str) -> Result<Vec<String>, SilenceError> {
+pub(crate) fn resolve_ids(config: &Config, ids: &str) -> Result<Vec<String>, SilenceError> {
     let ids = ids.trim();
     if ids == "all" || ids == "*" {
         return Ok(vec!["*".to_owned()]);
@@ -135,6 +135,7 @@ mod tests {
             name = "Paris"
             listen_id = "paris-in"
             expect_every_secs = 60
+            listen_token = "a-long-enough-listen-token"
             "#,
         )
         .expect("config")
