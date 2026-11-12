@@ -8,16 +8,33 @@
 {% block main %}
 <main id="main" class="page">
 <div class="page-head"><h1>History</h1>
-<p class="lede">Every incident, newest first. Each one has its own page, written up as it happened. <a href="/history.atom">Follow them in a feed reader</a>.</p></div>
+<p class="lede">Every incident, newest first. Each one has its own page, written up as it happened. <a href="/history.atom">Follow them in a feed reader</a>.</p>
+</div>
 
 <section class="section near" aria-labelledby="inc">
-<div class="section-head"><h2 id="inc">Incidents</h2><span class="fact">{{ incidents.len() }} shown</span></div>
+<div class="section-head">
+  <h2 id="inc">Incidents</h2>
+  <span class="fact">{{ incidents.len() }} shown</span></div>
 {%- if incidents.is_empty() %}
 <p class="quiet-line">{% call m::glyph("up") %}{% endcall %}Nothing to report: no incident recorded yet.</p>
 {%- else %}
 <ul class="past">
 {%- for incident in incidents %}
-  <li><time datetime="{{ incident.started_iso }}">{{ incident.day }}</time><span class="t"><a href="/incident/{{ incident.id }}{{ chrome.q()|safe }}">{{ incident.headline }}</a><small>{{ incident.span }}{% if let Some(error) = incident.error %} · {{ error }}{% endif %}{% if let Some(cause) = incident.cause %} · caused by {{ cause }}{% endif %}{% if let Some((_, verdict)) = incident.verdict %} · {{ verdict }}{% endif %}</small></span><span class="r">{% if incident.resolved %}{% call m::state("up", "Resolved") %}{% endcall %}{% else %}{% call m::state("down", "Ongoing") %}{% endcall %}{% endif %}</span></li>
+  <li>
+    <time datetime="{{ incident.started_iso }}">{{ incident.day }}</time><span class="t"><a href="/incident/{{ incident.id }}{{ chrome.q()|safe }}">{{ incident.headline }}</a><small>{{ incident.span }}
+  {%- if let Some(error) = incident.error %} · {{ error }}
+  {%- endif -%}
+  {%- if let Some(cause) = incident.cause %} · caused by {{ cause }}
+  {%- endif -%}
+  {%- if let Some((_, verdict)) = incident.verdict %} · {{ verdict }}
+  {%- endif -%}
+  </small></span><span class="r">
+  {%- if incident.resolved -%}
+    {% call m::state("up", "Resolved") %}{% endcall %}
+  {%- else -%}
+    {% call m::state("down", "Ongoing") %}{% endcall %}
+  {%- endif -%}
+  </span></li>
 {%- endfor %}
 </ul>
 {%- endif %}
@@ -25,10 +42,17 @@
 
 {%- if !pushed_alerts.is_empty() %}
 <section class="section" aria-labelledby="alerts">
-<div class="section-head"><h2 id="alerts">Alerts from your systems</h2><span class="fact">Sent to Hora by the services themselves</span></div>
+<div class="section-head">
+  <h2 id="alerts">Alerts from your systems</h2>
+  <span class="fact">Sent to Hora by the services themselves</span></div>
 <ul class="past">
 {%- for alert in pushed_alerts %}
-  <li><time datetime="{{ alert.iso }}">{{ alert.at }}</time><span class="t">{{ alert.monitor }}: {{ alert.title }}{% if let Some(message) = alert.message %}<small>{{ message }}</small>{% endif %}</span><span class="r">{% call m::state(alert.state, alert.severity) %}{% endcall %}</span></li>
+  <li>
+    <time datetime="{{ alert.iso }}">{{ alert.at }}</time><span class="t">{{ alert.monitor }}: {{ alert.title }}
+  {%- if let Some(message) = alert.message -%}
+    <small>{{ message }}</small>
+  {%- endif -%}
+  </span><span class="r">{% call m::state(alert.state, alert.severity) %}{% endcall %}</span></li>
 {%- endfor %}
 </ul>
 </section>
@@ -36,10 +60,14 @@
 
 {%- if !events.is_empty() %}
 <section class="section" aria-labelledby="events">
-<div class="section-head"><h2 id="events">Changes</h2><span class="fact">Deploys and other events, operators only</span></div>
+<div class="section-head">
+  <h2 id="events">Changes</h2>
+  <span class="fact">Deploys and other events, operators only</span></div>
 <ul class="past">
 {%- for event in events %}
-  <li><time datetime="{{ event.iso }}">{{ event.at }}</time><span class="t">{{ event.title }}</span><span class="r">{% call m::state("info", "Change") %}{% endcall %}</span></li>
+  <li>
+    <time datetime="{{ event.iso }}">{{ event.at }}</time><span class="t">{{ event.title }}</span><span class="r">{% call m::state("info", "Change") %}{% endcall %}</span>
+  </li>
 {%- endfor %}
 </ul>
 </section>

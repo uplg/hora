@@ -1,18 +1,29 @@
 {% extends "base.html" %}
 {% import "partials/macros.html" as m %}
 {% block title %}Timeline · {{ chrome.site }} status{% endblock %}
-{% block description %}What happened at {{ chrome.site }} over the last 7 days, newest first.{% endblock %}
+{% block description -%}
+  What happened at {{ chrome.site }} over the last 7 days, newest first.
+{%- endblock %}
 {% block main %}
 <main id="main" class="page">
 <div class="page-head"><h1>Timeline</h1>
-<p class="lede">The last 7 days, newest first: outages and recoveries, announcements{% if chrome.operator %}, changes, alerts and silences{% endif %}. Times in UTC.</p></div>
+<p class="lede">The last 7 days, newest first: outages and recoveries, announcements
+{%- if chrome.operator -%}
+  , changes, alerts and silences
+{%- endif -%}
+. Times in UTC.</p></div>
 <section class="section near" aria-label="Timeline entries">
 {%- if entries.is_empty() %}
 <p class="quiet-line">{% call m::glyph("up") %}{% endcall %}A quiet week: nothing recorded.</p>
 {%- else %}
 <ol class="tl">
 {%- for entry in entries %}
-  <li>{% call m::glyph(entry.state) %}{% endcall %}<time datetime="{{ entry.iso }}">{{ entry.at }}</time><span class="e"><b>{{ entry.title }}</b><span><span class="word {{ entry.state }}">{{ entry.word }}</span>{% if let Some(detail) = entry.detail %} · {{ detail }}{% endif %}{% if let Some(incident) = entry.incident %} · <a href="/incident/{{ incident }}{{ chrome.q()|safe }}">Read the post-mortem</a>{% endif %}</span></span></li>
+  <li>{% call m::glyph(entry.state) %}{% endcall %}<time datetime="{{ entry.iso }}">{{ entry.at }}</time><span class="e"><b>{{ entry.title }}</b><span><span class="word {{ entry.state }}">{{ entry.word }}</span>
+  {%- if let Some(detail) = entry.detail %} · {{ detail }}
+  {%- endif -%}
+  {%- if let Some(incident) = entry.incident %} · <a href="/incident/{{ incident }}{{ chrome.q()|safe }}">Read the post-mortem</a>
+  {%- endif -%}
+  </span></span></li>
 {%- endfor %}
 </ol>
 {%- endif %}

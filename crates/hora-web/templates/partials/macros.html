@@ -1,3 +1,9 @@
-{% macro glyph(st) %}<svg class="g {{ st }}" aria-hidden="true"><use href="#g-{{ st }}"/></svg>{% endmacro %}
-{% macro state(st, text) %}<svg class="g {{ st }}" aria-hidden="true"><use href="#g-{{ st }}"/></svg><span class="word {{ st }}">{{ text }}</span>{% endmacro %}
-{% macro icon(name) %}<svg aria-hidden="true" width="16" height="16"><use href="#i-{{ name }}"/></svg>{% endmacro %}
+{% macro glyph(st) -%}
+  <svg class="g {{ st }}" aria-hidden="true"><use href="#g-{{ st }}"/></svg>
+{%- endmacro %}
+{% macro state(st, text) -%}
+  <svg class="g {{ st }}" aria-hidden="true"><use href="#g-{{ st }}"/></svg><span class="word {{ st }}">{{ text }}</span>
+{%- endmacro %}
+{% macro icon(name) -%}
+  <svg aria-hidden="true" width="16" height="16"><use href="#i-{{ name }}"/></svg>
+{%- endmacro %}

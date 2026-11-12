@@ -1,5 +1,15 @@
 <header class="top"><div class="page">
-<a class="sign" href="/{{ chrome.q()|safe }}">{% if let Some(logo) = chrome.logo %}{% if let Some(dark) = chrome.logo_dark %}<img class="op-logo for-light" src="{{ logo }}" alt=""><img class="op-logo for-dark" src="{{ dark }}" alt="">{% else %}<img class="op-logo" src="{{ logo }}" alt="">{% endif %}{% else %}<span class="op-logo" aria-hidden="true">{{ chrome.initial }}</span>{% endif %}<b>{{ chrome.site }}</b><span>Status</span></a>
+<a class="sign" href="/{{ chrome.q()|safe }}">
+{%- if let Some(logo) = chrome.logo -%}
+  {%- if let Some(dark) = chrome.logo_dark -%}
+    <img class="op-logo for-light" src="{{ logo }}" alt=""><img class="op-logo for-dark" src="{{ dark }}" alt="">
+  {%- else -%}
+    <img class="op-logo" src="{{ logo }}" alt="">
+  {%- endif -%}
+{%- else -%}
+  <span class="op-logo" aria-hidden="true">{{ chrome.initial }}</span>
+{%- endif -%}
+<b>{{ chrome.site }}</b><span>Status</span></a>
 <nav aria-label="Pages">
 <a class="navlink" href="/{{ chrome.q()|safe }}"{% if chrome.current == "status" %} aria-current="page"{% endif %}>Status</a>
 <a class="navlink" href="/history{{ chrome.q()|safe }}"{% if chrome.current == "history" %} aria-current="page"{% endif %}>History</a>
