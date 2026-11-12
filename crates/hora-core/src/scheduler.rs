@@ -85,7 +85,7 @@ const LOCAL_ONLY_REASK_SECS: i64 = 300;
 /// ran into its deadline, or had its queue full - before it is sent again.
 /// Long next to any delivery, so a down still waiting its turn on a slow
 /// channel is not doubled.
-const REANNOUNCE_SECS: i64 = 600;
+pub const REANNOUNCE_SECS: i64 = 600;
 
 impl AlertState {
     /// The state of a monitor found mid-outage at startup (an incident is
@@ -145,11 +145,11 @@ impl AlertState {
     }
 
     /// Whether the down's delivery is due another look.
-    fn reannounce_due(&self, now: i64) -> bool {
+    fn reannounce_due(&self, now: i64, every: i64) -> bool {
         self.level == AlertLevel::Down
             && self
                 .announce_checked
-                .is_some_and(|checked| now - checked >= REANNOUNCE_SECS)
+                .is_some_and(|checked| now - checked >= every)
     }
 
     /// Whether a local-only down is due for another round of peer questions.
@@ -203,6 +203,9 @@ pub struct MonitorDeps {
     pub last_tick: Arc<AtomicU64>,
     /// Survives this task: see [`AlertCell`].
     pub alert_state: AlertCell,
+    /// How long a confirmed down may stay unannounced before it is sent
+    /// again: [`REANNOUNCE_SECS`], a parameter so a test need not wait it.
+    pub reannounce_secs: i64,
 }
 
 /// Spawn the probing loop for a single monitor. Aborting the returned handle
@@ -277,6 +280,7 @@ async fn run(
         alerts,
         last_tick,
         alert_state,
+        reannounce_secs,
     } = deps;
     // Fixed cadence: the tick interval does not drift by the probe duration.
     // The first tick is phase-shifted per monitor so a fleet sharing the same
@@ -439,7 +443,7 @@ async fn run(
                 let now = chrono::Utc::now().timestamp();
                 state.local_only_asked = local_only.then_some(now);
                 state.announce_checked = Some(now);
-            } else if state.reannounce_due(chrono::Utc::now().timestamp()) {
+            } else if state.reannounce_due(chrono::Utc::now().timestamp(), reannounce_secs) {
                 // Delivered since: nothing more to watch. Still not: every
                 // channel failed, or dropped it - said again, on the same
                 // incident, for as long as the outage lasts.
@@ -1260,11 +1264,11 @@ mod tests {
         assert!(state.observe_down(1));
         state.level = AlertLevel::Down;
         state.announce_checked = Some(1_000);
-        assert!(!state.reannounce_due(1_000 + REANNOUNCE_SECS - 1));
-        assert!(state.reannounce_due(1_000 + REANNOUNCE_SECS));
+        assert!(!state.reannounce_due(1_000 + REANNOUNCE_SECS - 1, REANNOUNCE_SECS));
+        assert!(state.reannounce_due(1_000 + REANNOUNCE_SECS, REANNOUNCE_SECS));
         // Seen delivered: nothing left to watch.
         state.announce_checked = None;
-        assert!(!state.reannounce_due(i64::MAX));
+        assert!(!state.reannounce_due(i64::MAX, REANNOUNCE_SECS));
         // The outage over, whatever was owed is dropped with it.
         state.announce_checked = Some(1_000);
         state.outage_ended();
@@ -1481,6 +1485,27 @@ mod tests {
         cell: &AlertCell,
         shutdown: &watch::Receiver<bool>,
     ) -> JoinHandle<()> {
+        task_reannouncing(
+            index,
+            store,
+            config,
+            alerts,
+            cell,
+            shutdown,
+            REANNOUNCE_SECS,
+        )
+    }
+
+    /// [`monitor_task`] with the re-announcement delay of the test's choosing.
+    fn task_reannouncing(
+        index: usize,
+        store: &Store,
+        config: &watch::Receiver<Arc<Config>>,
+        alerts: &mpsc::UnboundedSender<AlertMsg>,
+        cell: &AlertCell,
+        shutdown: &watch::Receiver<bool>,
+        reannounce_secs: i64,
+    ) -> JoinHandle<()> {
         let client = crate::http::client(None).expect("client");
         let monitor = config.borrow().monitors[index].clone();
         spawn_monitor(
@@ -1494,6 +1519,7 @@ mod tests {
                 alerts: alerts.clone(),
                 last_tick: Arc::new(AtomicU64::new(0)),
                 alert_state: cell.clone(),
+                reannounce_secs,
             },
             shutdown.clone(),
         )
@@ -1509,6 +1535,90 @@ mod tests {
             Ok(Some(AlertMsg::Recovered { id, .. })) => Some(("recovered", id)),
             _ => None,
         }
+    }
+
+    /// A down that no channel took - every one failed, or its queue was
+    /// full - is sent again while the outage lasts, on the same incident,
+    /// and no more once a channel has taken it.
+    #[tokio::test]
+    async fn a_down_nobody_took_is_sent_again_until_a_channel_takes_it() {
+        let store = Store::in_memory().await;
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 1
+            [[monitors]]
+            id = "job"
+            name = "Job"
+            kind = "push"
+            allow_unauthenticated = true
+            interval_secs = 1
+            "#,
+        )
+        .expect("config");
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let cell = AlertCell::default();
+        db::insert_push(
+            &store,
+            "job",
+            CheckStatus::Down,
+            None,
+            Some("backup failed"),
+        )
+        .await
+        .unwrap();
+        // Two seconds instead of ten minutes.
+        let task = task_reannouncing(0, &store, &config_rx, &alerts_tx, &cell, &shutdown_rx, 2);
+        let down = Some(("down", "job".to_owned()));
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            down
+        );
+        let incident = db::find_open_incident(&store, "job")
+            .await
+            .unwrap()
+            .expect("an open incident");
+
+        // Nothing here delivers it: it comes again, and again, on the same
+        // incident.
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(6)).await,
+            down
+        );
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(6)).await,
+            down
+        );
+        assert_eq!(
+            db::find_open_incident(&store, "job").await.unwrap(),
+            Some(incident)
+        );
+
+        // A channel takes it: said, and not said again.
+        db::mark_incident_notified(&store, incident).await.unwrap();
+        // One may already be on its way from before the mark.
+        while next_alert(&mut alerts_rx, Duration::from_secs(4))
+            .await
+            .is_some()
+        {}
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            None
+        );
+
+        // The recovery is still owed, once.
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("recovered", "job".to_owned()))
+        );
+        task.abort();
     }
 
     #[tokio::test]

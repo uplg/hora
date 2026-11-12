@@ -346,6 +346,7 @@ fn reconcile(
                     alerts: deps.alerts.clone(),
                     last_tick: Arc::clone(&deps.last_tick),
                     alert_state: fleet.alert_state(&monitor.id),
+                    reannounce_secs: scheduler::REANNOUNCE_SECS,
                 },
                 shutdown.clone(),
             );
