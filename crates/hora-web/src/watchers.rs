@@ -8,7 +8,6 @@ use std::fmt::Write as _;
 
 use hora_core::config::Config;
 use hora_core::db::Incident;
-use hora_core::fmt::xml_escape;
 use hora_core::mesh::wire::{HealthReport, HealthStatus, PeerState};
 
 use crate::display::DisplayState;
@@ -16,7 +15,7 @@ use crate::layout::{Chrome, ms};
 use crate::page::{Document, glyph, raw, state};
 use crate::render::{OWL_PARTS as OWL, coord, owl};
 use crate::summary::Summary;
-use maud::{Markup, html};
+use maud::{Markup, PreEscaped, html};
 
 /// Services listed in the per-place table, disagreements first.
 const MATRIX_ROWS: usize = 60;
@@ -37,7 +36,7 @@ impl WatchersTemplate {
                         h2 id="mp" { "The mesh" }
                         span.aside { "As this node sees it" }
                     }
-                    (raw(&page.map))
+                    (page.map)
                     div.key {
                         span { i {} "Heartbeats flowing" }
                         span { i.t {} "No heartbeat lately" }
@@ -158,7 +157,7 @@ pub(crate) struct WatchersPage {
     pub(crate) state: &'static str,
     pub(crate) state_word: String,
     pub(crate) lede: String,
-    pub(crate) map: String,
+    pub(crate) map: Markup,
     pub(crate) nodes: Vec<Node>,
     pub(crate) asked: usize,
     pub(crate) confirmed: usize,
@@ -394,42 +393,26 @@ pub(crate) fn build(
 /// The mesh drawn: this node in the middle, each peer around it, the link
 /// solid while heartbeats flow, dashed when they stopped. Only this node's
 /// own links are known here (a peer's view of another peer is not).
-fn map(self_name: &str, healthy: bool, links: &[PeerLink]) -> String {
+fn map(self_name: &str, healthy: bool, links: &[PeerLink]) -> Markup {
     // This node on the left, its peers fanned out on an arc to the right,
     // so no label sits on a link.
     const CX: f64 = 110.0;
     const CY: f64 = 190.0;
-    let mut edges = String::new();
-    let mut nodes = String::new();
+    let whole = |value: f64| format!("{value:.0}");
     let count = links.len();
-    for (index, link) in links.iter().enumerate() {
-        let spread = std::f64::consts::FRAC_PI_3;
-        let angle = if count > 1 {
-            -spread + 2.0 * spread * coord(index) / coord(count - 1)
-        } else {
-            0.0
-        };
-        let (x, y) = (CX + 330.0 * angle.cos(), CY + 160.0 * angle.sin());
-        let _ = write!(
-            edges,
-            "<path class=\"{}\" d=\"M{CX:.0} {CY:.0}L{x:.0} {y:.0}\"/>\
-             <text class=\"ll{}\" x=\"{:.0}\" y=\"{:.0}\" text-anchor=\"middle\">{}</text>",
-            link.link,
-            if link.state == "up" { "" } else { " split" },
-            f64::midpoint(CX, x) + 20.0,
-            f64::midpoint(CY, y) - 10.0,
-            xml_escape(&link.label),
-        );
-        let _ = write!(
-            nodes,
-            "<g transform=\"translate({x:.0} {y:.0})\"><circle class=\"ring\" r=\"34\"/>\
-             <svg class=\"owl\" data-state=\"{}\" viewBox=\"6 6 40 40\" width=\"48\" height=\"48\" \
-             x=\"-24\" y=\"-26\">{OWL}</svg>\
-             <text class=\"lab\" y=\"52\" text-anchor=\"middle\">{}</text></g>",
-            link.state,
-            xml_escape(&link.name),
-        );
-    }
+    let placed: Vec<(&PeerLink, f64, f64)> = links
+        .iter()
+        .enumerate()
+        .map(|(index, link)| {
+            let spread = std::f64::consts::FRAC_PI_3;
+            let angle = if count > 1 {
+                -spread + 2.0 * spread * coord(index) / coord(count - 1)
+            } else {
+                0.0
+            };
+            (link, CX + 330.0 * angle.cos(), CY + 160.0 * angle.sin())
+        })
+        .collect();
     let label = if links.is_empty() {
         format!("{self_name} watches alone: no peer configured.")
     } else {
@@ -453,18 +436,31 @@ fn map(self_name: &str, healthy: bool, links: &[PeerLink]) -> String {
         0.0
     };
     let (top, height) = (CY - reach - 56.0, 2.0 * reach + 140.0);
-    format!(
-        "<svg class=\"map\" viewBox=\"0 {top:.0} 560 {height:.0}\" role=\"img\" aria-label=\"{}\">\
-         {edges}\
-         <g transform=\"translate({CX:.0} {CY:.0})\"><circle class=\"ring me\" r=\"34\"/>\
-         <svg class=\"owl\" data-state=\"{}\" viewBox=\"6 6 40 40\" width=\"48\" height=\"48\" \
-         x=\"-24\" y=\"-26\">{OWL}</svg>\
-         <text class=\"lab\" y=\"52\" text-anchor=\"middle\">{}</text>\
-         <text class=\"sub\" y=\"67\" text-anchor=\"middle\">this Hora</text></g>{nodes}</svg>",
-        xml_escape(&label),
-        if healthy { "up" } else { "degraded" },
-        xml_escape(self_name),
-    )
+    // A node of the mesh: a ring, its owl, its name.
+    let node = |x: f64, y: f64, ring: &str, state: &str, name: &str, me: bool| {
+        html! {
+            g transform={ "translate(" (whole(x)) " " (whole(y)) ")" } {
+                circle class=(ring) r="34" {}
+                svg.owl data-state=(state) viewBox="6 6 40 40" width="48" height="48" x="-24" y="-26" {
+                    (PreEscaped(OWL))
+                }
+                text.lab y="52" text-anchor="middle" { (name) }
+                @if me { text.sub y="67" text-anchor="middle" { "this Hora" } }
+            }
+        }
+    };
+    html! {
+        svg.map viewBox={ "0 " (whole(top)) " 560 " (whole(height)) } role="img" aria-label=(label) {
+            @for (link, x, y) in &placed {
+                path class=(link.link) d={ "M" (whole(CX)) " " (whole(CY)) "L" (whole(*x)) " " (whole(*y)) } {}
+                text class=(if link.state == "up" { "ll" } else { "ll split" })
+                    x=(whole(f64::midpoint(CX, *x) + 20.0)) y=(whole(f64::midpoint(CY, *y) - 10.0))
+                    text-anchor="middle" { (link.label) }
+            }
+            (node(CX, CY, "ring me", if healthy { "up" } else { "degraded" }, self_name, true))
+            @for (link, x, y) in &placed { (node(*x, *y, "ring", link.state, &link.name, false)) }
+        }
+    }
 }
 
 /// Each shared service from each place: this node, then every peer that
