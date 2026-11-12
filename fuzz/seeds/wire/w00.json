@@ -1,0 +1,1 @@
+{"status":"ok","scheduler_ok":true,"db_ok":true,"last_tick_age":3,"probes_ok":true,"id":"a","peers":{"b":{"state":"up","age":12},"c":{"state":"gone","age":-1}}}

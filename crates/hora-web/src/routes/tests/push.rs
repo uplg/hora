@@ -19,6 +19,9 @@ async fn push_rejects_unknown_status_and_negative_ping() {
         "/api/push/beat?status=dwon",
         "/api/push/beat?status=0",
         "/api/push/beat?ping=-5",
+        // Over a day, up to what an i64 holds: a job's bug, not a latency.
+        "/api/push/beat?ping=86400001",
+        "/api/push/beat?ping=9223372036854775807",
     ] {
         let res = app.clone().oneshot(beat(bad)).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
@@ -33,6 +36,7 @@ async fn push_rejects_unknown_status_and_negative_ping() {
         "/api/push/beat",
         "/api/push/beat?status=down&ping=0",
         "/api/push/beat?status=degraded",
+        "/api/push/beat?ping=86400000",
     ] {
         let res = app.clone().oneshot(beat(good)).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{good}");

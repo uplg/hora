@@ -246,6 +246,18 @@ fn outcome_for(code: Option<i32>, message: Option<String>, latency_ms: i64) -> O
     }
 }
 
+/// The output parsing for the fuzz targets in `fuzz/` (built with
+/// `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    /// [`super::first_line`].
+    #[must_use]
+    pub fn first_line(output: &[u8]) -> Option<String> {
+        super::first_line(output)
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

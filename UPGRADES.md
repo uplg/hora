@@ -204,6 +204,9 @@ roll out:
   longer makes it `down`. Uptime figures read `100 %` (not `100.0 %`) and
   a latency over a second reads `1.8 s` in the text view, `hora top` and
   `hora probe`: adjust a script that parses them.
+- **A heartbeat's `ping` is at most a day** (86 400 000 ms): a larger one
+  gets a 400. A `schedule` with an empty field (`0 3 * * 1,`) no longer
+  loads; it never ran.
 - **Request bodies are limited to 64 KiB** on the JSON endpoints (it was
   2 MiB): a pushed alert with a larger body gets a 413.
 - **`/healthz` has a new field, `probes_ok`**, and a new reason to answer

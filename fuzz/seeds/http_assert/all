@@ -1,0 +1,5 @@
+OK
+$.status
+ok
+load (\d+)
+{"status":"ok","msg":"all OK, load 3"}

@@ -15,6 +15,9 @@
 pub mod discord;
 pub mod email;
 pub mod freemobile;
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz;
 pub mod gotify;
 pub mod matrix;
 mod message;

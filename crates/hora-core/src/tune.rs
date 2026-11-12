@@ -198,7 +198,9 @@ pub fn round_up_nice(ms: i64) -> i64 {
     } else {
         500
     };
-    ((ms + step - 1) / step) * step
+    // Without `ms + step - 1`: a pushed latency may be any `i64`, and one near
+    // the top has no round number above it.
+    (ms / step + i64::from(ms % step != 0)).saturating_mul(step)
 }
 
 /// One row of the `fail_threshold` replay table.
@@ -461,6 +463,29 @@ mod tests {
         assert_eq!(round_up_nice(12_300), 12_500);
         assert_eq!(round_up_nice(250), 250); // already round
         assert_eq!(round_up_nice(0), 0);
+    }
+
+    /// A stored latency is not always measured: a push monitor's `ping` is
+    /// any `i64` its job sent. Found by the `numbers` fuzz target: rounding
+    /// up one within 500 of `i64::MAX` overflowed.
+    #[test]
+    fn round_up_nice_stops_at_the_top_of_i64() {
+        assert_eq!(round_up_nice(i64::MAX), i64::MAX);
+        assert_eq!(round_up_nice(i64::MAX - 499), 9_223_372_036_854_775_500);
+        assert_eq!(
+            round_up_nice(9_223_372_036_854_775_000),
+            9_223_372_036_854_775_000
+        );
+        assert_eq!(
+            recommend_degraded(&LatencyStats {
+                p50: i64::MAX,
+                p95: i64::MAX,
+                p99: i64::MAX,
+                max: i64::MAX,
+                count: 1,
+            }),
+            i64::MAX
+        );
     }
 
     #[test]

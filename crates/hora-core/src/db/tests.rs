@@ -1731,3 +1731,70 @@ async fn sqlite_is_built_without_memory_statistics() {
          LIBSQLITE3_FLAGS from .cargo/config.toml did not reach the build"
     );
 }
+
+/// A push monitor's `ping` is whatever its job sends. Two of them at the top
+/// of `i64` in one sparkline bucket overflowed the bucket's `SUM`, which
+/// `SQLite` answers with an error: every monitor's sparkline was gone with
+/// it, for as long as the two rows stayed in the window.
+#[tokio::test]
+async fn sparklines_survive_latencies_at_the_edge_of_i64() {
+    let store = Store::in_memory().await;
+    insert(&store, "web", 1000, 1, Some(40)).await;
+    for time in [1000, 1001] {
+        insert_push_at(&store, "job", CheckStatus::Up, Some(i64::MAX), None, time)
+            .await
+            .unwrap();
+    }
+    let mut cache = SparklineCache::default();
+    let cached = cache
+        .refresh(&store, 0, 720, 2000)
+        .await
+        .expect("the sparklines of every monitor");
+    assert_eq!(cached["web"][0].latency_ms, 40);
+    assert_eq!(cached["job"].len(), 1);
+    let direct = latency_sparkline_all(&store, 0, 720).await.unwrap();
+    assert_eq!(cached["job"][0].latency_ms, direct["job"][0].latency_ms);
+    // Later rows of the same bucket are added to it in memory.
+    insert_push_at(&store, "job", CheckStatus::Up, Some(i64::MAX), None, 1002)
+        .await
+        .unwrap();
+    let cached = cache.refresh(&store, 0, 720, 2001).await.unwrap();
+    assert_eq!(cached["job"].len(), 1);
+}
+
+/// The same latencies, an hour apart: the day's weighted average summed the
+/// hourly ones as integers, the roll-up failed, and no monitor got its day.
+#[tokio::test]
+async fn the_daily_roll_up_survives_latencies_at_the_edge_of_i64() {
+    let store = Store::in_memory().await;
+    let day0 = 10 * SECONDS_PER_DAY;
+    insert(&store, "web", day0 + 10, 1, Some(40)).await;
+    for hour in [0, 1] {
+        insert_push_at(
+            &store,
+            "job",
+            CheckStatus::Up,
+            Some(i64::MAX),
+            None,
+            day0 + hour * 3600 + 10,
+        )
+        .await
+        .unwrap();
+    }
+    downsample_hourly(&store, day0 + SECONDS_PER_DAY)
+        .await
+        .unwrap();
+    downsample_daily(&store, day0 + SECONDS_PER_DAY)
+        .await
+        .expect("the day of every monitor");
+    let rolled = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT monitor_id, up_count, avg_latency_ms FROM checks_daily ORDER BY monitor_id",
+    )
+    .fetch_all(store.sqlx())
+    .await
+    .unwrap();
+    assert_eq!(
+        rolled,
+        vec![("job".to_owned(), 2, i64::MAX), ("web".to_owned(), 1, 40)]
+    );
+}

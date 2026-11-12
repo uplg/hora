@@ -15,6 +15,35 @@ mod tcp;
 #[cfg(test)]
 mod tests;
 
+/// What a probe does with a monitored server's answer, for the fuzz targets
+/// in `fuzz/` (built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use crate::config::HttpSpec;
+
+    /// The body assertions of `spec` against `body`: the failure, if any.
+    #[must_use]
+    pub fn check_assertions(spec: &HttpSpec, body: &[u8]) -> Option<String> {
+        super::http::check_assertions(spec, body)
+    }
+
+    /// The failure snapshot of an answer with these headers and this body,
+    /// and the one-line snippet of the body.
+    #[must_use]
+    pub fn snapshot(headers: &reqwest::header::HeaderMap, body: &[u8]) -> (String, String) {
+        let head = super::snapshot::render_head(
+            reqwest::Version::HTTP_11,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            headers,
+        );
+        (
+            super::snapshot::render_snapshot(&head, body),
+            super::snapshot::snippet(body),
+        )
+    }
+}
+
 pub use reason::{FailureKind, public_reason};
 
 use std::net::IpAddr;

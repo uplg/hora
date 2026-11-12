@@ -251,6 +251,18 @@ fn cap(text: &str) -> String {
     format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
 }
 
+/// The release-notes summary for the fuzz targets in `fuzz/` (built with
+/// `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    /// [`super::summary`].
+    #[must_use]
+    pub fn summary(notes: &str) -> String {
+        super::summary(notes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

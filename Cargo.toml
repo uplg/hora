@@ -16,6 +16,9 @@ publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# `cargo fuzz` builds with `--cfg fuzzing`: the hooks of the fuzz targets in
+# `fuzz/` (a workspace of its own) are behind it.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

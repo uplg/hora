@@ -1,0 +1,5 @@
+A{"maintenance": [{"id": 1, "starts_at": 1800000060, "ends_at": 1800000660, "reason": "reboot", "host": "beta"}]}
+T120
+A{"maintenance": [{"id": 1, "starts_at": 1800000060, "ends_at": 1800000660, "reason": "reboot", "host": "beta"}, {"id": 2, "starts_at": 1800003600, "ends_at": 1800099999, "reason": "kernel"}]}
+T600
+A{}

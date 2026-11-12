@@ -123,7 +123,9 @@ pub fn permille_of(part: i64, total: i64) -> Option<i64> {
 #[must_use]
 pub fn latency(ms: i64) -> String {
     if ms >= 1000 {
-        let tenths = (ms + 50) / 100;
+        // Saturating: not every latency was measured here (a push monitor's
+        // `ping`, a peer's `p50_ms`), so it may be any `i64`.
+        let tenths = ms.saturating_add(50) / 100;
         format!("{}.{} s", tenths / 10, tenths % 10)
     } else {
         format!("{ms} ms")
@@ -227,6 +229,18 @@ mod tests {
         );
         // C1 controls (a single-byte CSI) too.
         assert_eq!(printable("a\u{9b}31mb"), "a\u{FFFD}31mb");
+    }
+
+    /// A latency is not always measured here: a peer's `p50_ms` and a push
+    /// monitor's `ping` are whatever `i64` was sent. Found by the `numbers`
+    /// and `wire` fuzz targets: `i64::MAX` overflowed the rounding.
+    #[test]
+    fn a_latency_at_the_edge_of_i64_is_written() {
+        assert_eq!(latency(999), "999 ms");
+        assert_eq!(latency(1849), "1.8 s");
+        assert_eq!(latency(1850), "1.9 s");
+        assert_eq!(latency(i64::MAX), "9223372036854775.8 s");
+        assert_eq!(latency(i64::MIN), "-9223372036854775808 ms");
     }
 
     #[test]

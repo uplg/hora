@@ -1,0 +1,6 @@
+healthy
+
+
+
+service healthy
+x-cache: HIT

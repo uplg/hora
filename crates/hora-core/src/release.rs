@@ -247,6 +247,32 @@ pub(crate) async fn check_releases(
     }
 }
 
+/// The answer parsing and the version comparison for the fuzz targets in
+/// `fuzz/` (built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use serde_json_path::JsonPath;
+
+    /// [`super::release_of`], as `(tag, url, notes)`.
+    #[must_use]
+    pub fn release_of(body: &serde_json::Value) -> Option<(String, String, String)> {
+        super::release_of(body).map(|release| (release.tag, release.url, release.notes))
+    }
+
+    /// [`super::version_in`].
+    #[must_use]
+    pub fn version_in(body: &str, query: Option<&JsonPath>) -> Option<String> {
+        super::version_in(body, query)
+    }
+
+    /// [`super::is_newer`].
+    #[must_use]
+    pub fn is_newer(latest: &str, current: &str) -> bool {
+        super::is_newer(latest, current)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

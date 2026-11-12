@@ -56,6 +56,18 @@ fn expiration_event(body: &serde_json::Value) -> Option<i64> {
         .map(|date| date.timestamp())
 }
 
+/// The answer parsing for the fuzz targets in `fuzz/` (built with
+/// `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    /// [`super::expiration_event`].
+    #[must_use]
+    pub fn expiration_event(body: &serde_json::Value) -> Option<i64> {
+        super::expiration_event(body)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

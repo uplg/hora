@@ -75,6 +75,18 @@ impl Notifier for PushoverNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    let (title, body, _priority) = PushoverNotifier::message(event);
+    crate::fuzz::Sent {
+        channel: "pushover",
+        title: Some(title),
+        body,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

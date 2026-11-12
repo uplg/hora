@@ -40,6 +40,21 @@ pub mod tune;
 mod tunnel;
 pub mod updates;
 
+/// The ways into private modules for the fuzz targets in `fuzz/` at the
+/// repository root. Built with `--cfg fuzzing` only, which `cargo fuzz` sets:
+/// no ordinary build has it. The public modules carry their own `fuzz`
+/// submodule (`planned::fuzz`, `probe::fuzz`, `cert::fuzz`, `config::fuzz`,
+/// `updates::fuzz`).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::exec::fuzz as exec;
+    pub use crate::heartbeat::fuzz as heartbeat;
+    pub use crate::rdap::fuzz as rdap;
+    pub use crate::release::fuzz as release;
+    pub use crate::tunnel::fuzz as tunnel;
+}
+
 /// Seconds in a day (UTC), shared across the time-bucketing logic.
 pub const SECONDS_PER_DAY: i64 = 86_400;
 

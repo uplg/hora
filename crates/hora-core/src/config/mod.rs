@@ -724,12 +724,51 @@ fn apply_env_overrides(config: &mut Config) {
 /// shorthand steps (`5/5`, `/10`) that 3.x accepted; `sloppy_ranges` keeps
 /// configs written for earlier releases loading.
 ///
+/// croner also takes a field that lists nothing (`, 3 * * *`, a stray comma).
+/// Such a schedule never runs, and finding that out is not free: with no
+/// second, minute or hour to run at, the search for the next run walks every
+/// day up to the year 5000 - seconds of a scheduler thread, on each tick.
+/// It is refused here like any other typo.
+///
 /// # Errors
 ///
-/// Returns croner's parse error for an invalid pattern.
+/// Returns croner's parse error for an invalid pattern, or one of the same
+/// kind for a time field without a value.
 pub fn parse_cron(schedule: &str) -> Result<croner::Cron, croner::errors::CronError> {
-    croner::parser::CronParser::builder()
+    let cron = croner::parser::CronParser::builder()
         .sloppy_ranges(true)
         .build()
-        .parse(schedule)
+        .parse(schedule)?;
+    let pattern = &cron.pattern;
+    for (field, component) in [
+        ("seconds", &pattern.seconds),
+        ("minutes", &pattern.minutes),
+        ("hours", &pattern.hours),
+    ] {
+        if component.values().is_empty() {
+            return Err(croner::errors::CronError::InvalidPattern(format!(
+                "the {field} field lists no value, the schedule would never run"
+            )));
+        }
+    }
+    Ok(cron)
+}
+
+/// The loader with a made-up environment, for the fuzz targets in `fuzz/`
+/// (built with `--cfg fuzzing` only): `parse` reads the process environment,
+/// where a fuzzer finds no variable set.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use std::env::VarError;
+
+    /// [`super::parse`], every `${VAR}` holding `value` (`None`: unset).
+    ///
+    /// # Errors
+    ///
+    /// As [`super::parse`].
+    pub fn parse_with(toml_str: &str, value: Option<&str>) -> anyhow::Result<super::Config> {
+        let lookup = |_name: &str| value.map(str::to_owned).ok_or(VarError::NotPresent);
+        super::parse_with_env(toml_str, None, &lookup)
+    }
 }

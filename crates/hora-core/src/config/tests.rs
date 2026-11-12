@@ -1341,6 +1341,59 @@ fn cron_keeps_the_3x_shorthand_steps() {
     assert_eq!(next.timestamp(), 300);
 }
 
+/// Found by the `schedule` fuzz target: croner takes a field that lists
+/// nothing (a stray comma), and looking for the next run of such a schedule
+/// walks every day up to the year 5000 - eleven seconds of a scheduler
+/// thread, on each tick of the push monitor that carries it.
+#[test]
+fn cron_refuses_a_time_field_that_lists_nothing() {
+    for pattern in [", * * * *", ", * ? * *", "* , * * *", ", * * * * *"] {
+        let refusal = super::parse_cron(pattern)
+            .map(|_| ())
+            .map_err(|err| err.to_string());
+        assert!(
+            refusal
+                .as_ref()
+                .is_err_and(|err| err.contains("lists no value")),
+            "{pattern}: {refusal:?}"
+        );
+    }
+    // A stray comma beside a value is the value alone, as croner reads it.
+    let from = chrono::DateTime::from_timestamp(0, 0).expect("epoch");
+    for pattern in [
+        ",5 * * * *",
+        "5, * * * *",
+        "0 3 * * *",
+        "30 0 3 * * *",
+        "0 0 L * *",
+        "0 0 * * 1#2",
+        "0 8 * * MON-FRI",
+        "@daily",
+    ] {
+        let cron = super::parse_cron(pattern).expect(pattern);
+        assert!(cron.find_next_occurrence(&from, false).is_ok(), "{pattern}");
+    }
+    let err = super::parse(
+        r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "backup"
+            name = "Backup"
+            kind = "push"
+            interval_secs = 60
+            allow_unauthenticated = true
+            schedule = ", 3 * * *"
+        "#,
+    )
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(
+        err.contains("monitor backup: invalid schedule") && err.contains("minutes"),
+        "{err}"
+    );
+}
+
 #[test]
 fn digest_validates_schedule_and_routes() {
     let base = r#"

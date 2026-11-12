@@ -386,28 +386,40 @@ impl Message {
             unit,
         );
 
+        // What is left of the body, and whether a piece is already in it:
+        // each further piece costs the newline that joins it, an empty line
+        // included (a body at its limit with a blank line after it was one
+        // character over, and the API refused the whole message).
         let mut budget = body;
+        let mut started = false;
         if let Some(code) = self.code.take() {
             let fitted = truncate(&code, budget, unit);
-            budget = budget.saturating_sub(measure(&fitted, unit) + 1);
+            budget = budget.saturating_sub(measure(&fitted, unit));
             if fitted != code {
                 // Cut: what follows would read as part of the error.
                 self.lines.clear();
             }
-            self.code = (!fitted.is_empty()).then_some(fitted);
+            started = !fitted.is_empty();
+            self.code = started.then_some(fitted);
         }
         let mut kept = Vec::with_capacity(self.lines.len());
         for line in std::mem::take(&mut self.lines) {
+            let joint = usize::from(started);
+            if budget < joint {
+                break;
+            }
+            let room = budget - joint;
             let len = line.len(unit);
-            if len <= budget {
-                budget = budget.saturating_sub(len + 1);
+            if len <= room {
+                budget = room - len;
+                started = true;
                 kept.push(line);
                 continue;
             }
             let cut = match line {
-                Line::Text(text) => Some(Line::Text(truncate(&text, budget, unit))),
+                Line::Text(text) => Some(Line::Text(truncate(&text, room, unit))),
                 Line::Field { name, value } => {
-                    let room = budget.saturating_sub(measure(name, unit) + 2);
+                    let room = room.saturating_sub(measure(name, unit) + 2);
                     (room > 0).then(|| Line::Field {
                         name,
                         value: truncate(&value, room, unit),
@@ -776,6 +788,36 @@ mod tests {
         assert_eq!(code.chars().count(), 100);
         assert!(code.ends_with('…'));
         assert!(msg.lines.is_empty(), "lines after a cut piece are dropped");
+    }
+
+    /// Found by the `notify_render` fuzz target: a body exactly at its limit
+    /// followed by a blank line came out one character over (the newline
+    /// that joins the empty line), and Pushover refuses 1025 characters.
+    #[test]
+    fn fit_counts_the_newline_of_an_empty_line() {
+        let message = |code: Option<&str>, lines: &[&str]| Message {
+            kind: Kind::Down,
+            subject: "API".to_owned(),
+            rest: " is DOWN".to_owned(),
+            code: code.map(str::to_owned),
+            lines: lines
+                .iter()
+                .map(|line| Line::Text((*line).to_owned()))
+                .collect(),
+        };
+        for unit in [Unit::Chars, Unit::Bytes] {
+            // The error fills the body: nothing more fits, not even a newline.
+            let fitted = message(Some("0123456789"), &["", "", "x"]).fit(50, 10, unit);
+            assert_eq!(fitted.plain_body(), "0123456789");
+            // One character left: the newline of a blank line, and no more.
+            let fitted = message(Some("012345678"), &["", "", "x"]).fit(50, 10, unit);
+            assert_eq!(fitted.plain_body(), "012345678\n");
+            // Lines alone: each after the first costs its newline.
+            let fitted = message(None, &["abcd", "", "efgh", "ij"]).fit(50, 10, unit);
+            assert_eq!(fitted.plain_body(), "abcd\n\nefgh");
+            let fitted = message(None, &["abcd", "efghij"]).fit(50, 10, unit);
+            assert_eq!(measure(&fitted.plain_body(), unit), 10);
+        }
     }
 
     #[test]

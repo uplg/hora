@@ -27,6 +27,9 @@ pub(crate) struct PushQuery {
     ping: Option<i64>,
 }
 
+/// The largest latency a heartbeat may report, in milliseconds: a day.
+const MAX_PING_MS: i64 = 86_400_000;
+
 #[utoipa::path(
     post,
     path = "/api/push/{id}",
@@ -40,7 +43,7 @@ pub(crate) struct PushQuery {
     security((), ("push_token" = [])),
     responses(
         (status = 200, description = "Heartbeat recorded"),
-        (status = 400, description = "Unknown status or negative ping"),
+        (status = 400, description = "Unknown status, or a ping that is negative or over a day"),
         (status = 401, description = "Missing or wrong X-Push-Token (also for an unknown id, so ids cannot be probed), or a `?token=` in the URL: a write takes its token from a header only")
     )
 )]
@@ -105,8 +108,16 @@ pub(crate) async fn push(
         Some(word) => CheckStatus::parse(word)
             .ok_or(AppError::BadRequest("status must be up, down or degraded"))?,
     };
-    if query.ping.is_some_and(|ping| ping < 0) {
-        return Err(AppError::BadRequest("ping must not be negative"));
+    // A latency a job reports is at most a day: beyond it the figure is a
+    // bug in the job, and stored as it is a handful of them would weigh on
+    // every average they enter.
+    if query
+        .ping
+        .is_some_and(|ping| !(0..=MAX_PING_MS).contains(&ping))
+    {
+        return Err(AppError::BadRequest(
+            "ping must be between 0 and 86400000 ms (a day)",
+        ));
     }
     // Bound the stored message so a buggy or hostile pusher can't bloat the DB.
     let msg = query.msg.as_deref().map(|msg| {

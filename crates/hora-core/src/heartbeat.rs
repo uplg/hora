@@ -258,6 +258,38 @@ pub(crate) async fn heartbeat_outcome_for(
     }
 }
 
+/// The cadence check for the fuzz targets in `fuzz/` (built with
+/// `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use super::Cadence;
+
+    /// Why a heartbeat on `cron` last seen at `since` is overdue at `now`.
+    #[must_use]
+    pub fn cron_overdue(
+        cron: &croner::Cron,
+        grace_secs: u64,
+        since: i64,
+        seen: bool,
+        now: i64,
+    ) -> Option<String> {
+        let cadence = Cadence::Cron {
+            cron: Box::new(cron.clone()),
+            grace_secs,
+        };
+        cadence.overdue(since, seen, now).map(|(_, reason)| reason)
+    }
+
+    /// The same for a heartbeat expected every `interval_secs`.
+    #[must_use]
+    pub fn interval_overdue(interval_secs: u64, since: i64, now: i64) -> bool {
+        Cadence::Every(interval_secs)
+            .overdue(since, true, now)
+            .is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

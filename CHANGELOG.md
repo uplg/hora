@@ -78,6 +78,28 @@ database serve five times as many visitors.
   counted on the time actually muted, overlaps once; past it a window is
   cut, then refused, and the alerts come back. A window the peer withdraws
   while it runs is kept on record up to that moment.
+- **What fuzzing found.** Fifteen targets now feed arbitrary input to
+  everything Hora parses from outside (`just fuzz`; the config, requests,
+  peers' JSON, monitored servers' answers, alert texts):
+  - a `schedule` with a field that lists nothing (a stray comma) was
+    accepted, and looking for its next run walked every day up to the year
+    5000: eleven seconds of a scheduler thread on each tick of that push
+    monitor. It is refused at load;
+  - two heartbeats reporting a `ping` near the top of a 64-bit integer
+    overflowed a sum in SQLite, which answers with an error: every
+    monitor's sparkline was gone, and the daily roll-up failed for all of
+    them, for as long as the rows stayed. The sums are now computed in
+    floating point, and a `ping` over a day (86 400 000 ms) is refused with
+    a 400;
+  - the same figures overflowed the rounding of a latency (`1.8 s`), of
+    `hora tune`'s suggestion and of a stored latency histogram's
+    percentiles;
+  - a message exactly at a channel's size limit followed by a blank line
+    came out one character over, and the API refused it whole (Pushover at
+    1025 characters): the alert was lost;
+  - a URL whose query key held an encoded `&`, `=` or `+` was written back
+    decoded when its secrets were masked for a log, and read as another
+    query.
 - **`Authorization: bearer <token>` is accepted.** The scheme's name is
   case-insensitive (RFC 9110); only `Bearer` was read.
 - **Concurrent readers of the database no longer queue behind one lock.**

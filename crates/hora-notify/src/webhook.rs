@@ -265,6 +265,17 @@ impl Notifier for WebhookNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    crate::fuzz::Sent {
+        channel: "webhook",
+        title: None,
+        body: serde_json::to_string(&WebhookNotifier::payload(event)).unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

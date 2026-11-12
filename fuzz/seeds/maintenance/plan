@@ -1,0 +1,9 @@
+Pweb,intra||2027-01-15T08:00:00Z|1h30m|upgrade
+P|alpha|1800003600|10m|reboot the host
+Pall|||7d|everything
+P|beta||15m|peer host
+C1
+T90000
+Ppeer-x|||5m|the peer's watch
+Pweb|alpha||5m|both
+Pnope|||5m|unknown

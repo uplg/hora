@@ -285,12 +285,19 @@ impl CertSource {
             .peer_certificates()
             .and_then(<[CertificateDer<'_>]>::first)
             .ok_or_else(|| anyhow::anyhow!("server presented no certificate"))?;
-        let (_rest, parsed) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref())
-            .map_err(|err| anyhow::anyhow!("failed to parse certificate: {err}"))?;
-        let not_after = parsed.validity().not_after.timestamp();
-        let fingerprint = sha256_hex(parsed.public_key().raw);
-        Ok((not_after, fingerprint))
+        leaf_facts(leaf.as_ref())
     }
+}
+
+/// What is read from a leaf certificate (DER): its `notAfter` (unix secs) and
+/// the SHA-256 fingerprint of its public key. The bytes are whatever the
+/// server presented: trust is not verified, so nothing vouches for them.
+fn leaf_facts(der: &[u8]) -> anyhow::Result<(i64, String)> {
+    let (_rest, parsed) = x509_parser::certificate::X509Certificate::from_der(der)
+        .map_err(|err| anyhow::anyhow!("failed to parse certificate: {err}"))?;
+    let not_after = parsed.validity().not_after.timestamp();
+    let fingerprint = sha256_hex(parsed.public_key().raw);
+    Ok((not_after, fingerprint))
 }
 
 /// A one-shot read of a TLS endpoint's leaf certificate, for `hora probe`.
@@ -718,6 +725,40 @@ fn pin_alert<'a>(
         Some(stored) if stored != observed => stored,
         _ => expected,
     })
+}
+
+/// What a remote server feeds the certificate watcher, for the fuzz targets
+/// in `fuzz/` (built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use super::Starttls;
+
+    /// [`super::leaf_facts`], errors dropped.
+    #[must_use]
+    pub fn leaf_facts(der: &[u8]) -> Option<(i64, String)> {
+        super::leaf_facts(der).ok()
+    }
+
+    /// [`super::host_port`].
+    #[must_use]
+    pub fn host_port(target: &str) -> Option<(String, u16)> {
+        super::host_port(target)
+    }
+
+    /// [`super::negotiate`] against a server that says `server` and then
+    /// closes; whether STARTTLS was agreed.
+    pub async fn negotiate(server: &[u8], imap: bool) -> bool {
+        let mode = if imap {
+            Starttls::Imap
+        } else {
+            Starttls::Smtp { ehlo_name: None }
+        };
+        let mut stream = tokio::io::join(server, tokio::io::sink());
+        super::negotiate(&mut stream, &mode, "[192.0.2.10]")
+            .await
+            .is_ok()
+    }
 }
 
 #[cfg(test)]

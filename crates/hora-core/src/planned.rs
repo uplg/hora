@@ -997,5 +997,48 @@ fn log_refusals(peer: &Peer, refused: &[&'static str], now: i64) {
     }
 }
 
+/// The budget arithmetic for the fuzz targets in `fuzz/` (built with
+/// `--cfg fuzzing` only): it is private, and only reachable through a
+/// database otherwise.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzz {
+    use super::{AnnouncedWindow, MaintenanceWindow, PEER_BUDGET_WINDOWS, Peer};
+
+    /// What [`super::apply_announcement`] would store for an authenticated
+    /// heartbeat of `peer` announcing `announced` at `now`, `granted` being
+    /// the rows read back for that peer: each window as `(remote id, start,
+    /// end)`, with the measure of `[from, to]` those windows cover.
+    #[must_use]
+    pub fn budgeted(
+        peer: &Peer,
+        announced: &[AnnouncedWindow],
+        granted: &[MaintenanceWindow],
+        now: i64,
+    ) -> Vec<(i64, i64, i64)> {
+        let Some(accepted_secs) = super::trusted_secs(peer) else {
+            return Vec::new();
+        };
+        let mut refused = Vec::new();
+        let wanted = super::wanted_windows(peer, accepted_secs, announced, now, &mut refused);
+        super::within_budget(
+            wanted,
+            granted,
+            accepted_secs.saturating_mul(PEER_BUDGET_WINDOWS),
+            now,
+            &mut refused,
+        )
+        .into_iter()
+        .map(|kept| (kept.remote_id, kept.starts_at, kept.ends_at))
+        .collect()
+    }
+
+    /// [`super::measure`]: the seconds of `[from, to]` that `spans` cover.
+    #[must_use]
+    pub fn measure(spans: &[(i64, i64)], from: i64, to: i64) -> i64 {
+        super::measure(spans, from, to)
+    }
+}
+
 #[cfg(test)]
 mod tests;

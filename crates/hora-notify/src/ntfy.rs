@@ -113,6 +113,18 @@ impl Notifier for NtfyNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    let push = NtfyNotifier::message(event);
+    crate::fuzz::Sent {
+        channel: "ntfy",
+        title: Some(String::from_utf8_lossy(push.title.as_bytes()).into_owned()),
+        body: push.body,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

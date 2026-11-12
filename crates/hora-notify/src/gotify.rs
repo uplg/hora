@@ -75,6 +75,18 @@ impl Notifier for GotifyNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    let payload = GotifyNotifier::payload(event);
+    crate::fuzz::Sent {
+        channel: "gotify",
+        title: Some(payload.title),
+        body: payload.message,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

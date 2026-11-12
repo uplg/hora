@@ -214,7 +214,9 @@ pub async fn roll_up_recent(store: &Store, now: i64) -> sqlx::Result<()> {
 /// [`downsample_hourly`]: only days entirely below `cutoff`, inserted once,
 /// scanning only the hourly buckets above the newest daily one. The latency
 /// average is weighted by each hour's sample count, so a quiet hour does not
-/// skew the day.
+/// skew the day. It is summed in floating point: an integer `SUM` that
+/// overflows (hours of pushed latencies near the top of `i64`) is an error
+/// in `SQLite`, and one such day would stop the roll-up of every monitor.
 ///
 /// # Errors
 ///
@@ -233,7 +235,7 @@ pub async fn downsample_daily(store: &Store, cutoff: i64) -> sqlx::Result<()> {
            SUM(up_count), \
            SUM(down_count), \
            SUM(degraded_count), \
-           CAST(SUM(avg_latency_ms * (up_count + degraded_count)) \
+           CAST(SUM(CAST(avg_latency_ms AS REAL) * (up_count + degraded_count)) \
                 / NULLIF(SUM(CASE WHEN avg_latency_ms IS NOT NULL \
                               THEN up_count + degraded_count END), 0) AS INTEGER) \
          FROM checks_hourly \

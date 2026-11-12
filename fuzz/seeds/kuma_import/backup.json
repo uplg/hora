@@ -1,0 +1,13 @@
+{"version":"1.23.0","monitorList":[
+{"id":1,"name":"Folder","type":"group"},
+{"id":2,"name":"Example","type":"http","parent":1,"url":"https://example.com","interval":60,"timeout":10,"maxretries":2,"method":"HEAD","accepted_statuscodes":["200-299","401"],"headers":"{\"X-Key\": \"a b\"}","expiryNotification":false},
+{"id":3,"name":"Example","type":"keyword","url":"https://example.com/k","keyword":"ok","invertKeyword":true,"method":"POST","accepted_statuscodes":["301-302"]},
+{"id":4,"name":"J","type":"json-query","url":"http://x/j","jsonPath":"$.a","expectedValue":"1"},
+{"id":5,"name":"Port \"quoted\"\n# injected","type":"port","hostname":"2606:4700::1111","port":443},
+{"id":6,"name":"Ping","type":"ping","hostname":"example.com"},
+{"id":7,"name":"DNS","type":"dns","hostname":"example.com","dns_resolve_type":"AAAA","dns_resolve_server":"1.1.1.1, ns.example","port":53},
+{"id":8,"name":"Push","type":"push","pushToken":"abcdefghijklmnopqrstuvwxyz"},
+{"id":9,"name":"Short","type":"push","pushToken":"x"},
+{"id":10,"name":"!!!","type":"docker"},
+{"id":11,"name":"Weird\ntype","type":"mq\ntt\u0000"}
+]}

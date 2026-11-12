@@ -187,6 +187,18 @@ impl Notifier for DiscordNotifier {
     }
 }
 
+/// What this channel would send for `event`: the fuzz target's way in (see
+/// [`crate::fuzz`], built with `--cfg fuzzing` only).
+#[cfg(fuzzing)]
+pub(crate) fn fuzzed(event: Event<'_>) -> crate::fuzz::Sent {
+    let embed = DiscordNotifier::embed(event);
+    crate::fuzz::Sent {
+        channel: "discord",
+        title: Some(embed.title),
+        body: embed.description.unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
