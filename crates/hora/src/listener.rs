@@ -281,7 +281,9 @@ impl Guarded {
             tracing::warn!(
                 client = %address,
                 limit,
-                "a client holds its share of the HTTP connections: its next ones are                  closed (server.max_connections_per_ip; behind a reverse proxy, set                  server.client_ip_header)"
+                "a client holds its share of the HTTP connections: its next ones are \
+                 closed (server.max_connections_per_ip; behind a reverse proxy, set \
+                 server.client_ip_header)"
             );
         }
         Err(())

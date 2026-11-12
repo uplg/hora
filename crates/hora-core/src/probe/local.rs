@@ -190,6 +190,15 @@ mod tests {
         assert!(!faults.recent(2_000 + MEMORY_SECS + 1));
     }
 
+    /// The process-wide pair `/healthz` reads. Noted far in the past, so the
+    /// node's health today is not touched.
+    #[test]
+    fn a_skip_noted_for_the_process_is_what_health_reads() {
+        note("job", "too many open files", 1_000);
+        assert!(recent(1_000));
+        assert!(!recent(1_000 + MEMORY_SECS + 1));
+    }
+
     #[test]
     fn skipped_checks_are_logged_once_a_minute() {
         let faults = Faults::default();

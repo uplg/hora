@@ -1188,4 +1188,112 @@ mod tests {
         assert!(lanes.dropped.is_empty());
         lanes.workers.abort_all();
     }
+
+    /// A coalescer on one webhook channel, grouping over `window` seconds.
+    async fn one_channel(
+        url: &str,
+        window: u64,
+    ) -> (
+        Store,
+        mpsc::UnboundedSender<AlertMsg>,
+        watch::Sender<bool>,
+        JoinHandle<()>,
+    ) {
+        let config = Arc::new(
+            crate::config::parse(&format!(
+                r#"
+                [page]
+                [server]
+                [alerts]
+                group_window_secs = {window}
+                [[channels]]
+                name = "main"
+                type = "webhook"
+                url = "{url}"
+                "#
+            ))
+            .unwrap(),
+        );
+        let store = Store::in_memory().await;
+        let client = crate::http::client(None).unwrap();
+        let notifier = crate::notifications::shared(&config, &client);
+        let (_config_tx, config_rx) = watch::channel(config);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = spawn(config_rx, notifier, store.clone(), rx, shutdown_rx);
+        (store, tx, shutdown_tx, task)
+    }
+
+    async fn incident(store: &Store, id: &str) -> i64 {
+        db::insert_incident_start(store, id, None, None, None, &[], None, None)
+            .await
+            .unwrap()
+    }
+
+    /// Queued is not announced: a down whose only channel refuses it stays
+    /// unannounced, so it is announced again later; with no channel to go
+    /// to at all, it is settled at once.
+    #[tokio::test]
+    async fn a_down_is_announced_only_once_a_channel_took_it() {
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused = format!("http://{}/hook", closed.local_addr().unwrap());
+        drop(closed);
+        let (store, tx, _shutdown, task) = one_channel(&refused, 0).await;
+        let refused_incident = incident(&store, "api").await;
+        let nowhere_incident = incident(&store, "db").await;
+        tx.send(AlertMsg::Down(DownAlert {
+            incident: Some(refused_incident),
+            ..down("api", &[])
+        }))
+        .unwrap();
+        tx.send(AlertMsg::Down(DownAlert {
+            incident: Some(nowhere_incident),
+            notify: Some(Vec::new()),
+            ..down("db", &[])
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            !db::incident_notified(&store, refused_incident)
+                .await
+                .unwrap()
+        );
+        assert!(
+            db::incident_notified(&store, nowhere_incident)
+                .await
+                .unwrap()
+        );
+        task.abort();
+    }
+
+    /// The window runs on its own: a dependent whose upstream stays quiet
+    /// goes out when it ends, without another event to wake the coalescer;
+    /// one whose upstream did alert is folded, and its incident settled.
+    #[tokio::test]
+    async fn a_held_down_leaves_when_its_window_ends_or_is_settled_folded() {
+        let (url, sent) = crate::testing::webhook_sink().await;
+        let (store, tx, _shutdown, task) = one_channel(&url, 1).await;
+        tx.send(AlertMsg::Down(down("api", &["db"]))).unwrap();
+        let started = std::time::Instant::now();
+        while crate::testing::events(&sent).is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the held down never left"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(crate::testing::events(&sent), ["down"]);
+
+        let folded = incident(&store, "web").await;
+        tx.send(AlertMsg::Down(down("cache", &[]))).unwrap();
+        tx.send(AlertMsg::Down(DownAlert {
+            incident: Some(folded),
+            ..down("web", &["cache"])
+        }))
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert_eq!(crate::testing::events(&sent), ["down", "down"]);
+        assert!(db::incident_notified(&store, folded).await.unwrap());
+        task.abort();
+    }
 }

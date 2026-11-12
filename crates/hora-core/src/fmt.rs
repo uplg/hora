@@ -334,6 +334,8 @@ mod tests {
         assert_eq!(basis_points(0, 0), None);
         assert_eq!(basis_points(1, 3), Some(3333));
         assert_eq!(basis_points(2, 3), Some(6667));
+        // Rounded to the nearest, on an even total too (16.666… %).
+        assert_eq!(basis_points(1, 6), Some(1667));
         assert_eq!(pct_bp(10_000), "100.00 %");
         assert_eq!(pct_bp(9_997), "99.97 %");
         assert_eq!(pct_bp(5), "0.05 %");

@@ -1195,6 +1195,11 @@ mod tests {
         burning.evaluate(&mut state).await;
         assert_eq!(burning.sent().len(), 1, "said again while it lasts");
 
+        // Over and cooled: armed again, both of them.
+        burning.history(6, &[]).await;
+        burning.evaluate(&mut state).await;
+        assert_eq!(state, BurnAlerts::default());
+
         // The same ten minutes, forty minutes ago: the hour still burns, the
         // last five minutes and the last thirty do not.
         burning.history(6, &(40..=49).collect::<Vec<_>>()).await;
@@ -1707,6 +1712,115 @@ mod tests {
             next_alert(&mut alerts_rx, Duration::from_millis(1500)).await,
             None
         );
+        task.abort();
+    }
+
+    /// A push job checked every second, confirmed on its first report, and
+    /// a recording webhook for what the task sends without the coalescer.
+    async fn reporting_job() -> (Config, crate::testing::Posts) {
+        let (url, posts) = crate::testing::webhook_sink().await;
+        let config = crate::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 1
+            alert_on_degraded = true
+            [[channels]]
+            name = "hook"
+            type = "webhook"
+            url = "{url}"
+            [[monitors]]
+            id = "job"
+            name = "Job"
+            kind = "push"
+            allow_unauthenticated = true
+            interval_secs = 1
+            "#
+        ))
+        .expect("config");
+        (config, posts)
+    }
+
+    /// An ad-hoc silence keeps a confirmed down from being sent at all.
+    #[tokio::test]
+    async fn a_silenced_down_is_not_sent() {
+        let (config, _posts) = reporting_job().await;
+        let store = Store::in_memory().await;
+        let now = chrono::Utc::now().timestamp();
+        db::insert_silence(&store, "job", now + 3600, Some("migrating"))
+            .await
+            .unwrap();
+        db::insert_push(&store, "job", CheckStatus::Down, None, Some("failed"))
+            .await
+            .unwrap();
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let task = push_task(
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(3)).await,
+            None
+        );
+        task.abort();
+    }
+
+    /// A recovery closes the outage's incident; a job that reports itself
+    /// degraded is announced as such when `alert_on_degraded` asks for it.
+    #[tokio::test]
+    async fn a_recovery_closes_its_incident_and_a_degraded_job_is_announced() {
+        let (config, posts) = reporting_job().await;
+        let store = Store::in_memory().await;
+        db::insert_push(&store, "job", CheckStatus::Down, None, Some("failed"))
+            .await
+            .unwrap();
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let task = push_task(
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("down", "job".to_owned()))
+        );
+        assert!(
+            db::find_open_incident(&store, "job")
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
+            Some(("recovered", "job".to_owned()))
+        );
+        assert_eq!(db::find_open_incident(&store, "job").await.unwrap(), None);
+
+        db::insert_push(&store, "job", CheckStatus::Degraded, None, Some("slow run"))
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        while !crate::testing::events(&posts).contains(&"degraded".to_owned()) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the degraded job was not announced"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         task.abort();
     }
 

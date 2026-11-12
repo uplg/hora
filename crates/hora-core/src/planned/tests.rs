@@ -906,6 +906,23 @@ fn the_budget_counts_the_day_before_a_window_and_nothing_else() {
     );
 }
 
+/// Trust takes a watched peer that proves who it is, whatever validation
+/// let through: take away any one of the three and it is gone.
+#[test]
+fn only_a_watched_authenticated_peer_is_trusted_with_windows() {
+    let peer = trusting().peers[0].clone();
+    assert_eq!(trusted_secs(&peer), Some(900));
+    let mut unwatched = peer.clone();
+    unwatched.expect_every_secs = None;
+    assert_eq!(trusted_secs(&unwatched), None);
+    let mut anonymous = peer.clone();
+    anonymous.listen_token = None;
+    assert_eq!(trusted_secs(&anonymous), None);
+    let mut open = peer;
+    open.allow_unauthenticated = true;
+    assert_eq!(trusted_secs(&open), None);
+}
+
 #[test]
 fn a_window_without_overlap_ends_where_its_allowance_does() {
     assert_eq!(end_within(&[], 100, 500, 50), 150);
