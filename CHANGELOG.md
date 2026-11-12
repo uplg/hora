@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-12
+
 A hardening pass on who may do what with which token. Several configs that
 loaded on 0.11 no longer do: read the
 [upgrade notes](UPGRADES.md#0115--0120) and run `hora check` with the new
@@ -489,7 +491,7 @@ database serve five times as many visitors.
 ## [0.12.0-beta.1] - 2026-11-12
 
 A preview of 0.12 for testing on real nodes before the release: everything
-listed under [Unreleased] above, as it stood on that day. Not for a node you
+listed under [0.12.0] above, as it stood on that day. Not for a node you
 cannot roll back - the migrations are one-way (back up `hora.db` first, see
 the [upgrade notes](UPGRADES.md#0115--0120)).
 
@@ -1902,7 +1904,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.11.5...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0
 [0.12.0-beta.1]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0-beta.1
 [0.11.5]: https://github.com/uplg/hora/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/uplg/hora/compare/v0.11.3...v0.11.4
