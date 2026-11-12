@@ -29,8 +29,18 @@ Hora restarted. Plus the compatible dependency updates.
 
 - **Dependencies at their latest compatible releases** (`cargo update`):
   aws-lc-rs 1.19.0, rustls-pki-types 1.16.0, webpki-roots 1.0.12, toml 1.2.1,
-  ctutils 0.4.8, notify 8.2.2 and croner 4.0.3, among others. No advisory
-  behind them.
+  ctutils 0.4.8, notify 8.2.2 and croner 4.0.3, among others.
+
+### Security
+
+- **RUSTSEC-2026-0459 is not fixed, and is ignored by the audit for now.**
+  SQLite before 3.54.0 can return uninitialized memory when it opens a
+  database together with a crafted `-wal` file. Hora bundles an affected
+  SQLite through sqlx 0.9.0, whose latest release refuses the fixed
+  libsqlite3-sys. The attack needs write access to Hora's data directory -
+  Hora opens no other database - so it gives nothing to someone who does not
+  already hold the data. Keep that directory writable by Hora alone. The
+  exception goes with the sqlx release that lifts the bound.
 
 ## [0.11.4] - 2026-10-27
 

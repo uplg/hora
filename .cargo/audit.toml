@@ -1,0 +1,6 @@
+# cargo-audit configuration. Run: cargo audit
+
+[advisories]
+# The reason and the removal condition are in deny.toml, which carries the
+# same list: keep the two in step.
+ignore = ["RUSTSEC-2026-0459"]
