@@ -860,7 +860,7 @@ fn wanted_windows(
 }
 
 /// Cut `wanted` to what the peer's budget still allows: `budget` seconds of
-/// muted time in the 24 hours before each window starts, counting what it
+/// muted time from 24 hours before each window starts to its end, counting what it
 /// was `granted` before (as far as it ran: a window withdrawn or replaced
 /// counts until `now`) and the windows that start earlier in this same
 /// announcement. Time already muted is not counted twice, so windows that
@@ -887,7 +887,10 @@ fn within_budget(
         .collect();
     let mut kept = Vec::with_capacity(wanted.len());
     for mut new in wanted {
-        let spent = measure(&muted, new.starts_at - SECONDS_PER_DAY, new.starts_at);
+        // Through the window's own end: time already muted inside it is
+        // spent too. Counted to its start only, a window laid over one that
+        // had used the budget got a full allowance for what stuck out.
+        let spent = measure(&muted, new.starts_at - SECONDS_PER_DAY, new.ends_at);
         let ends_at = end_within(&muted, new.starts_at, new.ends_at, budget - spent);
         if ends_at <= new.starts_at.max(now) {
             refused.push("this peer has used its maintenance budget for 24 hours");

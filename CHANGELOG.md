@@ -77,7 +77,9 @@ database serve five times as many visitors.
   now has four accepted lengths in any 24 hours (an hour a day at 900 s),
   counted on the time actually muted, overlaps once; past it a window is
   cut, then refused, and the alerts come back. A window the peer withdraws
-  while it runs is kept on record up to that moment.
+  while it runs is kept on record up to that moment. Time already muted
+  inside a new window is spent too: windows laid over one another no
+  longer get a fresh allowance for what sticks out.
 - **What fuzzing found.** Fifteen targets now feed arbitrary input to
   everything Hora parses from outside (`just fuzz`; the config, requests,
   peers' JSON, monitored servers' answers, alert texts):

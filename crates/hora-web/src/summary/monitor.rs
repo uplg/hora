@@ -85,11 +85,7 @@ pub(crate) fn build_monitor_view(
     all_monitors: &[Monitor],
     visibility: &Visibility<'_>,
 ) -> MonitorView {
-    let recent = data
-        .recent
-        .get(&monitor.id)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+    let recent = data.recent.get(&monitor.id).map_or_default(Vec::as_slice);
     let status = ctx.status_of(monitor, data.recent);
 
     let uptime_permille = data
@@ -97,11 +93,7 @@ pub(crate) fn build_monitor_view(
         .get(&monitor.id)
         .and_then(|&(available, total)| hora_core::fmt::permille_of(available, total));
 
-    let daily = data
-        .daily
-        .get(&monitor.id)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+    let daily = data.daily.get(&monitor.id).map_or_default(Vec::as_slice);
     let mut bar = build_bar(daily, ctx.now, ctx.history_days);
     mark_maintenance(&mut bar, data.maintenance, &monitor.id);
     let uptime_long_permille = long_uptime(daily, &bar);
@@ -155,7 +147,7 @@ pub(crate) fn build_monitor_view(
         budget_minutes_total: budget.as_ref().map(|b| b.total),
         budget_minutes_left: budget.as_ref().map(|b| b.left),
         budget_label: budget.as_ref().map(|b| b.label.clone()),
-        budget_title: budget.as_ref().map(|b| b.title.clone()).unwrap_or_default(),
+        budget_title: budget.as_ref().map_or_default(|b| b.title.clone()),
         budget_state: budget.as_ref().map_or(BudgetState::None, |b| b.state),
         maintenance: None,
         slow_over_ms: monitor.degraded_over_ms,

@@ -57,10 +57,7 @@ impl SummaryCtx {
         monitor: &Monitor,
         recent: &HashMap<String, Vec<Latest>>,
     ) -> MonitorState {
-        let checks = recent
-            .get(&monitor.id)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let checks = recent.get(&monitor.id).map_or_default(Vec::as_slice);
         db::derive_status(checks, i64::from(monitor.fail_threshold(&self.alerts)))
     }
 }
@@ -320,12 +317,8 @@ fn recent_view(incident: &db::Incident, config: &Config) -> RecentIncident {
     RecentIncident {
         id: incident.id,
         monitor_id: incident.monitor_id.clone(),
-        date: started
-            .map(|at| at.format("%Y-%m-%d").to_string())
-            .unwrap_or_default(),
-        day: started
-            .map(|at| at.format("%-d %b").to_string())
-            .unwrap_or_default(),
+        date: started.map_or_default(|at| at.format("%Y-%m-%d").to_string()),
+        day: started.map_or_default(|at| at.format("%-d %b").to_string()),
         title,
         note,
         resolved: incident.ended_at.is_some(),

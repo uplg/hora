@@ -20,9 +20,6 @@ const MEMORY_SECS: i64 = 30;
 /// monitor skips every tick.
 const LOG_EVERY_SECS: i64 = 60;
 
-static LAST_FAULT: AtomicI64 = AtomicI64::new(0);
-static LAST_LOGGED: AtomicI64 = AtomicI64::new(0);
-
 // The same numbers on Linux, macOS and the BSDs.
 const ENOMEM: i32 = 12;
 const ENFILE: i32 = 23;
@@ -71,16 +68,45 @@ pub(crate) fn exhausted_now() -> Option<String> {
     }
 }
 
+/// When checks were last skipped, and when that was last said in the log.
+/// A type of its own so that its two rules can be tested away from the
+/// process-wide instance.
+#[derive(Default)]
+struct Faults {
+    last: AtomicI64,
+    logged: AtomicI64,
+}
+
+impl Faults {
+    /// Remember a skipped check at `now`. `true` when it is time to say so
+    /// in the log: at most once per [`LOG_EVERY_SECS`], however many
+    /// monitors skip.
+    fn note(&self, now: i64) -> bool {
+        self.last.fetch_max(now, Ordering::Relaxed);
+        let logged = self.logged.load(Ordering::Relaxed);
+        now - logged >= LOG_EVERY_SECS
+            && self
+                .logged
+                .compare_exchange(logged, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+    }
+
+    /// Whether a check was skipped within [`MEMORY_SECS`] of `now`.
+    fn recent(&self, now: i64) -> bool {
+        let last = self.last.load(Ordering::Relaxed);
+        last != 0 && now - last <= MEMORY_SECS
+    }
+}
+
+static FAULTS: Faults = Faults {
+    last: AtomicI64::new(0),
+    logged: AtomicI64::new(0),
+};
+
 /// Remember that a check was skipped at `now`, and say so in the log (once
 /// per [`LOG_EVERY_SECS`], however many monitors skip).
 pub(crate) fn note(monitor_id: &str, detail: &str, now: i64) {
-    LAST_FAULT.fetch_max(now, Ordering::Relaxed);
-    let logged = LAST_LOGGED.load(Ordering::Relaxed);
-    if now - logged >= LOG_EVERY_SECS
-        && LAST_LOGGED
-            .compare_exchange(logged, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    {
+    if FAULTS.note(now) {
         tracing::error!(
             monitor = %monitor_id,
             error = detail,
@@ -96,8 +122,7 @@ pub(crate) fn note(monitor_id: &str, detail: &str, now: i64) {
 /// that this node should not call itself healthy.
 #[must_use]
 pub fn recent(now: i64) -> bool {
-    let last = LAST_FAULT.load(Ordering::Relaxed);
-    last != 0 && now - last <= MEMORY_SECS
+    FAULTS.recent(now)
 }
 
 #[cfg(test)]
@@ -145,6 +170,35 @@ mod tests {
         // Wrapped in an io::Error, where `source()` does not look.
         let nested = std::io::Error::other(std::io::Error::from_raw_os_error(EMFILE));
         assert!(exhaustion_in(&nested).is_some());
+    }
+
+    #[test]
+    fn a_skipped_check_degrades_the_node_for_a_while_and_no_longer() {
+        let faults = Faults::default();
+        assert!(
+            !faults.recent(1_000),
+            "degraded before any check was skipped"
+        );
+        faults.note(1_000);
+        assert!(faults.recent(1_000));
+        assert!(faults.recent(1_000 + MEMORY_SECS));
+        assert!(!faults.recent(1_000 + MEMORY_SECS + 1));
+        // The latest skip counts, whatever order they were noted in.
+        faults.note(2_000);
+        faults.note(1_500);
+        assert!(faults.recent(2_000 + MEMORY_SECS));
+        assert!(!faults.recent(2_000 + MEMORY_SECS + 1));
+    }
+
+    #[test]
+    fn skipped_checks_are_logged_once_a_minute() {
+        let faults = Faults::default();
+        assert!(faults.note(1_000), "the first one is said");
+        // Three hundred monitors skipping in the same minute: one line.
+        assert!(!faults.note(1_000));
+        assert!(!faults.note(1_000 + LOG_EVERY_SECS - 1));
+        assert!(faults.note(1_000 + LOG_EVERY_SECS));
+        assert!(!faults.note(1_000 + LOG_EVERY_SECS + 1));
     }
 
     #[test]

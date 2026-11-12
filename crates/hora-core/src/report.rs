@@ -98,9 +98,7 @@ pub fn month_bounds(month: &str) -> Option<(i64, i64)> {
 /// "here is your report for last month".
 #[must_use]
 pub fn previous_month(now: i64) -> String {
-    let today = chrono::DateTime::from_timestamp(now, 0)
-        .map(|dt| dt.date_naive())
-        .unwrap_or_default();
+    let today = chrono::DateTime::from_timestamp(now, 0).map_or_default(|dt| dt.date_naive());
     let first = today.with_day(1).unwrap_or(today);
     let previous = first
         .checked_sub_months(chrono::Months::new(1))

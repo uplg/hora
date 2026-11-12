@@ -81,8 +81,7 @@ pub fn render(incident: &Incident, monitor_name: &str) -> String {
         incident
             .error
             .as_deref()
-            .map(|error| format!(" ({})", inline_code(error)))
-            .unwrap_or_default()
+            .map_or_default(|error| format!(" ({})", inline_code(error)))
     );
     if let Some(ended) = incident.ended_at {
         let _ = writeln!(out, "- {} - recovered", fmt::utc(ended));

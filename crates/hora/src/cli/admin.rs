@@ -96,8 +96,7 @@ fn collecting_warnings<T>(load: impl FnOnce() -> T) -> (T, Vec<String>) {
     let result = tracing::subscriber::with_default(subscriber, load);
     let warnings = collected
         .lock()
-        .map(|mut warnings| std::mem::take(&mut *warnings))
-        .unwrap_or_default();
+        .map_or_default(|mut warnings| std::mem::take(&mut *warnings));
     (result, warnings)
 }
 

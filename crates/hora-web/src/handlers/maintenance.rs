@@ -80,7 +80,7 @@ impl PlannedWindow {
             announced: planned::is_announced(config, &row),
             host: resolved.as_ref().and_then(|window| window.host.clone()),
             all: resolved.as_ref().is_some_and(|window| window.all),
-            monitors: resolved.map(|window| window.monitors).unwrap_or_default(),
+            monitors: resolved.map_or_default(|window| window.monitors),
             reason: row.reason,
             origin: row.origin,
             created: None,

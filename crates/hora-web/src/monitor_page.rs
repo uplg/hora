@@ -134,18 +134,13 @@ pub(crate) fn build(
     };
 
     let days = days(&m, incidents);
-    let first_day = m
-        .bar
-        .first()
-        .map(|cell| short_date(&cell.date))
-        .unwrap_or_default();
+    let first_day = m.bar.first().map_or_default(|cell| short_date(&cell.date));
     let day30 = m
         .bar
         .len()
         .checked_sub(30)
         .and_then(|index| m.bar.get(index))
-        .map(|cell| short_date(&cell.date))
-        .unwrap_or_default();
+        .map_or_default(|cell| short_date(&cell.date));
 
     let (places, places_owls, places_state, places_word) = places(&m);
     let incident_lines = incidents
@@ -169,8 +164,7 @@ pub(crate) fn build(
                     .or_else(|| incident.error.clone())
                     .unwrap_or_default(),
                 date: DateTime::from_timestamp(incident.started_at, 0)
-                    .map(|at| at.format("%-d %b").to_string())
-                    .unwrap_or_default(),
+                    .map_or_default(|at| at.format("%-d %b").to_string()),
             }
         })
         .collect();
@@ -275,8 +269,7 @@ fn why_line(m: &MonitorView, now: i64) -> Option<String> {
             m.maintenance
                 .as_deref()
                 .filter(|title| !title.is_empty())
-                .map(|title| format!(": {title}"))
-                .unwrap_or_default()
+                .map_or_default(|title| format!(": {title}"))
         )),
         DisplayState::None => Some("Waiting for the first check.".to_owned()),
         DisplayState::Up => None,
@@ -308,8 +301,7 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
             unit: format!("{unit} typical"),
             note: m
                 .p95_ms
-                .map(|p95| format!("Slowest 1 in 20: {}", ms(p95)))
-                .unwrap_or_default(),
+                .map_or_default(|p95| format!("Slowest 1 in 20: {}", ms(p95))),
             meter: String::new(),
         });
     }
@@ -369,11 +361,7 @@ fn cert_left(secs_left: i64) -> (i64, &'static str) {
 /// from the incidents when they reach back that far, else from the days.
 fn outage_note(m: &MonitorView, incidents: &[Incident]) -> String {
     let days = m.bar.len();
-    let first = m
-        .bar
-        .first()
-        .map(|cell| cell.date.as_str())
-        .unwrap_or_default();
+    let first = m.bar.first().map_or_default(|cell| cell.date.as_str());
     let within: Vec<&Incident> = incidents
         .iter()
         .filter(|incident| {
@@ -396,8 +384,7 @@ fn outage_note(m: &MonitorView, incidents: &[Incident]) -> String {
         }
         [one] => {
             let on = DateTime::from_timestamp(one.started_at, 0)
-                .map(|at| at.format("%-d %b").to_string())
-                .unwrap_or_default();
+                .map_or_default(|at| at.format("%-d %b").to_string());
             match minutes_of(one) {
                 Some(length) => format!("One outage, {}, on {on}", minutes(length)),
                 None => format!("One outage, ongoing, since {on}"),
@@ -474,8 +461,7 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
                 })
                 .map(|incident| {
                     let at = DateTime::from_timestamp(incident.started_at, 0)
-                        .map(|at| at.format("%H:%M UTC").to_string())
-                        .unwrap_or_default();
+                        .map_or_default(|at| at.format("%H:%M UTC").to_string());
                     let length = incident
                         .duration_s
                         .map_or_else(|| "ongoing".to_owned(), hora_core::fmt::duration);
@@ -525,7 +511,7 @@ fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
         ),
         state: here.class(),
         word: here.word(),
-        latency: m.p50_ms.or(m.last_latency_ms).map(ms).unwrap_or_default(),
+        latency: m.p50_ms.or(m.last_latency_ms).map_or_default(ms),
         meter: String::new(),
     }];
     for vantage in &m.vantages {
@@ -535,7 +521,7 @@ fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
             sub: "peer".to_owned(),
             state: state.class(),
             word: state.word(),
-            latency: vantage.p50_ms.map(ms).unwrap_or_default(),
+            latency: vantage.p50_ms.map_or_default(ms),
             meter: String::new(),
         });
     }

@@ -170,8 +170,7 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
                 };
                 let reason = silence
                     .reason
-                    .map(|reason| format!(" - {reason}"))
-                    .unwrap_or_default();
+                    .map_or_default(|reason| format!(" - {reason}"));
                 println!(
                     "{target}: until {} ({} left){reason}",
                     fmt::utc(silence.until),
@@ -403,8 +402,7 @@ fn covered(
     let host = resolved
         .host
         .as_ref()
-        .map(|host| format!("Host {host}: "))
-        .unwrap_or_default();
+        .map_or_default(|host| format!("Host {host}: "));
     format!(
         "{host}covers {}.",
         hora_core::planned::covered(resolved.all, &resolved.monitors)

@@ -426,8 +426,7 @@ fn render_report(
         prev,
         next,
         group_query: group
-            .map(|group| format!("?group={}", hora_core::fmt::percent_encode(group)))
-            .unwrap_or_default(),
+            .map_or_default(|group| format!("?group={}", hora_core::fmt::percent_encode(group))),
     }
     .render()?;
     Ok(html)

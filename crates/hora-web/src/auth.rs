@@ -275,6 +275,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tokens_are_compared_byte_for_byte() {
+        assert!(ct_eq("s3cret-token", "s3cret-token"));
+        assert!(!ct_eq("s3cret-token", "s3cret-tokeN"));
+        assert!(!ct_eq("s3cret-token", "s3cret-toke"));
+        assert!(!ct_eq("", "x"));
+        assert!(ct_eq("", ""));
+        // Differences that would cancel out if they were summed by XOR.
+        assert!(!ct_eq("aa", "bb"));
+        assert!(!ct_eq("abab", "baba"));
+    }
+
+    #[test]
     fn the_bearer_scheme_is_read_whatever_its_case() {
         for value in [
             "Bearer s3cret",

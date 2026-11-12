@@ -109,10 +109,7 @@ pub(crate) async fn timeline(args: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
     for entry in entries {
-        let link = entry
-            .incident_id
-            .map(|id| format!("  (#{id})"))
-            .unwrap_or_default();
+        let link = entry.incident_id.map_or_default(|id| format!("  (#{id})"));
         println!(
             "{}  {:<9}  {}{link}",
             fmt::utc(entry.at),

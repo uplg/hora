@@ -263,8 +263,10 @@ impl Guarded {
         let Some(limit) = self.per_address else {
             return Ok(None);
         };
+        // Asked of the address itself too: an IPv6 one is counted by its
+        // /64, and the /64 of `::1` is `::`, which is no loopback.
         let address = hora_web::bucket(peer.ip());
-        if address.is_loopback() {
+        if peer.ip().is_loopback() || address.is_loopback() {
             return Ok(None);
         }
         if let Some(slot) = AddressSlot::take(&self.held, address, limit) {
@@ -599,6 +601,94 @@ mod tests {
         assert!(AddressSlot::take(&held, client, 2).is_some());
         // Nothing is kept for an address with no connection left.
         assert_eq!(held.lock().expect("lock").len(), 1);
+    }
+
+    /// The listener's own bookkeeping, with addresses no test socket can
+    /// come from: a client is held to its share, its /64 counts as one, and
+    /// a closed connection gives its place back.
+    #[tokio::test]
+    async fn a_client_past_its_share_is_refused_until_one_of_its_connections_closes() {
+        let inner = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let mut listener = Guarded::new(inner, 8, Some(2));
+        let from = |address: &str| -> SocketAddr { address.parse().expect("address") };
+        let first = listener
+            .address_slot(from("203.0.113.7:4000"))
+            .expect("first");
+        assert!(first.is_some(), "a client's connection is counted");
+        let _second = listener
+            .address_slot(from("203.0.113.7:4001"))
+            .expect("second");
+        assert!(listener.address_slot(from("203.0.113.7:4002")).is_err());
+        // Another client, and this machine, are not held to its count.
+        assert!(listener.address_slot(from("203.0.113.8:4000")).is_ok());
+        assert!(matches!(
+            listener.address_slot(from("127.0.0.1:4000")),
+            Ok(None)
+        ));
+        assert!(matches!(
+            listener.address_slot(from("[::1]:4000")),
+            Ok(None)
+        ));
+        drop(first);
+        assert!(listener.address_slot(from("203.0.113.7:4003")).is_ok());
+
+        // One IPv6 subscriber holds a whole /64: its addresses are one client.
+        let _a = listener
+            .address_slot(from("[2001:db8:1:2::1]:1"))
+            .expect("a");
+        let _b = listener
+            .address_slot(from("[2001:db8:1:2:ffff::2]:1"))
+            .expect("b");
+        assert!(listener.address_slot(from("[2001:db8:1:2::3]:1")).is_err());
+        assert!(listener.address_slot(from("[2001:db8:1:3::1]:1")).is_ok());
+
+        // Without a share, nobody is counted.
+        let inner = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let mut open = Guarded::new(inner, 8, None);
+        for port in 0..20 {
+            let peer = SocketAddr::from(([203, 0, 113, 7], 4000 + port));
+            assert!(matches!(open.address_slot(peer), Ok(None)));
+        }
+    }
+
+    /// hyper writes an answer's head and body in one vectored call: that
+    /// path moves the deadline like a plain write, and stalls like one.
+    #[tokio::test(start_paused = true)]
+    async fn a_vectored_write_counts_as_progress_and_can_stall() {
+        let (server, mut client) = tokio::io::duplex(8);
+        let mut connection = Connection::new(server, None);
+        client.write_all(b"ping").await.expect("write");
+        let mut request = [0u8; 4];
+        connection.read_exact(&mut request).await.expect("read");
+        assert!(connection.receiving);
+
+        let parts = [io::IoSlice::new(b"he"), io::IoSlice::new(b"ad")];
+        let written = connection.write_vectored(&parts).await.expect("vectored");
+        assert!(written > 0);
+        assert!(
+            !connection.receiving,
+            "an answer under way ends the request"
+        );
+        assert_eq!(connection.deadline, Instant::now() + IDLE);
+        connection.flush().await.expect("flush");
+
+        // The pipe is 8 bytes and nobody reads: the next vectored write waits,
+        // and gives up when the client has taken nothing for STALL.
+        let filler = [io::IoSlice::new(b"1234")];
+        let taken = connection
+            .write_vectored(&filler)
+            .await
+            .expect("fills the pipe");
+        assert_eq!(taken, 4);
+        let started = Instant::now();
+        let more = [io::IoSlice::new(b"more")];
+        let error = connection
+            .write_vectored(&more)
+            .await
+            .expect_err("a stalled write fails");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(started.elapsed(), STALL);
+        connection.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test]

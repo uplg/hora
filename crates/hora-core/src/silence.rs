@@ -212,4 +212,23 @@ mod tests {
         );
         assert!(db::is_silenced(&store, "api", now).await.unwrap());
     }
+
+    #[test]
+    fn a_silence_error_says_what_went_wrong() {
+        assert_eq!(SilenceError::InvalidDuration.message(), INVALID_DURATION);
+        assert_eq!(SilenceError::InvalidDuration.to_string(), INVALID_DURATION);
+        assert_eq!(SilenceError::NoIds.message(), "no monitor ids given");
+        assert_eq!(
+            SilenceError::UnknownId("x".to_owned()).message(),
+            "unknown monitor id"
+        );
+        assert_eq!(
+            SilenceError::UnknownId("x".to_owned()).to_string(),
+            "unknown monitor id \"x\""
+        );
+        assert!(std::error::Error::source(&SilenceError::NoIds).is_none());
+        let database = SilenceError::Database(sqlx::Error::PoolClosed);
+        assert!(std::error::Error::source(&database).is_some());
+        assert_eq!(database.message(), "recording the silence failed");
+    }
 }

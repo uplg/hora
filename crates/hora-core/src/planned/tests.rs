@@ -700,7 +700,7 @@ async fn a_peer_cannot_chain_windows_past_its_daily_budget() {
     for minute in 0..180 {
         let now = NOW + minute * 60;
         // The windows still running, as the peer's heartbeat lists them.
-        let listed: Vec<AnnouncedWindow> = (minute.saturating_sub(9)..=minute)
+        let listed: Vec<AnnouncedWindow> = ((minute - 9).max(0)..=minute)
             .map(|planned| {
                 let start = NOW + planned * 60;
                 announced(100 + planned, start, start + 600, Some("frank"))
@@ -823,6 +823,214 @@ fn the_fullest_announcement_fits_its_size_limit() {
     // And not by a mile: the limit is derived, not a round number to grow into.
     assert!(MAX_ANNOUNCEMENT_BYTES < 2 * body.len());
     assert_eq!(MAX_ANNOUNCE_AHEAD_SECS, 7 * 86_400);
+}
+
+fn wanted(remote_id: i64, starts_at: i64, ends_at: i64) -> Wanted {
+    Wanted {
+        remote_id,
+        starts_at,
+        ends_at,
+        selector: "peer".to_owned(),
+        reason: "r".to_owned(),
+    }
+}
+
+fn granted(remote_id: i64, starts_at: i64, ends_at: i64) -> MaintenanceWindow {
+    MaintenanceWindow {
+        id: remote_id,
+        starts_at,
+        ends_at,
+        reason: "r".to_owned(),
+        selector: "peer".to_owned(),
+        origin: "peer:hora-frank".to_owned(),
+        remote_id: Some(remote_id),
+        created_at: starts_at,
+    }
+}
+
+/// What weighs on a window announced now: what the peer was granted in the
+/// 24 hours before it starts - not earlier, not the window's own stored row.
+#[test]
+fn the_budget_counts_the_day_before_a_window_and_nothing_else() {
+    const HOUR: i64 = 3600;
+    let budget = HOUR;
+    let ends = |history: &[MaintenanceWindow], new: Wanted| {
+        let mut refused = Vec::new();
+        within_budget(vec![new], history, budget, NOW, &mut refused)
+            .first()
+            .map(|kept| kept.ends_at)
+    };
+    // Nothing granted before: the whole window.
+    assert_eq!(ends(&[], wanted(1, NOW, NOW + 1800)), Some(NOW + 1800));
+    // An hour used twelve hours ago: nothing left.
+    let half_day = [granted(9, NOW - 13 * HOUR, NOW - 12 * HOUR)];
+    assert_eq!(ends(&half_day, wanted(1, NOW, NOW + 1800)), None);
+    // The same hour, thirty hours ago: outside the day, it weighs nothing.
+    let long_ago = [granted(9, NOW - 31 * HOUR, NOW - 30 * HOUR)];
+    assert_eq!(
+        ends(&long_ago, wanted(1, NOW, NOW + 1800)),
+        Some(NOW + 1800)
+    );
+    // Half of it inside the day: half an hour is left.
+    let straddling = [granted(9, NOW - 24 * HOUR - 1800, NOW - 24 * HOUR + 1800)];
+    assert_eq!(
+        ends(&straddling, wanted(1, NOW, NOW + HOUR)),
+        Some(NOW + 1800)
+    );
+
+    // The window's own stored row is not history: it is weighed afresh...
+    let own = [granted(1, NOW - 1800, NOW + 1800)];
+    assert_eq!(
+        ends(&own, wanted(1, NOW - 1800, NOW + 1800)),
+        Some(NOW + 1800)
+    );
+    // ...but the same id with another start is another window that ran (a
+    // peer that moves its window forward every heartbeat), and so is
+    // another id that started at the same second.
+    let moved = [granted(1, NOW - HOUR, NOW)];
+    assert_eq!(ends(&moved, wanted(1, NOW, NOW + 1800)), None);
+    // Laid over an hour already granted, a window gets nothing for what
+    // sticks out: the budget is spent, whoever's id spent it.
+    let twin = [granted(2, NOW - HOUR, NOW)];
+    assert_eq!(ends(&twin, wanted(1, NOW - HOUR, NOW + 1800)), None);
+    let half = [granted(2, NOW - 1800, NOW)];
+    assert_eq!(
+        ends(&half, wanted(1, NOW - 1800, NOW + HOUR)),
+        Some(NOW + 1800)
+    );
+    // A stored row counts as far as it ran: its future is given back.
+    let withdrawn = [granted(9, NOW - 1800, NOW + 10 * HOUR)];
+    assert_eq!(
+        ends(&withdrawn, wanted(1, NOW, NOW + HOUR)),
+        Some(NOW + 1800)
+    );
+}
+
+#[test]
+fn a_window_without_overlap_ends_where_its_allowance_does() {
+    assert_eq!(end_within(&[], 100, 500, 50), 150);
+    assert_eq!(end_within(&[], 100, 500, 400), 500);
+    assert_eq!(end_within(&[], 100, 500, 401), 500);
+    assert_eq!(end_within(&[(200, 300)], 100, 500, 150), 350);
+    assert_eq!(measure(&[(0, 10), (10, 20), (30, 40)], 5, 35), 20);
+    assert_eq!(merged(&[(10, 20), (0, 10), (15, 18)], 0, 100), [(0, 20)]);
+}
+
+#[tokio::test]
+async fn the_limits_of_an_announcement_are_inclusive() {
+    let store = Store::in_memory().await;
+    let config = trusting();
+    let peer = &config.peers[0];
+    // Exactly a week ahead is accepted; a second more is not.
+    let edge = NOW + MAX_ANNOUNCE_AHEAD_SECS;
+    let applied = apply_announcement(
+        &store,
+        peer,
+        true,
+        &[announced(1, edge, edge + 60, None)],
+        NOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!((applied.accepted.len(), applied.refused.len()), (1, 0));
+    // As many windows as a heartbeat may carry are all read; one more and
+    // the rest is refused, said so.
+    let many = |count: usize| -> Vec<AnnouncedWindow> {
+        (0..count)
+            .map(|index| {
+                let start = NOW + 10 + i64::try_from(index).unwrap();
+                announced(100 + i64::try_from(index).unwrap(), start, start + 1, None)
+            })
+            .collect()
+    };
+    let applied = apply_announcement(&store, peer, true, &many(MAX_ANNOUNCED_WINDOWS), NOW)
+        .await
+        .unwrap();
+    assert!(
+        !applied
+            .refused
+            .contains(&"more windows than a heartbeat may announce")
+    );
+    let applied = apply_announcement(&store, peer, true, &many(MAX_ANNOUNCED_WINDOWS + 1), NOW)
+        .await
+        .unwrap();
+    assert!(
+        applied
+            .refused
+            .contains(&"more windows than a heartbeat may announce")
+    );
+
+    // The same window with another reason is another window: replaced.
+    let store = Store::in_memory().await;
+    let first = announced(1, NOW + 60, NOW + 120, None);
+    apply_announcement(&store, peer, true, std::slice::from_ref(&first), NOW)
+        .await
+        .unwrap();
+    let reworded = AnnouncedWindow {
+        reason: "disk swap".to_owned(),
+        ..first
+    };
+    let applied = apply_announcement(&store, peer, true, &[reworded], NOW)
+        .await
+        .unwrap();
+    assert_eq!((applied.withdrawn.len(), applied.accepted.len()), (1, 1));
+    assert_eq!(applied.accepted[0].reason, "disk swap");
+}
+
+#[tokio::test]
+async fn a_host_window_covers_that_host_and_is_announced_only_from_it() {
+    let store = Store::in_memory().await;
+    let config = trusting();
+    // This node's own host: its one monitor there, and not the peer's watch.
+    let own = plan(&store, &config, host_plan("yuki", "1800003600"), NOW)
+        .await
+        .unwrap();
+    let resolved = resolve(&config, &own.window).expect("resolved");
+    assert_eq!(resolved.monitors, ["local"]);
+    assert_eq!(resolved.covered_peers(&config), [] as [&str; 0]);
+    assert!(is_announced(&config, &own.window));
+    // The peer's host: its monitors here and the watch of the peer on it,
+    // which is not this node's to announce.
+    let theirs = plan(&store, &config, host_plan("frank", "1800007200"), NOW)
+        .await
+        .unwrap();
+    let resolved = resolve(&config, &theirs.window).expect("resolved");
+    assert_eq!(resolved.monitors, ["mail", "web", "frank-in"]);
+    assert_eq!(resolved.covered_peers(&config), ["Frank"]);
+    assert!(!is_announced(&config, &theirs.window));
+    // Without a peer to tell, nothing is announced.
+    let alone = config_with("", "");
+    let mut silent = alone.clone();
+    silent.peers.clear();
+    assert!(!is_announced(&silent, &own.window));
+
+    let schedule = Schedule::merged(&config, &[own.window.clone(), theirs.window.clone()]);
+    assert_eq!(schedule.windows().len(), 2);
+}
+
+#[test]
+fn errors_say_what_went_wrong() {
+    assert_eq!(
+        PlanError::InvalidDuration.message(),
+        crate::silence::INVALID_DURATION
+    );
+    assert_eq!(
+        PlanError::InvalidDuration.to_string(),
+        crate::silence::INVALID_DURATION
+    );
+    assert!(std::error::Error::source(&PlanError::InvalidDuration).is_none());
+    let database = PlanError::Database(sqlx::Error::PoolClosed);
+    assert!(std::error::Error::source(&database).is_some());
+    assert_ne!(database.message(), "");
+    assert_eq!(
+        CancelError::NotFound.to_string(),
+        "no such maintenance window"
+    );
+    assert!(
+        CancelError::FromPeer("hora-frank".to_owned())
+            .to_string()
+            .contains("hora-frank")
+    );
 }
 
 #[test]

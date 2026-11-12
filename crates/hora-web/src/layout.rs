@@ -143,9 +143,8 @@ static MARKERS: LazyLock<(String, Vec<String>)> = LazyLock::new(|| {
 impl PerRequest {
     /// Read the per-request parts from the URI's query.
     pub(crate) fn from_uri(uri: &axum::http::Uri) -> Self {
-        let pairs: Vec<(String, String)> = Query::<Vec<(String, String)>>::try_from_uri(uri)
-            .map(|Query(pairs)| pairs)
-            .unwrap_or_default();
+        let pairs: Vec<(String, String)> =
+            Query::<Vec<(String, String)>>::try_from_uri(uri).map_or_default(|Query(pairs)| pairs);
         let last = |name: &str| {
             pairs
                 .iter()
@@ -233,35 +232,28 @@ impl PerRequest {
         match hole {
             Hole::ThemeAttr => self
                 .theme
-                .map(|theme| format!(" data-theme=\"{theme}\""))
-                .unwrap_or_default(),
+                .map_or_default(|theme| format!(" data-theme=\"{theme}\"")),
             Hole::Scheme => self.theme.unwrap_or("light dark").to_owned(),
             Hole::Refresh => self
                 .refresh
-                .map(|secs| format!("<meta http-equiv=\"refresh\" content=\"{secs}\">"))
-                .unwrap_or_default(),
-            Hole::Live => self
-                .refresh
-                .map(|secs| {
-                    format!(
-                        "<span class=\"pill\"><svg class=\"g up\" aria-hidden=\"true\"><use \
+                .map_or_default(|secs| format!("<meta http-equiv=\"refresh\" content=\"{secs}\">")),
+            Hole::Live => self.refresh.map_or_default(|secs| {
+                format!(
+                    "<span class=\"pill\"><svg class=\"g up\" aria-hidden=\"true\"><use \
                          href=\"#g-up\"/></svg>Updates every {}</span>",
-                        hora_core::fmt::duration(i64::from(secs))
-                    )
-                })
-                .unwrap_or_default(),
+                    hora_core::fmt::duration(i64::from(secs))
+                )
+            }),
             Hole::Query => self.q.replace('&', "&amp;"),
             Hole::QueryMore => self
                 .q
                 .strip_prefix('?')
-                .map(|rest| format!("&amp;{}", rest.replace('&', "&amp;")))
-                .unwrap_or_default(),
+                .map_or_default(|rest| format!("&amp;{}", rest.replace('&', "&amp;"))),
             Hole::ThemeHref => self.theme_href.replace('&', "&amp;"),
             Hole::ThemeLabel => self.theme_label.to_owned(),
-            Hole::ThemeInput => self
-                .theme
-                .map(|theme| format!("<input type=\"hidden\" name=\"theme\" value=\"{theme}\">"))
-                .unwrap_or_default(),
+            Hole::ThemeInput => self.theme.map_or_default(|theme| {
+                format!("<input type=\"hidden\" name=\"theme\" value=\"{theme}\">")
+            }),
             // The browser's own chrome takes the page's ground: the system's
             // scheme picks it, unless `?theme=` forces one (then a media
             // query on the system's would paint the wrong one).

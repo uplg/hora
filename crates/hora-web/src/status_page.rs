@@ -622,8 +622,7 @@ fn sentence(
             let mut chars = joined.chars();
             let capitalised: String = chars
                 .next()
-                .map(|first| first.to_uppercase().chain(chars).collect())
-                .unwrap_or_default();
+                .map_or_default(|first| first.to_uppercase().chain(chars).collect());
             rest.push(' ');
             rest.push_str(&capitalised);
             rest.push_str(if counts.up > 0 {
@@ -838,13 +837,12 @@ fn row(monitor: &MonitorView, with_bar: bool) -> Row<'_> {
         DisplayState::Up | DisplayState::Maint => monitor
             .uptime_long_permille
             .or(monitor.uptime_permille)
-            .map(pct)
-            .unwrap_or_default(),
+            .map_or_default(pct),
         DisplayState::Down => crate::monitor_page::down_for(monitor, now).map_or_else(
-            || monitor.last_latency_ms.map(ms).unwrap_or_default(),
+            || monitor.last_latency_ms.map_or_default(ms),
             crate::layout::minutes,
         ),
-        DisplayState::Degraded => monitor.last_latency_ms.map(ms).unwrap_or_default(),
+        DisplayState::Degraded => monitor.last_latency_ms.map_or_default(ms),
         DisplayState::None => String::new(),
     };
     let (seen, seen_note) = seen_from(monitor);

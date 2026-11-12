@@ -1059,6 +1059,57 @@ mod tests {
     }
 
     #[test]
+    fn a_degradation_is_confirmed_at_the_threshold_and_said_once() {
+        let mut state = AlertState::default();
+        assert!(!state.observe_degraded(3));
+        assert!(!state.observe_degraded(3));
+        assert!(state.observe_degraded(3), "the third slow answer in a row");
+        state.level = AlertLevel::Degraded;
+        assert!(!state.observe_degraded(3), "already said");
+        // A down in between starts the count again.
+        let mut state = AlertState::default();
+        assert!(!state.observe_degraded(2));
+        assert!(!state.observe_down(5));
+        assert!(!state.observe_degraded(2));
+        assert!(state.observe_degraded(2));
+    }
+
+    #[test]
+    fn a_resumed_outage_is_already_confirmed() {
+        // One more down tick after a restart must not announce it again,
+        // nor read as a first failure on the way to the threshold.
+        let mut state = AlertState::resumed_down(3);
+        assert_eq!(state.consecutive_down, 3);
+        assert!(!state.observe_down(3));
+        assert!(state.observe_up(), "its recovery is owed");
+    }
+
+    #[test]
+    fn either_burn_alert_keeps_the_evaluation_going() {
+        let alerts = |fast, slow| BurnAlerts { fast, slow };
+        assert!(!alerts(false, false).any());
+        assert!(alerts(true, false).any());
+        assert!(alerts(false, true).any());
+        assert!(alerts(true, true).any());
+    }
+
+    #[tokio::test]
+    async fn a_recent_event_is_named_with_its_age() {
+        let store = Store::in_memory().await;
+        assert_eq!(correlated_event(&store, 10_000).await, None);
+        let now = chrono::Utc::now().timestamp();
+        db::insert_event(&store, "deploy api v2.3").await.unwrap();
+        // Three minutes later: named, with how long before.
+        let phrase = correlated_event(&store, now + 180).await.expect("an event");
+        assert!(phrase.starts_with("deploy api v2.3, 3 min"), "{phrase}");
+        // Past the lookback it is yesterday's news.
+        assert_eq!(
+            correlated_event(&store, now + EVENT_LOOKBACK_SECS + 60).await,
+            None
+        );
+    }
+
+    #[test]
     fn an_unannounced_down_is_looked_at_again_until_the_outage_ends() {
         let mut state = AlertState::default();
         assert!(state.observe_down(1));
