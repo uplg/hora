@@ -16,12 +16,32 @@ records what actually shipped.
   TOML - degraded to a quiet channel, down to a loud one. *Flapping never
   wakes you up*, taken literally - and the prerequisite for escalation.
 
+- **One notification for a mass outage** - a host that falls takes every
+  monitor on it down within seconds, and each is a message today: 280
+  monitors, 280 notifications. Grouped by host, by group or by burst into
+  one ("37 services down on frank"), with the list a tap away.
+- **"Still down" reminders** - a confirmed outage says so again after N
+  minutes, until it ends or someone acknowledges it. The first half of
+  escalation, useful on its own.
+- **Start and finish heartbeats** - a job pings when it starts
+  (`?event=start`) and when it ends: a run that never finishes is caught,
+  and how long each run took is on the monitor's page.
+- **Public updates on an incident** - "investigating", "identified",
+  "resolved", attached to the incident and shown on its page and in the
+  feed, instead of a banner beside it.
+- **Upcoming maintenance in the API** - the windows planned ahead are on
+  the page and in `GET /api/maintenance`; `/api/summary` does not carry
+  them yet.
+- **Scheduled backups** - `hora backup` exists and nothing runs it: a
+  schedule and a retention in the config, with the last backup's age on
+  the operator's page.
+
 ## Exploring
 
 - **Escalation & acknowledgement** - if an alert is not acknowledged within
   N minutes, notify the next channel; ack via a signed link in the
-  notification. The biggest item on the list; more natural once severity
-  routing exists.
+  notification. The biggest item on the list; it builds on the "still
+  down" reminders above and is more natural once severity routing exists.
 - **`conf.d/` config splitting** - forty monitors in one file doesn't scale
   to a team; splitting plays well with config-as-code in git, and
   `hora peers diff` already verifies the mesh stays aligned.
