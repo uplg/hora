@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use chrono::DateTime;
 
-use hora_core::fmt::xml_escape;
+use maud::{Markup, PreEscaped, html};
 
 /// The window rendered: four full weeks, so each weekday appears four times
 /// and a weekly pattern is visible as a horizontal stripe rhythm.
@@ -60,15 +60,17 @@ const INK_MUTED_DARK: &str = "#a8aeb8";
 // tokens:end
 
 /// The standalone image's own theme: a dark variant for dark-mode viewers.
-fn standalone_style() -> String {
-    let mut style = format!(
-        "<style>@media (prefers-color-scheme: dark){{.bg{{fill:{SURFACE_DARK}}}text{{fill:{INK_MUTED_DARK}}}"
-    );
+fn standalone_style() -> Markup {
+    let mut tiers = String::new();
     for (index, color) in TIER_DARK.iter().enumerate() {
-        let _ = write!(style, ".t{index}{{fill:{color}}}");
+        let _ = write!(tiers, ".t{index}{{fill:{color}}}");
     }
-    style.push_str("}</style>");
-    style
+    // Our own constants only: nothing here to escape, and a stylesheet's
+    // braces and colons are not text.
+    let css = format!(
+        "@media (prefers-color-scheme: dark){{.bg{{fill:{SURFACE_DARK}}}text{{fill:{INK_MUTED_DARK}}}{tiers}}}"
+    );
+    html! { style { (PreEscaped(css)) } }
 }
 
 /// Render the heatmap SVG from `(hour_ts, avg_latency_ms)` cells (as returned
@@ -86,18 +88,24 @@ pub(crate) fn render(
 ) -> String {
     let svg = image(cells, now, monitor_name, standalone);
     if standalone {
-        return svg;
+        return svg.into_string();
     }
-    format!(
-        "<div class=\"heat\" tabindex=\"0\" role=\"group\" aria-label=\"Hour by hour, scrolls \
-         sideways on a small screen\">{svg}</div>\
-         <div class=\"heatkey\"><span><i class=\"t0\"></i>Usual</span>\
-         <span><i class=\"t1\"></i>Up to 2× slower</span><span><i class=\"t2\"></i>Up to 3×</span>\
-         <span><i class=\"t3\"></i>Up to 5×</span><span><i class=\"t4\"></i>Slower still</span></div>\
-         <p class=\"muted small\">Each square is one hour, compared with this service's usual \
-         answer time.</p>{}",
-        slowest(cells, now)
-    )
+    html! {
+        div.heat tabindex="0" role="group"
+            aria-label="Hour by hour, scrolls sideways on a small screen" { (svg) }
+        div.heatkey {
+            span { i.t0 {} "Usual" }
+            span { i.t1 {} "Up to 2× slower" }
+            span { i.t2 {} "Up to 3×" }
+            span { i.t3 {} "Up to 5×" }
+            span { i.t4 {} "Slower still" }
+        }
+        p.muted.small {
+            "Each square is one hour, compared with this service's usual answer time."
+        }
+        (slowest(cells, now))
+    }
+    .into_string()
 }
 
 /// The first second the heatmap drawn at `now` covers: what a caller must
@@ -128,7 +136,7 @@ fn window(cells: &[(i64, i64)], now: i64) -> (i64, i64) {
 /// The slowest hours of the window in words, slowest first: the figures the
 /// picture only gives on hover. Only hours that stand out (over the usual
 /// tier) are listed; a steady monitor gets one sentence instead.
-fn slowest(cells: &[(i64, i64)], now: i64) -> String {
+fn slowest(cells: &[(i64, i64)], now: i64) -> Markup {
     let (day_start, median) = window(cells, now);
     let mut inside: Vec<(i64, i64)> = cells
         .iter()
@@ -136,7 +144,7 @@ fn slowest(cells: &[(i64, i64)], now: i64) -> String {
         .filter(|(hour, _)| *hour >= day_start)
         .collect();
     if inside.is_empty() {
-        return String::new();
+        return html! {};
     }
     let usual = crate::layout::ms(median);
     inside.retain(|(_, latency)| tier(coordf(*latency) / coordf(median)) > 0);
@@ -144,112 +152,82 @@ fn slowest(cells: &[(i64, i64)], now: i64) -> String {
     inside.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
     inside.truncate(SLOWEST);
     if inside.is_empty() {
-        return format!(
-            "<p class=\"slowest-none small\">No hour stood out: each one stayed close to the \
-             usual {usual}.</p>"
-        );
-    }
-    let mut out = format!(
-        "<h3 class=\"slowest-h\">Slowest hours</h3>\
-         <p class=\"muted small\">The usual answer time is {usual}. Times in UTC.</p>\
-         <ol class=\"slowest\">"
-    );
-    for (hour, latency) in inside {
-        let Some(at) = DateTime::from_timestamp(hour, 0) else {
-            continue;
+        return html! {
+            p.slowest-none.small {
+                "No hour stood out: each one stayed close to the usual " (usual) "."
+            }
         };
+    }
+    let hours = inside.into_iter().filter_map(|(hour, latency)| {
         // One decimal, in integers: 3.3 times the usual.
         let tenths = (latency * 10 + median / 2) / median;
-        let _ = write!(
-            out,
-            "<li><time datetime=\"{}\">{}</time><b>{}</b><span>{}.{}× the usual</span></li>",
-            at.format("%Y-%m-%dT%H:%MZ"),
-            at.format("%a %-d %b, %H:%M"),
-            crate::layout::ms(latency),
-            tenths / 10,
-            tenths % 10,
-        );
+        DateTime::from_timestamp(hour, 0).map(|at| (at, latency, tenths))
+    });
+    html! {
+        h3.slowest-h { "Slowest hours" }
+        p.muted.small { "The usual answer time is " (usual) ". Times in UTC." }
+        ol.slowest {
+            @for (at, latency, tenths) in hours {
+                li {
+                    time datetime=(at.format("%Y-%m-%dT%H:%MZ")) { (at.format("%a %-d %b, %H:%M")) }
+                    b { (crate::layout::ms(latency)) }
+                    span { (tenths / 10) "." (tenths % 10) "× the usual" }
+                }
+            }
+        }
     }
-    out.push_str("</ol>");
-    out
 }
 
 /// The image itself.
-fn image(cells: &[(i64, i64)], now: i64, monitor_name: &str, standalone: bool) -> String {
+fn image(cells: &[(i64, i64)], now: i64, monitor_name: &str, standalone: bool) -> Markup {
     let (day_start, median) = window(cells, now);
     let by_hour: HashMap<i64, i64> = cells.iter().copied().collect();
 
     let width = LEFT + coordf(HEATMAP_DAYS) * CELL_W + GAP;
     let height = TOP + 24.0 * CELL_H + GAP;
-    let name = xml_escape(monitor_name);
-    let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width:.0} {height:.0}\" \
-         width=\"{width:.0}\" height=\"{height:.0}\" role=\"img\" \
-         aria-label=\"Latency heatmap of {name}, last {HEATMAP_DAYS} days\" \
-         font-family=\"ui-sans-serif,system-ui,sans-serif\" font-size=\"12\">"
-    );
-    if standalone {
-        svg.push_str(&standalone_style());
-    }
-    let _ = write!(
-        svg,
-        "<rect class=\"bg\" width=\"{width:.0}\" height=\"{height:.0}\" rx=\"6\" fill=\"{SURFACE_LIGHT}\"/>"
-    );
-
-    // Hour gutter: a label every six rows is enough to orient.
-    for hour in [0_i64, 6, 12, 18] {
-        let y = TOP + coordf(hour) * CELL_H + 8.5;
-        let _ = write!(
-            svg,
-            "<text x=\"{x:.0}\" y=\"{y:.1}\" fill=\"{INK_MUTED_LIGHT}\" text-anchor=\"end\">{hour:02}h</text>",
-            x = LEFT - 6.0,
-        );
-    }
-
-    for day in 0..HEATMAP_DAYS {
-        let day_ts = day_start + day * 86_400;
-        let x = LEFT + coordf(day) * CELL_W;
-
-        // Day labels weekly, anchored on the column's weekday ("Mon 08"):
-        // the weekday is the whole point of a 4-week window.
-        if day % 7 == 0
-            && let Some(date) = DateTime::from_timestamp(day_ts, 0)
-        {
-            let _ = write!(
-                svg,
-                "<text x=\"{x:.1}\" y=\"{y:.0}\" fill=\"{INK_MUTED_LIGHT}\">{label}</text>",
-                y = TOP - 7.0,
-                label = date.format("%a %d"),
-            );
-        }
-
-        for hour in 0..24_i64 {
-            let Some(latency) = by_hour.get(&(day_ts + hour * 3600)) else {
-                continue; // no data: the background shows through
-            };
-            let ratio = coordf(*latency) / coordf(median);
-            let tier = tier(ratio);
-            let color = TIER_LIGHT[tier];
-            let y = TOP + coordf(hour) * CELL_H;
-            let title = DateTime::from_timestamp(day_ts, 0).map_or_else(String::new, |date| {
-                format!(
-                    "{} {:02}:00 UTC - {latency} ms",
-                    date.format("%a %Y-%m-%d"),
-                    hour
-                )
-            });
-            let _ = write!(
-                svg,
-                "<rect class=\"t{tier}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{w:.1}\" height=\"{h:.1}\" \
-                 rx=\"1.5\" fill=\"{color}\"><title>{title}</title></rect>",
-                w = CELL_W - GAP,
-                h = CELL_H - GAP,
-            );
+    // Coordinates as the drawing writes them: whole units, or one decimal.
+    let whole = |value: f64| format!("{value:.0}");
+    let tenth = |value: f64| format!("{value:.1}");
+    let days = (0..HEATMAP_DAYS).map(|day| (day, day_start + day * 86_400));
+    html! {
+        svg xmlns="http://www.w3.org/2000/svg"
+            viewBox={ "0 0 " (whole(width)) " " (whole(height)) }
+            width=(whole(width)) height=(whole(height)) role="img"
+            aria-label={ "Latency heatmap of " (monitor_name) ", last " (HEATMAP_DAYS) " days" }
+            font-family="ui-sans-serif,system-ui,sans-serif" font-size="12" {
+            @if standalone { (standalone_style()) }
+            rect.bg width=(whole(width)) height=(whole(height)) rx="6" fill=(SURFACE_LIGHT) {}
+            // Hour gutter: a label every six rows is enough to orient.
+            @for hour in [0_i64, 6, 12, 18] {
+                text x=(whole(LEFT - 6.0)) y=(tenth(TOP + coordf(hour) * CELL_H + 8.5))
+                    fill=(INK_MUTED_LIGHT) text-anchor="end" { (format!("{hour:02}h")) }
+            }
+            @for (day, day_ts) in days {
+                @let x = tenth(LEFT + coordf(day) * CELL_W);
+                @let date = DateTime::from_timestamp(day_ts, 0);
+                // Day labels weekly, anchored on the column's weekday
+                // ("Mon 08"): the weekday is the whole point of a 4-week window.
+                @if let (0, Some(date)) = (day % 7, date) {
+                    text x=(x) y=(whole(TOP - 7.0)) fill=(INK_MUTED_LIGHT) { (date.format("%a %d")) }
+                }
+                @for hour in 0..24_i64 {
+                    // No data: the background shows through.
+                    @if let Some(latency) = by_hour.get(&(day_ts + hour * 3600)) {
+                        @let tier = tier(coordf(*latency) / coordf(median));
+                        rect class={ "t" (tier) } x=(x) y=(tenth(TOP + coordf(hour) * CELL_H))
+                            width=(tenth(CELL_W - GAP)) height=(tenth(CELL_H - GAP)) rx="1.5"
+                            fill=(TIER_LIGHT[tier]) {
+                            title {
+                                @if let Some(date) = date {
+                                    (date.format("%a %Y-%m-%d")) " " (format!("{hour:02}")) ":00 UTC - " (latency) " ms"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
-
-    svg.push_str("</svg>");
-    svg
 }
 
 /// `i64` to SVG coordinate, mirroring `render::coord` for the i64-heavy math here.
@@ -323,5 +301,17 @@ mod tests {
         let svg = render(&[], 30 * 86_400, "API", true);
         assert!(svg.starts_with("<svg") && svg.ends_with("</svg>"));
         assert_eq!(svg.matches("<rect").count(), 1);
+    }
+
+    /// What a config can put in a monitor's name never ends the attribute it
+    /// is written in: the escaping is the template's, not a call to remember.
+    #[test]
+    fn a_hostile_name_stays_inside_its_attribute() {
+        let svg = render(&[], 1_800_000_000, r#"A&B "<svg onload=x>" 'c'"#, true);
+        assert!(
+            svg.contains(r#"aria-label="Latency heatmap of A&amp;B &quot;&lt;svg onload=x&gt;&quot; 'c', last 28 days""#),
+            "{svg}"
+        );
+        assert_eq!(svg.matches("<svg").count(), 1);
     }
 }

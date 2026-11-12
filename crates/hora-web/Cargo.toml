@@ -11,6 +11,7 @@ publish.workspace = true
 anyhow.workspace = true
 arc-swap.workspace = true
 askama.workspace = true
+maud.workspace = true
 axum.workspace = true
 badgelib = "0.5.4"
 chrono.workspace = true
