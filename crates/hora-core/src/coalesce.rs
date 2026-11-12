@@ -795,6 +795,57 @@ mod tests {
     }
 
     #[test]
+    fn a_cause_is_remembered_for_its_whole_window_and_no_longer() {
+        let mut c = Coalescer::default();
+        assert!(c.on_down(down("db", &[]), 100, 30).is_some());
+        // One second inside the memory: still the cause, the symptom folds.
+        let last = 100 + CAUSE_MEMORY_SECS - 1;
+        assert!(c.on_down(down("api", &["db"]), last, 30).is_none());
+        assert_eq!(c.next_deadline(), None, "folded, not queued");
+        // At its end the cause is forgotten: a new symptom waits its own
+        // window and is sent.
+        let mut c = Coalescer::default();
+        assert!(c.on_down(down("db", &[]), 100, 30).is_some());
+        let end = 100 + CAUSE_MEMORY_SECS;
+        assert!(c.on_down(down("web", &["db"]), end, 30).is_none());
+        assert_eq!(c.next_deadline(), Some(end + 30));
+        assert_eq!(c.flush(end + 30).len(), 1);
+        assert_eq!(c.next_deadline(), None);
+    }
+
+    #[test]
+    fn the_next_deadline_is_the_earliest_queued() {
+        let mut c = Coalescer::default();
+        assert_eq!(c.next_deadline(), None);
+        assert!(c.on_down(down("api", &["db"]), 200, 30).is_none());
+        assert!(c.on_down(down("web", &["cdn"]), 150, 30).is_none());
+        assert_eq!(c.next_deadline(), Some(180));
+    }
+
+    /// Shutdown sends what is still queued, and folds - with its incident
+    /// settled - what an upstream already announced covers.
+    #[test]
+    fn a_drain_sends_what_waits_and_folds_what_is_covered() {
+        let mut c = Coalescer::default();
+        assert!(c.on_down(down("web", &["cdn"]), 100, 30).is_none());
+        let waiting = DownAlert {
+            incident: Some(7),
+            ..down("api", &["db"])
+        };
+        assert!(c.on_down(waiting, 100, 30).is_none());
+        // The upstream of one of them alerts before the window ends.
+        assert!(c.on_down(down("db", &[]), 105, 30).is_some());
+        let sent = c.drain(110);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].id, "web");
+        assert_eq!(c.settled, [7], "the folded down's incident is not settled");
+        assert_eq!(c.next_deadline(), None);
+        // The one sent owes its recovery; the folded one does not.
+        assert_eq!(c.on_recovered("web", 200), Recipients::Usual);
+        assert_eq!(c.on_recovered("api", 200), Recipients::Nobody);
+    }
+
+    #[test]
     fn cause_memory_expires() {
         let mut c = Coalescer::default();
         assert!(c.on_down(down("db", &[]), 100, 30).is_some());

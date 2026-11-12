@@ -64,3 +64,8 @@ deps:
         | python3 -c 'import json,sys,re; print(max((t["name"] for t in json.load(sys.stdin)["results"] if re.fullmatch(r"\d+\.\d+",t["name"])), key=lambda v: tuple(map(int,v.split(".")))))')
     printf '  %-36s %-10s %s\n' alpine "$ours" "$([ "$ours" = "$theirs" ] && echo ok || echo "behind -> $theirs")"
     echo "  blackdex/rust-musl                   stable     (floating tag, follows Rust stable)"
+
+# Build the image for this machine and smoke-test it, as CI does before a release
+image-smoke:
+    docker build -t hora:smoke .
+    .github/scripts/image-smoke.sh hora:smoke

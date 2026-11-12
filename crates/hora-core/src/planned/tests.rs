@@ -794,6 +794,38 @@ async fn a_window_announced_again_keeps_its_hours() {
 }
 
 #[test]
+fn what_is_covered_is_said_one_way() {
+    assert_eq!(covered(true, &["web"]), "all monitors");
+    assert_eq!(covered(false, &[] as &[&str]), "no monitor of this node");
+    assert_eq!(covered(false, &["Web", "API"]), "Web, API");
+}
+
+/// The byte limit of an announcement holds the fullest one a peer may
+/// send: every window allowed, each with the longest reason in four-byte
+/// characters.
+#[test]
+fn the_fullest_announcement_fits_its_size_limit() {
+    let reason = "\u{1F6E0}".repeat(MAX_SILENCE_REASON_CHARS);
+    let windows: Vec<AnnouncedWindow> = (0..MAX_ANNOUNCED_WINDOWS)
+        .map(|index| AnnouncedWindow {
+            id: i64::MAX - i64::try_from(index).unwrap(),
+            starts_at: i64::MAX,
+            ends_at: i64::MAX,
+            reason: reason.clone(),
+            host: Some("h".repeat(64)),
+        })
+        .collect();
+    let body = serde_json::to_vec(&crate::mesh::wire::HeartbeatBody {
+        maintenance: windows,
+    })
+    .unwrap();
+    assert!(body.len() <= MAX_ANNOUNCEMENT_BYTES, "{} bytes", body.len());
+    // And not by a mile: the limit is derived, not a round number to grow into.
+    assert!(MAX_ANNOUNCEMENT_BYTES < 2 * body.len());
+    assert_eq!(MAX_ANNOUNCE_AHEAD_SECS, 7 * 86_400);
+}
+
+#[test]
 fn overlapping_time_is_counted_once() {
     let muted = [(100, 200), (150, 300), (500, 600)];
     assert_eq!(measure(&muted, 0, 1000), 300);

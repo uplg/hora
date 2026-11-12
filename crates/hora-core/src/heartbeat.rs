@@ -504,8 +504,27 @@ mod tests {
         }
         // ...and one row says so for the whole interval.
         assert_eq!(rows().await, 1);
-        // Recording every time is still what a peer watch asks for.
+
+        // The interval is counted from the last row, to the second. That
+        // row moved 5 000 s into the past: within an interval of 5 001 s
+        // nothing is added, at 5 000 s the next miss is due.
+        sqlx::query("UPDATE checks SET time = ? WHERE monitor_id = 'nightly'")
+            .bind(now - 5000)
+            .execute(store.sqlx())
+            .await
+            .unwrap();
+        heartbeat_outcome_for(&store, "nightly", &cadence, now - 2 * day, 5001, now).await;
+        assert_eq!(rows().await, 1, "recorded again inside the interval");
+        heartbeat_outcome_for(&store, "nightly", &cadence, now - 2 * day, 5000, now).await;
+        assert_eq!(rows().await, 2, "not recorded once the interval had passed");
+
+        // Recording every time is still what a peer watch asks for: a row
+        // one second old is no reason to skip.
+        sqlx::query("UPDATE checks SET time = time - 1 WHERE monitor_id = 'nightly'")
+            .execute(store.sqlx())
+            .await
+            .unwrap();
         heartbeat_outcome_for(&store, "nightly", &cadence, now - 2 * day, 0, now).await;
-        assert_eq!(rows().await, 1, "same second: the row is already there");
+        assert_eq!(rows().await, 3);
     }
 }

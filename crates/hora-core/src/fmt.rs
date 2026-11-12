@@ -281,6 +281,32 @@ mod tests {
     }
 
     #[test]
+    fn a_share_in_permille_rounds_down_and_needs_data() {
+        assert_eq!(permille_of(999, 1000), Some(999));
+        assert_eq!(permille_of(1000, 1000), Some(1000));
+        // 2879 of 2880 checks: 999.65 permille, never rounded up to "all".
+        assert_eq!(permille_of(2879, 2880), Some(999));
+        assert_eq!(permille_of(1, 3), Some(333));
+        assert_eq!(permille_of(0, 7), Some(0));
+        assert_eq!(permille_of(0, 0), None);
+        assert_eq!(permille_of(5, -1), None);
+        assert_eq!(basis_points(1, 3), Some(3333));
+        assert_eq!(basis_points(2, 3), Some(6667));
+    }
+
+    #[test]
+    fn a_latency_reads_in_seconds_from_one_second_up() {
+        assert_eq!(latency(0), "0 ms");
+        assert_eq!(latency(64), "64 ms");
+        assert_eq!(latency(999), "999 ms");
+        assert_eq!(latency(1000), "1.0 s");
+        assert_eq!(latency(1849), "1.8 s");
+        assert_eq!(latency(1850), "1.9 s");
+        assert_eq!(latency(12_340), "12.3 s");
+        assert_eq!(period(90), "1 min 30 s");
+    }
+
+    #[test]
     fn timestamps_are_utc() {
         assert_eq!(utc(1_700_000_540), "2023-11-14 22:22:20 UTC");
         assert_eq!(date(1_700_000_540), "2023-11-14");
@@ -298,6 +324,7 @@ mod tests {
         assert_eq!(pct_bp(9_997), "99.97 %");
         assert_eq!(pct_bp(5), "0.05 %");
         assert_eq!(pct_bp(-150), "-1.50 %");
+        assert_eq!(pct_bp(0), "0.00 %");
         assert_eq!(pct(0, 0), "no checks");
         assert_eq!(pct(9997, 10_000), "99.97 %");
         assert_eq!(permille(1000), "100 %");

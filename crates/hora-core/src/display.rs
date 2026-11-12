@@ -209,4 +209,68 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_page_shows_the_worst_of_what_it_holds() {
+        use DisplayState::{Degraded, Down, Maint, None, Up};
+        // (down, degraded, maint, none, total)
+        assert_eq!(DisplayState::of_counts(1, 5, 5, 0, 20), Down);
+        assert_eq!(DisplayState::of_counts(0, 1, 5, 3, 20), Degraded);
+        assert_eq!(DisplayState::of_counts(0, 0, 1, 3, 20), Maint);
+        // Some without data, the rest up: up. All without data: no data.
+        assert_eq!(DisplayState::of_counts(0, 0, 0, 3, 20), Up);
+        assert_eq!(DisplayState::of_counts(0, 0, 0, 20, 20), None);
+        assert_eq!(DisplayState::of_counts(0, 0, 0, 0, 20), Up);
+        // Nothing to show has no data either.
+        assert_eq!(DisplayState::of_counts(0, 0, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn the_overall_state_counts_each_state_once() {
+        use DisplayState::{Degraded, Down, Maint, None, Up};
+        assert_eq!(DisplayState::overall([Up, Up, Up]), Up);
+        assert_eq!(DisplayState::overall([Up, None, Up]), Up);
+        assert_eq!(DisplayState::overall([None, None]), None);
+        assert_eq!(DisplayState::overall([Up, Maint, None]), Maint);
+        assert_eq!(DisplayState::overall([Maint, Degraded, Up]), Degraded);
+        assert_eq!(DisplayState::overall([Degraded, Down, Maint]), Down);
+        // One of each kind alone is itself (a count gone wrong would not be).
+        for state in ALL {
+            assert_eq!(DisplayState::overall([state]), state, "{state:?}");
+        }
+        assert_eq!(DisplayState::overall([]), None);
+    }
+
+    #[test]
+    fn what_answers_and_what_is_worth_a_look() {
+        let answering: Vec<bool> = ALL.iter().map(|state| state.answers()).collect();
+        assert_eq!(answering, [true, true, false, false, false]);
+        let notable: Vec<bool> = ALL.iter().map(|state| state.notable()).collect();
+        assert_eq!(notable, [false, true, true, true, false]);
+    }
+
+    #[test]
+    fn maintenance_hides_the_status_and_a_local_down_shows_up() {
+        use crate::status::MonitorState;
+        assert_eq!(
+            DisplayState::shown(MonitorState::Down, true, false),
+            DisplayState::Maint
+        );
+        assert_eq!(
+            DisplayState::shown(MonitorState::Down, true, true),
+            DisplayState::Maint
+        );
+        assert_eq!(
+            DisplayState::shown(MonitorState::Down, false, true),
+            DisplayState::Up
+        );
+        assert_eq!(
+            DisplayState::shown(MonitorState::Down, false, false),
+            DisplayState::Down
+        );
+        assert_eq!(
+            DisplayState::shown(MonitorState::Unknown, false, false),
+            DisplayState::None
+        );
+    }
 }
