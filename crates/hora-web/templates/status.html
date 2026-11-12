@@ -232,7 +232,7 @@ target = "https://example.com"</pre>
   {%- else -%}
     services
   {%- endif -%}
-  </small><span class="bar mini">{{ group.bar|safe }}</span></h3><span class="gsum">
+  </small><span class="bar mini">{{ group.bar|safe }}</span><span class="bar-cap" aria-hidden="true"><span>{{ page.days }} days ago</span><span>Today</span></span></h3><span class="gsum">
   {%- if group.state == "up" -%}
     {% call m::state("up", group.fact_lead) %}{% endcall %}
   {%- else -%}
@@ -279,7 +279,7 @@ target = "https://example.com"</pre>
   <ul class="list">
   {%- for row in group.rows %}
     <li>
-      <div class="row {{ row.state }}">{% call m::glyph(row.state) %}{% endcall %}<a class="name" href="/monitor/{{ row.href_id }}{{ chrome.q()|safe }}">{{ row.m.name }}<span class="vh">. {{ row.bar_label }}</span></a><span class="state"><span class="word {{ row.state }}">{{ row.word }}</span>
+      <div class="row {{ row.state }}">{% call m::glyph(row.state) %}{% endcall %}<a class="name" href="/monitor/{{ row.href_id }}{{ chrome.q()|safe }}">{{ row.m.name }}<span class="vh">. {{ row.bar_label }}</span></a><span class="state">{{ row.spark|safe }}<span class="word {{ row.state }}">{{ row.word }}</span>
     {%- if !row.detail.is_empty() %} <span class="muted">· {{ row.detail }}</span>
     {%- endif -%}
     </span>

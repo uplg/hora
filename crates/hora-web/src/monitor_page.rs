@@ -314,7 +314,6 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
         });
     }
     if let (Some(left), Some(total)) = (m.budget_minutes_left, m.budget_minutes_total) {
-        let (value, unit) = split_unit(&minutes(left));
         let class = match m.budget_state {
             BudgetState::Breached => "meter out",
             BudgetState::Low => "meter low",
@@ -322,8 +321,10 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
         };
         tiles.push(Tile {
             key: "Allowed downtime left".to_owned(),
-            value,
-            unit: format!("{unit} of {}", minutes(total)),
+            // The whole span is the figure: "1" alone, with "h 35 min"
+            // small beside it, said nothing.
+            value: minutes(left),
+            unit: format!("of {}", minutes(total)),
             note: m.slo_uptime_pct.map_or_else(String::new, |target| {
                 format!("Target {target} % over {} days", monitor.slo_window_days())
             }),

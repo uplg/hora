@@ -44,6 +44,47 @@ pub(crate) fn owl(state: &str, size: u32) -> String {
     )
 }
 
+/// A service's answer times over the last 24 hours as a bare line, to sit
+/// beside its state on the status page: the shape only (a flat line, a
+/// step, a spike), each point at its own time so a hole stays a hole in
+/// width. Empty with fewer than two points. Decorative: the figures are on
+/// the monitor's page.
+pub(crate) fn mini_spark(points: &[Point]) -> String {
+    const W: f64 = 88.0;
+    const H: f64 = 18.0;
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return String::new();
+    };
+    if points.len() < 2 {
+        return String::new();
+    }
+    let low = points
+        .iter()
+        .map(|point| point.latency_ms)
+        .min()
+        .unwrap_or(0);
+    let high = points
+        .iter()
+        .map(|point| point.latency_ms)
+        .max()
+        .unwrap_or(0);
+    let span = coord(last.t - first.t).max(1.0);
+    // A steady service draws a flat line in the middle, not noise blown up
+    // to the full height: the scale never spans less than 20 ms.
+    let range = coord(high - low).max(20.0);
+    let mid = coord(low + high) / 2.0;
+    let mut path = String::with_capacity(points.len() * 12);
+    for (index, point) in points.iter().enumerate() {
+        let x = coord(point.t - first.t) / span * W;
+        let y = H / 2.0 - (coord(point.latency_ms) - mid) / range * (H - 2.0);
+        let _ = write!(path, "{}{x:.1} {y:.1}", if index == 0 { 'M' } else { 'L' });
+    }
+    format!(
+        "<svg class=\"mini-spark\" viewBox=\"0 0 {W:.0} {H:.0}\" preserveAspectRatio=\"none\" \
+         aria-hidden=\"true\" focusable=\"false\"><path d=\"{path}\"/></svg>"
+    )
+}
+
 /// Several owls on one branch, one per place, each in its own pose: the mesh
 /// drawn (the watchers page and the vantage panels only). `label` is the
 /// sentence the picture says, for assistive tech.

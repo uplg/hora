@@ -196,6 +196,8 @@ pub(crate) struct Row<'a> {
     /// The daily bar (full rows only), and its words for assistive tech.
     pub(crate) bar: String,
     pub(crate) bar_label: String,
+    /// The last 24 hours of answer times as a bare line (full rows only).
+    pub(crate) spark: String,
     /// Where a down was seen from ("confirmed from").
     pub(crate) seen: Vec<Place>,
     pub(crate) seen_note: String,
@@ -861,6 +863,11 @@ fn row(monitor: &MonitorView, with_bar: bool) -> Row<'_> {
             String::new()
         },
         bar_label: bar_label(monitor),
+        spark: if with_bar {
+            crate::render::mini_spark(&monitor.spark)
+        } else {
+            String::new()
+        },
         seen,
         seen_note,
     }
