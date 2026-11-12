@@ -3,16 +3,15 @@
 //! target and whether it was met, incidents, downtime, time to recover and
 //! the allowed downtime left. Pre-formatted here; Askama does the escaping.
 
-use askama::Template;
 use chrono::{Datelike, NaiveDate, Utc};
 use hora_core::fmt;
 use hora_core::planned::Window;
 use hora_core::report::{DayTally, MonitorMonth, MonthReport};
 
 use crate::layout::{Chrome, join_and, minutes};
+use crate::page::{Document, icon, raw, state};
+use maud::{Markup, html};
 
-#[derive(Template)]
-#[template(path = "report.html")]
 pub(crate) struct ReportTemplate {
     pub(crate) chrome: Chrome,
     /// Whose report this is (the page title, `· group` when scoped).
@@ -33,6 +32,207 @@ pub(crate) struct ReportTemplate {
 }
 
 /// The month at a glance.
+impl ReportTemplate {
+    /// The screen-only bar above the sheet: the neighbouring months, the way
+    /// back to the status page, the theme, and how to keep a copy.
+    fn toolbar(&self) -> Markup {
+        let chrome = &self.chrome;
+        let month_link = |month: &str, name: &str| {
+            html! {
+                a.btn.quiet href={
+                    "/report/" (month)
+                    @if self.group_query.is_empty() { (raw(chrome.q())) }
+                    @else { (self.group_query) (raw(chrome.q_more())) }
+                } { (name) }
+            }
+        };
+        html! {
+            div.toolbar {
+                nav.nav aria-label="Months" {
+                    @if let Some((month, name)) = &self.prev { (month_link(month, name)) }
+                    span aria-current="page" { (self.label) }
+                    @if let Some((month, name)) = &self.next { (month_link(month, name)) }
+                }
+                span.tools {
+                    a.btn.quiet href={ "/" (raw(chrome.q())) } { "Status page" }
+                    a.btn.theme-btn href=(raw(chrome.theme_href()))
+                        aria-label={ "Theme: " (raw(chrome.theme_label())) ". Change theme" } {
+                        (icon("sun"))
+                        span.lbl { (raw(chrome.theme_label())) }
+                    }
+                }
+                p.hint {
+                    (icon("print"))
+                    "To keep a copy, print this page or save it as a PDF from your browser."
+                }
+            }
+        }
+    }
+
+    /// The sheet's letterhead: whose report, and by what.
+    fn letterhead(&self) -> Markup {
+        let chrome = &self.chrome;
+        html! {
+            header.rh {
+                @match (&chrome.logo, &chrome.logo_dark) {
+                    (Some(logo), Some(dark)) => {
+                        img.op-logo.for-light src=(logo) alt="";
+                        img.op-logo.for-dark src=(dark) alt="";
+                    }
+                    (Some(logo), None) => { img.op-logo src=(logo) alt=""; }
+                    (None, _) => { span.op-logo aria-hidden="true" { (chrome.initial) } }
+                }
+                span.op { (self.title) }
+                " "
+                span.who {
+                    img src={ "/assets/mark.svg?v=" (chrome.v) } alt="" width="20" height="20";
+                    "Report by "
+                    svg.wm viewBox="0 0 89 26" role="img" aria-label="Hora" { use href="#w-hora" {} }
+                }
+            }
+        }
+    }
+
+    /// The month's headline figures.
+    fn figures(&self) -> Markup {
+        let kpis = &self.kpis;
+        let targeted = !kpis.targets.is_empty();
+        let lead = if !kpis.all_met {
+            "kpi lead missed"
+        } else if !kpis.untargeted_out.is_empty() && targeted {
+            "kpi lead plain"
+        } else {
+            "kpi lead"
+        };
+        let kpi = |key: &str, value: &dyn maud::Render, note: &str| {
+            html! {
+                div.kpi { div.k { (key) } div.v { (value) } div.n.muted { (note) } }
+            }
+        };
+        html! {
+            div.kpis {
+                div class=(lead) {
+                    div.k { "Up overall" }
+                    div.v { (kpis.uptime) }
+                    div.n {
+                        @if !targeted { span.muted { "all services" } }
+                        @else if kpis.all_met && kpis.untargeted_out.is_empty() { (state("up", "Targets met")) }
+                        @else if kpis.all_met { span.muted { (kpis.untargeted_out) } }
+                        @else { (state("down", "A target missed")) }
+                    }
+                }
+                div class=(if targeted { "kpi-rest" } else { "kpi-rest three" }) {
+                    (kpi("Incidents", &kpis.incidents, &kpis.incidents_note))
+                    (kpi("Downtime", &kpis.downtime, &kpis.downtime_note))
+                    (kpi("To recover", &kpis.mttr, "median, outages only"))
+                    @if targeted {
+                        div.kpi {
+                            div.k { "Targets met" }
+                            div.v { (kpis.targets) }
+                            div.n {
+                                @if kpis.all_met { (state("up", "All met")) }
+                                @else { (state("down", &kpis.missed)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// One group's table: a service a row.
+    fn group(group: &ReportGroup, index: usize) -> Markup {
+        let id = format!("rg{index}");
+        let column = |name: &str| html! { th role="columnheader" scope="col" { (name) } };
+        let explained = |title: &str, name: &str| {
+            html! { th role="columnheader" scope="col" { abbr title=(title) { (name) } } }
+        };
+        html! {
+            section.rg aria-labelledby=(id) {
+                div.rg-h {
+                    h2 id=(id) {
+                        @if group.name.is_empty() { "Other services" } @else { (group.name) }
+                    }
+                    span {
+                        (group.len()) " " (if group.len() == 1 { "service" } else { "services" })
+                        " · " (group.uptime) " up"
+                    }
+                }
+                table role="table" {
+                    thead role="rowgroup" { tr role="row" {
+                        (column("Service")) (column("Up")) (column("Target")) (column("Met"))
+                        (column("Incidents")) (column("Downtime"))
+                        (explained("Time to recover, the typical outage", "Recovery"))
+                        (explained("Allowed downtime left at the target", "Budget"))
+                    } }
+                    tbody role="rowgroup" {
+                        @for row in &group.rows {
+                            tr role="row" class=[(row.met_state == "down").then_some("missed")] {
+                                th role="rowheader" scope="row" {
+                                    span.svc {
+                                        span { (row.name) }
+                                        span.bar.strip role="img" aria-label=(row.days_label) { (raw(&row.days)) }
+                                    }
+                                }
+                                td role="cell" data-l="Up" { (row.uptime) }
+                                td role="cell" data-l="Target" { (row.target) }
+                                td.met role="cell" {
+                                    @if row.met_state.is_empty() { span.muted { "no target" } }
+                                    @else { (state(row.met_state, row.met_word)) }
+                                }
+                                td role="cell" data-l="Incidents" { (row.incidents) }
+                                td role="cell" data-l="Downtime" { (row.downtime) }
+                                td role="cell" data-l="Recovery" { (row.mttr) }
+                                td role="cell" data-l="Budget" { (row.left) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let chrome = &self.chrome;
+        let main = html! {
+            main id="main" class="sheet" {
+                (self.letterhead())
+                div.rt {
+                    p.eyebrow { "Service report" }
+                    h1 { (self.label) }
+                    p { (self.lede) }
+                }
+                @if self.groups.is_empty() {
+                    p.quiet-line { "Nothing was watched this month." }
+                } @else {
+                    (self.figures())
+                    @for (index, group) in self.groups.iter().enumerate() {
+                        (Self::group(group, index + 1))
+                    }
+                }
+                div.method {
+                    p {
+                        b { "How this is counted." }
+                        " A service is up when it answers as expected; slow answers count as up. Downtime is the time of confirmed outages within the month. Recovery is the typical length of an outage, over the outages that ended this month. Budget is the downtime still allowed by the target."
+                    }
+                    p {
+                        "Generated " (self.generated) " by Hora. "
+                        a.noprint href={ "/" (raw(chrome.q())) } { "Live status" }
+                    }
+                }
+            }
+        };
+        Document::new(
+            chrome,
+            format!("{} · {} service report", self.label, self.title),
+            format!("{} service report for {}.", self.title, self.label),
+            main,
+        )
+        .framed("report", self.toolbar(), html! {})
+        .render()
+    }
+}
+
 pub(crate) struct Kpis {
     pub(crate) uptime: String,
     pub(crate) incidents: usize,
