@@ -486,6 +486,13 @@ database serve five times as many visitors.
   The `Deprecation` and `Link` response headers go with it. Read-only views
   keep `?token=`.
 
+## [0.12.0-beta.1] - 2026-11-12
+
+A preview of 0.12 for testing on real nodes before the release: everything
+listed under [Unreleased] above, as it stood on that day. Not for a node you
+cannot roll back - the migrations are one-way (back up `hora.db` first, see
+the [upgrade notes](UPGRADES.md#0115--0120)).
+
 ## [0.11.5] - 2026-11-12
 
 One fix: an HTTP monitor could stay down on a target that answered, until
@@ -1896,6 +1903,7 @@ Initial release.
   publishing to GHCR.
 
 [Unreleased]: https://github.com/uplg/hora/compare/v0.11.5...HEAD
+[0.12.0-beta.1]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0-beta.1
 [0.11.5]: https://github.com/uplg/hora/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/uplg/hora/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/uplg/hora/compare/v0.11.2...v0.11.3

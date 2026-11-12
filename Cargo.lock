@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "hora"
-version = "0.11.5"
+version = "0.12.0-beta.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "hora-core"
-version = "0.11.5"
+version = "0.12.0-beta.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "hora-notify"
-version = "0.11.5"
+version = "0.12.0-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "hora-web"
-version = "0.11.5"
+version = "0.12.0-beta.1"
 dependencies = [
  "anyhow",
  "arc-swap",
