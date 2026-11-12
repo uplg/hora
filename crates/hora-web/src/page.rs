@@ -1,4 +1,3 @@
-#![allow(dead_code)] // during the migration: the pieces the remaining pages will use
 //! The document every page is set in, and the small pieces they share,
 //! written with maud: markup as Rust, escaped by default, a component a
 //! function.
@@ -14,7 +13,7 @@ use crate::layout::Chrome;
 
 /// The shapes of the states and the icons, drawn once per page and
 /// referenced with `<use>`.
-const SPRITE: &str = include_str!("../templates/partials/sprite.html");
+const SPRITE: &str = include_str!("../assets/sprite.html");
 
 /// HTML that is already HTML: one of [`Chrome`]'s per-request fragments, or
 /// a drawing built by `render`. Never a string that came from outside.

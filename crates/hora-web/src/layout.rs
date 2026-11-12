@@ -31,8 +31,8 @@ use crate::handlers::assets::ASSET_VERSION;
 /// anything outside is ignored (no refresh, the default).
 pub(crate) const REFRESH_SECS: std::ops::RangeInclusive<u16> = 10..=3600;
 
-/// The page chrome handed to every HTML template (as `chrome`), used by
-/// `base.html` and its partials.
+/// The page chrome handed to every page (as `chrome`), used by
+/// the document and its header and footer (see `crate::page`).
 #[derive(Clone)]
 pub(crate) struct Chrome {
     /// The operator's name (`[page].title`), the sign in the header.

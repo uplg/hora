@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use askama::Template;
 use chrono::{DateTime, Utc};
 use hora_core::probe::FailureKind;
 use hora_core::status::MonitorState;
@@ -401,8 +400,6 @@ impl MonitorView {
 
 /// The status page (whole, or one group's): the page chrome plus the status
 /// view built from the summary (see `crate::status_page`).
-#[derive(Template)]
-#[template(path = "status.html")]
 pub(crate) struct StatusTemplate<'a> {
     pub(crate) chrome: crate::layout::Chrome,
     pub(crate) page: crate::status_page::StatusPage<'a>,

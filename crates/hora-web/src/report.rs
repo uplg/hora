@@ -1,7 +1,7 @@
 //! The monthly service report (`/report/2026-05`): a printable sheet per
 //! month - the month at a glance, then a table per group with uptime, the
 //! target and whether it was met, incidents, downtime, time to recover and
-//! the allowed downtime left. Pre-formatted here; Askama does the escaping.
+//! the allowed downtime left. Pre-formatted here; maud does the escaping.
 
 use chrono::{Datelike, NaiveDate, Utc};
 use hora_core::fmt;

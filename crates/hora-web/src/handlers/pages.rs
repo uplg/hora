@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use askama::Template;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, header};
@@ -112,7 +111,7 @@ async fn status_response(
                     page: status_page::build(summary, config, &ask),
                     chrome: chrome.cached().at("status").operator(operator),
                 }
-                .render()?;
+                .render();
                 Ok::<_, AppError>(Some(html))
             },
         )

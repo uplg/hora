@@ -76,7 +76,7 @@ tests; `just deps` reports what is behind. The docs build with `cd docs && bun i
 crates/hora          the binary: daemon, CLI (cli/) and the hora top TUI (top/)
 crates/hora-core     config, probes, scheduler, mesh (peers), SQLite storage, reports
 crates/hora-notify   the notification channels, one neutral message per event
-crates/hora-web      the status page, JSON API, badges and metrics (axum + askama)
+crates/hora-web      the status page, JSON API, badges and metrics (axum + maud)
 docs/                the documentation site (Astro Starlight)
 brand/               the brand book, the owl, the mockups
 ```
@@ -89,7 +89,7 @@ brand/               the brand book, the owl, the mockups
 self-hosted monitoring can be; Hora imports Kuma backups and happily sends
 its dead-man heartbeat to Healthchecks. Built on
 [axum](https://github.com/tokio-rs/axum), [sqlx](https://github.com/launchbadge/sqlx),
-[askama](https://github.com/askama-rs/askama),
+[maud](https://maud.lambda.xyz),
 [rustls](https://github.com/rustls/rustls) and
 [hickory-dns](https://github.com/hickory-dns/hickory-dns). Same family as
 Ariane and Maison, on the synthe.se design tokens.

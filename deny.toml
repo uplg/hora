@@ -56,7 +56,7 @@ skip = [
     # skip once reqwest moves to 0.7.
     { crate = "tower-http" },
     # async-trait 0.1.92 jumped to syn 3 while the rest of the proc-macro
-    # ecosystem (serde_derive, askama, darling) is still on syn 2.
+    # ecosystem (serde_derive, darling) is still on syn 2.
     { crate = "syn" },
     # Same split one layer up: yoke-derive (icu, via idna) moved to synstructure
     # 0.14 while x509-parser's asn1-rs-derive is still on 0.13.

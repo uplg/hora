@@ -16,6 +16,7 @@ mod render;
 mod report;
 mod routes;
 mod snapshot;
+mod status_markup;
 mod status_page;
 mod summary;
 mod text;

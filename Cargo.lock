@@ -81,53 +81,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "askama"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6024d73179f43f15ccd2b881bfea6fee7f3a46ec53f33b52210dea749ebebaa4"
-dependencies = [
- "askama_macros",
- "itoa",
- "percent-encoding",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "askama_derive"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "071ee5ebf2138e3ad180e0aacf6940c2cab5e6d8333741d9925c7bee2b153f39"
-dependencies = [
- "askama_parser",
- "memchr",
- "proc-macro2",
- "quote",
- "rustc-hash",
- "syn 3.0.10",
-]
-
-[[package]]
-name = "askama_macros"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "643e1c7cbb6aec1d920332fe51a7c0d8219e273dcb8602db03f5263e4d16487b"
-dependencies = [
- "askama_derive",
-]
-
-[[package]]
-name = "askama_parser"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c5ae75772275d268b03ab8bdccdd12117b6169ee23256942b34e46c9f476583"
-dependencies = [
- "rustc-hash",
- "unicode-ident",
- "winnow",
-]
-
-[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1547,7 +1500,6 @@ version = "0.11.5"
 dependencies = [
  "anyhow",
  "arc-swap",
- "askama",
  "axum",
  "badgelib",
  "chrono",
@@ -5000,9 +4952,6 @@ name = "winnow"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
-dependencies = [
- "memchr",
-]
 
 [[package]]
 name = "wit-bindgen"

@@ -1,4 +1,4 @@
-//! Incident history: the Askama-rendered `/history` page and the
+//! Incident history: the `/history` page and the
 //! `/history.atom` feed. The Atom XML is written by hand (a feed is a dozen
 //! lines; a template engine would not pull its weight there).
 

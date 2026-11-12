@@ -313,6 +313,14 @@ database serve five times as many visitors.
 
 ### Changed
 
+- **The pages are written with maud instead of askama templates.** Markup
+  is Rust now: a component is a function that takes typed values, a tag
+  left open does not compile, and escaping is the macro's everywhere - the
+  drawings built in Rust no longer pass through a `|safe` that trusted
+  whoever wrote them. Nothing changes for a visitor: every page was
+  compared with the previous build, tag for tag and word for word, on four
+  sets of data (all well, outages and maintenance, nothing configured,
+  everything private).
 - **`/api/summary` reads a page as the page does.** `overall` folded the
   raw statuses: a monitor down inside a planned maintenance window made it
   `down` ("Major outage") while the status page said maintenance, and one

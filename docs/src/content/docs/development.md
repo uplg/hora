@@ -12,7 +12,7 @@ Hora is a small Cargo workspace in Rust (edition 2024), MIT-licensed, at
 | --- | --- |
 | `hora-notify` | The `Notifier` trait, the `Event` type, the dispatcher, and the ten channels (Telegram, Discord, Slack, Matrix, ntfy, Gotify, Pushover, email, Free Mobile, webhook). Add a channel by implementing the trait. |
 | `hora-core` | Configuration and its validation, the probes, SQLite storage and migrations, certificate and domain checks, the per-monitor scheduler, alert grouping, the peer mesh, and the supervisor that owns the live config and reconciles monitor tasks on reload. |
-| `hora-web` | The axum router, the view model, the Askama templates of the status page and its siblings, the JSON API and its OpenAPI document. |
+| `hora-web` | The axum router, the view model, the pages (written with maud: markup as Rust functions, escaped by default), the JSON API and its OpenAPI document. |
 | `hora` | The binary: it wires the rest together and holds the CLI subcommands. |
 
 Migrations and templates are compiled into the binary, so a release is one
