@@ -243,7 +243,7 @@ pub(crate) async fn monitor_page(
         chrome: chrome.at("status").operator(operator),
         page,
     }
-    .render()?;
+    .render();
     Ok(Html(html))
 }
 

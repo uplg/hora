@@ -5,23 +5,256 @@
 //! Built from the monitor's summary view (no extra summary work) plus its
 //! recent incidents.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
-use askama::Template;
 use chrono::{DateTime, NaiveDate, Utc};
 use hora_core::config::{Config, Kind, Monitor};
 use hora_core::db::{EventMarker, Incident};
 
 use crate::display::DisplayState;
 use crate::layout::{Chrome, join_and, minutes, ms, pct};
+use crate::page::{Document, glyph, raw, state};
 use crate::render::{Chart, meter, owls, sparkline};
 use crate::summary::{BudgetState, CertState, MonitorView};
+use maud::{Markup, html};
 
-#[derive(Template)]
-#[template(path = "monitor.html")]
 pub(crate) struct MonitorTemplate {
     pub(crate) chrome: Chrome,
     pub(crate) page: MonitorPage,
+}
+
+impl MonitorTemplate {
+    /// The name, the state, what is checked, and the figures that sum it up.
+    fn heading(&self) -> Markup {
+        let (page, q) = (&self.page, raw(self.chrome.q()));
+        html! {
+            nav.crumbs aria-label="Breadcrumb" {
+                a href={ "/" (q) } { "Status" }
+                span.sep aria-hidden="true" { "/" }
+                @if let Some((name, href)) = &page.group {
+                    a href={ (href) (q) } { (name) }
+                    span.sep aria-hidden="true" { "/" }
+                }
+                span aria-current="page" { (page.m.name) }
+            }
+            div.title {
+                h1 { (page.m.name) }
+                span class={ "state-big " (page.state) } { (state(page.state, &page.word)) }
+            }
+            p.target {
+                @if let Some(target) = &page.target { code { (target) } " · " }
+                (page.checked)
+            }
+            @if let Some(why) = &page.why { p.lede { (why) } }
+            @if !page.tiles.is_empty() {
+                div.tiles {
+                    @for tile in &page.tiles {
+                        div.tile {
+                            span.k { (tile.key) }
+                            span.v {
+                                (tile.value)
+                                @if !tile.unit.is_empty() { small { (tile.unit) } }
+                            }
+                            (raw(&tile.meter))
+                            @if !tile.note.is_empty() { span.n { (tile.note) } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The last 24 hours of answer times, with what the drawing shows said
+    /// in words.
+    fn response_time(&self) -> Markup {
+        let (page, chart) = (&self.page, &self.page.chart);
+        let mut label = format!("Response time of {} over the last 24 hours", page.m.name);
+        if !chart.summary.is_empty() {
+            let _ = write!(label, ": {}", chart.summary);
+        }
+        if let Some(limit) = &chart.limit {
+            let _ = write!(label, ". Counted slow above {}", limit.text);
+        }
+        label.push('.');
+        html! {
+            section.panel.spaced aria-labelledby="rt" {
+                div.panel-head {
+                    h2 id="rt" { "Response time" }
+                    span.aside { "Last 24 h, times in UTC" }
+                }
+                div role="img" aria-label=(label) { (raw(&chart.html)) }
+                div.key {
+                    span { i {} "Response time (averaged over a few minutes)" }
+                    @if let Some(limit) = &chart.limit {
+                        @if limit.drawn { span { i.t {} "Slow above " (limit.text) } }
+                        @else { span { "Slow above " (limit.text) ", off this scale" } }
+                    }
+                    @if !chart.events.is_empty() { span { i.e.v {} "Deploys and changes" } }
+                }
+                @if !chart.events.is_empty() {
+                    ul.marks aria-label="Deploys and changes on this chart" {
+                        @for event in &chart.events {
+                            li { time datetime=(event.iso) { (event.at) } span { (event.title) } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The daily bar: a link per day, and each day in words.
+    fn days(&self) -> Markup {
+        let (page, q) = (&self.page, raw(self.chrome.q()));
+        let count = page.days.len();
+        let notable = page.notable_days();
+        html! {
+            section.panel.spaced aria-labelledby="days" {
+                div.panel-head {
+                    h2 id="days" { "Last " (count) " days" }
+                    span.aside { "Pick a day to read it" }
+                }
+                div.days-wrap {
+                    ol.days aria-label={ "Last " (count) " days, one link per day" } {
+                        @for day in &page.days {
+                            li {
+                                a class=(day.class) href={ "#" (day.anchor) } data-tip=(day.tip) aria-label=(day.tip) {}
+                            }
+                        }
+                    }
+                }
+                div.bar-legend.flush aria-hidden="true" {
+                    span.dall { (page.first_day) }
+                    span.d30 { (page.day30) }
+                    span { "Today" }
+                }
+                @if !notable.is_empty() {
+                    ul.daylinks aria-label="Days with something to report, newest first" {
+                        @for day in &notable {
+                            li class=[(!day.recent).then_some("old")] {
+                                a class={ "chip " (day.state) } href={ "#" (day.anchor) } {
+                                    (glyph(day.state)) (day.short) " · " (day.word)
+                                }
+                            }
+                        }
+                    }
+                }
+                @for day in &page.days {
+                    div class={ "daydetail " (day.state) } id=(day.anchor) {
+                        (glyph(day.state))
+                        span.k { (day.title) }
+                        p { (day.text) }
+                        @if !day.incidents.is_empty() {
+                            ul {
+                                @for (id, text) in &day.incidents {
+                                    li { a href={ "/incident/" (id) (q) } { (text) } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Where it is checked from, and its incidents.
+    fn places_and_incidents(&self) -> Markup {
+        let (page, q) = (&self.page, raw(self.chrome.q()));
+        let all_history = html! { a.aside href={ "/history" (q) } { "All history" } };
+        html! {
+            section.panel aria-labelledby="vp" {
+                @if page.places.is_empty() {
+                    div.panel-head { h2 id="vp" { "Incidents" } (all_history) }
+                } @else {
+                    div.panel-head {
+                        h2 id="vp" { "Checked from " (page.places.len()) " places" }
+                        span.aside { (state(page.places_state, &page.places_word)) }
+                    }
+                    div.vpwrap {
+                        (raw(&page.places_owls))
+                        p.muted.small {
+                            "Each place checks on its own. An outage is called only when they agree, so a hiccup near one place does not page anyone."
+                        }
+                    }
+                    ul.vlist {
+                        @for place in &page.places {
+                            li {
+                                (glyph(place.state))
+                                span.n { (place.name) small { (place.sub) } }
+                                span.r {
+                                    span class={ "word " (place.state) } { (place.word) }
+                                    (raw(&place.meter))
+                                    (place.latency)
+                                }
+                            }
+                        }
+                    }
+                    p.muted.small {
+                        "Typical answer time over 24 h, from each place. A place further away answers slower; that is distance, not trouble."
+                    }
+                    div.panel-head.later { h2 id="inc" { "Incidents" } (all_history) }
+                }
+                @if page.incidents.is_empty() {
+                    p.quiet-line { (glyph("up")) "No incident recorded lately." }
+                } @else {
+                    ul.incl {
+                        @for incident in &page.incidents {
+                            li {
+                                (glyph(incident.state))
+                                span.t {
+                                    a href={ "/incident/" (incident.id) (q) } { (incident.title) }
+                                    @if !incident.small.is_empty() { small { (incident.small) } }
+                                }
+                                span.r { (incident.date) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let (chrome, page) = (&self.chrome, &self.page);
+        let main = html! {
+            main id="main" class="page" {
+                (self.heading())
+                (self.response_time())
+                (self.days())
+                div.two {
+                    @if let Some(heatmap) = &page.heatmap {
+                        section.panel aria-labelledby="hm" {
+                            div.panel-head { h2 id="hm" { "Hour by hour, 4 weeks" } }
+                            (raw(heatmap))
+                        }
+                    }
+                    (self.places_and_incidents())
+                }
+                @if !page.details.is_empty() {
+                    details.ops {
+                        summary {
+                            svg.chev aria-hidden="true" { use href="#i-chev" {} }
+                            "Details "
+                            span.muted { "for operators: probe, percentiles, targets" }
+                        }
+                        div.in { dl.kv {
+                            @for (key, value) in &page.details { dt { (key) } dd { (value) } }
+                        } }
+                    }
+                }
+            }
+        };
+        Document::new(
+            chrome,
+            format!("{} · {} status", page.m.name, chrome.site),
+            format!(
+                "{}: {}. Uptime, response time and incidents.",
+                page.m.name, page.word
+            ),
+            main,
+        )
+        .render()
+    }
 }
 
 pub(crate) struct MonitorPage {
