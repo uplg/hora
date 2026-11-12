@@ -172,7 +172,7 @@ pub fn merge<S: std::hash::BuildHasher>(
         });
     }
     for silence in &sources.silences {
-        let target = if silence.monitor_id == "*" {
+        let target = if silence.monitor_id == crate::silence::ALL {
             "all monitors".to_owned()
         } else {
             name(&silence.monitor_id)
@@ -214,7 +214,7 @@ fn maintenance_entry(window: &MaintenanceWindow, name: &impl Fn(&str) -> String)
         Some(Selector::Host(host)) => format!("host {host}"),
         Some(Selector::Peer) | None => "the peer itself".to_owned(),
     };
-    let origin = match window.origin.strip_prefix("peer:") {
+    let origin = match crate::planned::announcing_peer(&window.origin) {
         Some(peer) => format!("announced by {}", name(peer)),
         None => "planned on this node".to_owned(),
     };

@@ -514,15 +514,7 @@ pub(crate) fn join_and<S: AsRef<str>>(items: &[S]) -> String {
     }
 }
 
-/// A latency in the unit a person reads: `64 ms`, `1.8 s`.
-pub(crate) fn ms(latency: i64) -> String {
-    if latency >= 1000 {
-        let tenths = (latency + 50) / 100;
-        format!("{}.{} s", tenths / 10, tenths % 10)
-    } else {
-        format!("{latency} ms")
-    }
-}
+pub(crate) use hora_core::fmt::latency as ms;
 
 /// Whole minutes as every page says a span: `41 min`, `3 h 7 min`,
 /// `2 d 4 h` - [`hora_core::fmt::duration`], for the figures the pages hold
@@ -536,15 +528,7 @@ pub(crate) fn minutes(total: i64) -> String {
     hora_core::fmt::duration(total.saturating_mul(60))
 }
 
-/// A permille as the page writes a percentage: `99.97 %` reads better than
-/// `99.9 %` for a status page, but the data is permille, so one decimal.
-pub(crate) fn pct(permille: i64) -> String {
-    if permille >= 1000 {
-        "100 %".to_owned()
-    } else {
-        format!("{}.{} %", permille / 10, permille % 10)
-    }
-}
+pub(crate) use hora_core::fmt::permille as pct;
 
 #[cfg(test)]
 mod tests {

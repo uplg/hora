@@ -209,7 +209,7 @@ async fn probe_peer(
 ) -> Verdict {
     let mut builder = client.post(url).json(request);
     if let Some(token) = token {
-        builder = builder.header("x-push-token", token);
+        builder = builder.header(crate::mesh::wire::PUSH_TOKEN_HEADER, token);
     }
     let answer: Result<ProbeResponse, _> =
         crate::http::fetch_json_or_status(builder, MAX_RESPONSE_BYTES, PROBE_DEADLINE).await;

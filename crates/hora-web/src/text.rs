@@ -69,7 +69,7 @@ pub(crate) fn render(summary: &Summary, operator: bool) -> String {
                 .unwrap_or_else(|| "-".to_owned());
             let latency = monitor
                 .last_latency_ms
-                .map_or_else(|| "-".to_owned(), |ms| format!("{ms} ms"));
+                .map_or_else(|| "-".to_owned(), hora_core::fmt::latency);
             let state = monitor.display_state();
 
             let _ = writeln!(

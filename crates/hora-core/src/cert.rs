@@ -493,10 +493,9 @@ async fn check_certs(
         let days_left = (not_after - now) / SECONDS_PER_DAY;
         info!(monitor = %monitor.id, days_left, "checked TLS certificate");
 
-        // Mute (and don't record the alert) during maintenance, so it can
+        // Mute (and don't record the alert) during maintenance or a silence, so it can
         // still fire once the window ends.
-        let muted =
-            crate::planned::in_maintenance(store, snapshot, &monitor.id, chrono::Utc::now()).await;
+        let muted = crate::scheduler::muted_under(store, snapshot, &monitor.id).await;
         if !muted {
             alert_expiry(store, snapshot, notifier, monitor, not_after, now).await;
         }
@@ -561,7 +560,7 @@ async fn report_unreadable(
     monitor: &crate::config::Monitor,
     err: &anyhow::Error,
 ) {
-    if crate::planned::in_maintenance(store, snapshot, &monitor.id, chrono::Utc::now()).await
+    if crate::scheduler::muted_under(store, snapshot, &monitor.id).await
         || !alert_once::should_alert(store, Watch::CertUnreadable, &monitor.id, STAGE_WARNING).await
     {
         return;

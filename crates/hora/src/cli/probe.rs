@@ -214,7 +214,7 @@ async fn print_probe_report(
         "  latency   {}",
         outcome
             .latency_ms
-            .map_or_else(|| "-".to_owned(), |ms| format!("{ms} ms"))
+            .map_or_else(|| "-".to_owned(), hora_core::fmt::latency)
     );
     if let Some(code) = outcome.status_code {
         println!("  code      {code}");

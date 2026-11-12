@@ -100,11 +100,17 @@ pub(crate) fn render(
     )
 }
 
+/// The first second the heatmap drawn at `now` covers: what a caller must
+/// fetch from, so that the cells and the grid agree on their first day.
+pub(crate) fn since(now: i64) -> i64 {
+    (now / 86_400 - (HEATMAP_DAYS - 1)) * 86_400
+}
+
 /// The first hour of the window, and the median of its cells: the reference
 /// for "how slow is unusual". A monitor with a stable baseline shows the
 /// usual tier everywhere; the outliers carry the colour.
 fn window(cells: &[(i64, i64)], now: i64) -> (i64, i64) {
-    let day_start = (now / 86_400 - (HEATMAP_DAYS - 1)) * 86_400;
+    let day_start = since(now);
     let mut latencies: Vec<i64> = cells
         .iter()
         .filter(|(hour, _)| *hour >= day_start)

@@ -163,7 +163,7 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
                 println!("No active silences.");
             }
             for silence in silences {
-                let target = if silence.monitor_id == "*" {
+                let target = if silence.monitor_id == hora_core::silence::ALL {
                     "all monitors"
                 } else {
                     &silence.monitor_id
@@ -206,7 +206,7 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
                     }
                 };
             let until = silenced.until;
-            let target = if silenced.ids == ["*"] {
+            let target = if silenced.ids == [hora_core::silence::ALL] {
                 "all monitors".to_owned()
             } else {
                 silenced.ids.join(", ")
@@ -386,7 +386,7 @@ async fn list_maintenance() -> Result<(), CliError> {
             fmt::utc(window.ends_at),
             window.reason
         );
-        let origin = match window.origin.strip_prefix("peer:") {
+        let origin = match hora_core::planned::announcing_peer(&window.origin) {
             Some(peer) => format!(" Announced by peer {peer}."),
             None => String::new(),
         };

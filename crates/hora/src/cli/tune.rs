@@ -99,7 +99,7 @@ fn print_tuning(t: &hora_core::tune::MonitorTuning) {
         "{}  ({}, every {})",
         t.name,
         t.kind,
-        fmt::duration(i64::try_from(t.interval_secs).unwrap_or(i64::MAX))
+        fmt::period(t.interval_secs)
     );
 
     let window = t.window.map_or_else(String::new, |(first, last)| {

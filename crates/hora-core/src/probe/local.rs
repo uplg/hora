@@ -36,18 +36,28 @@ pub(crate) fn is_exhaustion(err: &std::io::Error) -> bool {
         || matches!(err.raw_os_error(), Some(ENOMEM | ENFILE | EMFILE | ENOBUFS))
 }
 
+/// `err` and every error behind it, outermost first. An `io::Error` that
+/// wraps another (hyper-rustls nests a rustls error that way) is looked
+/// into: its own `source()` skips the error it wraps, so the chain alone
+/// never reaches it.
+pub(crate) fn causes<'a>(
+    err: &'a (dyn Error + 'static),
+) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
+    std::iter::successors(Some(err), |&current| {
+        current
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .map(|wrapped| wrapped as &(dyn Error + 'static))
+            .or_else(|| current.source())
+    })
+}
+
 /// The exhaustion in `err`'s chain of causes, if any, in words.
 pub(crate) fn exhaustion_in(err: &(dyn Error + 'static)) -> Option<String> {
-    let mut current = Some(err);
-    while let Some(cause) = current {
-        if let Some(io) = cause.downcast_ref::<std::io::Error>()
-            && is_exhaustion(io)
-        {
-            return Some(io.to_string());
-        }
-        current = cause.source();
-    }
-    None
+    causes(err)
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .find(|io| is_exhaustion(io))
+        .map(ToString::to_string)
 }
 
 /// Whether this host cannot open a socket right now for lack of resources:
@@ -132,6 +142,9 @@ mod tests {
             )))
             .is_none()
         );
+        // Wrapped in an io::Error, where `source()` does not look.
+        let nested = std::io::Error::other(std::io::Error::from_raw_os_error(EMFILE));
+        assert!(exhaustion_in(&nested).is_some());
     }
 
     #[test]

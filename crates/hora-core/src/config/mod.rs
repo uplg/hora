@@ -102,9 +102,16 @@ impl Config {
     #[must_use]
     pub fn fail_threshold(&self, monitor_id: &str) -> u32 {
         self.find_monitor(monitor_id).map_or_else(
-            || self.alerts.fail_threshold.max(1),
+            || self.peer_fail_threshold(),
             |monitor| monitor.fail_threshold(&self.alerts),
         )
+    }
+
+    /// How many missed heartbeats in a row confirm a watched peer down: the
+    /// global threshold, never less than one.
+    #[must_use]
+    pub fn peer_fail_threshold(&self) -> u32 {
+        self.alerts.fail_threshold.max(1)
     }
 
     /// The host this node runs on (`[health] host`), if it says.
@@ -168,7 +175,7 @@ impl Default for Updates {
     }
 }
 
-fn default_true() -> bool {
+pub(super) fn default_true() -> bool {
     true
 }
 
@@ -574,7 +581,7 @@ fn default_push_alert_window() -> u64 {
     300
 }
 fn default_channel_fail_threshold() -> u32 {
-    3
+    hora_notify::DEFAULT_CHANNEL_FAIL_THRESHOLD
 }
 fn default_rate_limit_burst() -> u32 {
     30

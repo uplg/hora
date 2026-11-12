@@ -70,9 +70,9 @@ pub(crate) async fn check_domains(
             },
         };
 
-        // Mute (without recording the alert) during maintenance, so it still
+        // Mute (without recording the alert) during maintenance or a silence, so it still
         // fires once the window ends.
-        if crate::planned::in_maintenance(store, snapshot, &monitor.id, chrono::Utc::now()).await {
+        if crate::scheduler::muted_under(store, snapshot, &monitor.id).await {
             continue;
         }
         let days_left = (expires_at - now) / SECONDS_PER_DAY;

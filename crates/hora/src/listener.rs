@@ -40,6 +40,7 @@ const FRESH: Duration = Duration::from_secs(30);
 /// From the first byte of a request to the first byte of its answer. Above
 /// the handlers' deadline (`hora_web`'s 30 s), which must answer first.
 const REQUEST: Duration = Duration::from_secs(60);
+const _: () = assert!(REQUEST.as_secs() > hora_web::REQUEST_TIMEOUT.as_secs());
 /// An answer the client takes no byte of: each one holds its buffers, the
 /// kernel's and ours, for as long as it is kept.
 const STALL: Duration = Duration::from_secs(30);

@@ -368,13 +368,7 @@ impl MonitorView {
     /// window. A local-only down (see [`Self::local_only`]) shows as up: the
     /// service is up for its users.
     pub(crate) fn display_state(&self) -> DisplayState {
-        if self.maintenance.is_some() {
-            return DisplayState::Maint;
-        }
-        if self.local_only() {
-            return DisplayState::Up;
-        }
-        DisplayState::from(self.status)
+        DisplayState::shown(self.status, self.maintenance.is_some(), self.local_only())
     }
 
     /// Down from this node only: every peer that watches the same target

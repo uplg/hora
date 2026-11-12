@@ -73,7 +73,7 @@ fn long_uptime(daily: &[DayRow], bar: &[super::view::DayCell]) -> Option<i64> {
             )
         },
     );
-    (total > 0).then(|| available.saturating_mul(1000) / total)
+    hora_core::fmt::permille_of(available, total)
 }
 
 /// Build a monitor's view from the pre-fetched batch maps. Pure: a monitor with
@@ -95,9 +95,7 @@ pub(crate) fn build_monitor_view(
     let uptime_permille = data
         .availability
         .get(&monitor.id)
-        .and_then(|&(available, total)| {
-            (total > 0).then(|| available.saturating_mul(1000) / total)
-        });
+        .and_then(|&(available, total)| hora_core::fmt::permille_of(available, total));
 
     let daily = data
         .daily

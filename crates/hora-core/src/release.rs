@@ -224,8 +224,7 @@ pub(crate) async fn check_releases(
         };
         if !crate::release::is_newer(&latest, &current)
             || alerted.as_deref() == Some(latest.as_str())
-            || crate::planned::in_maintenance(store, snapshot, &monitor.id, chrono::Utc::now())
-                .await
+            || crate::scheduler::muted_under(store, snapshot, &monitor.id).await
         {
             continue;
         }

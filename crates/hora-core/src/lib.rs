@@ -9,6 +9,7 @@ pub mod config_watch;
 mod connect;
 pub mod db;
 pub mod digest;
+pub mod display;
 pub mod doctor;
 mod domain_expiry;
 mod exec;

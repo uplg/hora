@@ -1,6 +1,7 @@
 //! Rendering: the frame layout, the monitor table, the trouble pane and the
 //! footer.
 
+use hora_core::display::DisplayState;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -19,19 +20,18 @@ pub(super) fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     .areas(frame.area());
 
     // Header: title - overall - updated - source.
-    let (title, overall, label) = app.summary.as_ref().map_or_else(
-        || ("hora".to_owned(), "", "connecting...".to_owned()),
-        |summary| {
+    let (title, (label, badge)) = app.summary.as_ref().map_or_else(
+        || {
             (
-                summary.title.clone(),
-                summary.overall.as_str(),
-                summary.overall_label.clone(),
+                "hora".to_owned(),
+                ("connecting...".to_owned(), overall_style("")),
             )
         },
+        |summary| (summary.title.clone(), header_badge(summary)),
     );
     let mut spans = vec![
         Span::styled(format!(" {title} "), Style::new().bold()),
-        Span::styled(format!(" {label} "), overall_style(overall)),
+        Span::styled(format!(" {label} "), badge),
         Span::raw(format!("  updated {}  {}", app.updated, app.url)),
     ];
     if let Some(storage) = app.summary.as_ref().and_then(|s| s.storage.as_ref()) {
@@ -131,7 +131,7 @@ fn monitor_table(app: &App) -> Table<'static> {
             .iter()
             .map(|monitor| {
                 Row::new(vec![
-                    format!(" {}", status_dot(&monitor.status)),
+                    format!(" {}", monitor.shown().symbol()),
                     monitor.name.clone(),
                     monitor.group.clone().unwrap_or_default(),
                     monitor
@@ -142,7 +142,7 @@ fn monitor_table(app: &App) -> Table<'static> {
                     ms(monitor.p99),
                     monitor.last_error.clone().unwrap_or_default(),
                 ])
-                .style(status_style(&monitor.status))
+                .style(status_style(monitor.shown()))
             })
             .collect()
     });
@@ -202,13 +202,13 @@ fn trouble_lines(app: &App) -> Vec<Line<'static>> {
         summary
             .monitors
             .iter()
-            .filter(|monitor| monitor.status != "up")
+            .filter(|monitor| !matches!(monitor.shown(), DisplayState::Up | DisplayState::Maint))
             .take(3)
             .map(|monitor| {
                 Line::from(vec![
                     Span::styled(
-                        format!(" {} {} ", status_dot(&monitor.status), monitor.name),
-                        status_style(&monitor.status).bold(),
+                        format!(" {} {} ", monitor.shown().symbol(), monitor.name),
+                        status_style(monitor.shown()).bold(),
                     ),
                     Span::raw(monitor.last_error.clone().unwrap_or_default()),
                 ])
@@ -282,24 +282,41 @@ fn severity_style(severity: &str) -> Style {
 }
 
 fn ms(value: Option<i64>) -> String {
-    value.map_or_else(|| "-".to_owned(), |ms| format!("{ms} ms"))
+    value.map_or_else(|| "-".to_owned(), hora_core::fmt::latency)
 }
 
-fn status_dot(status: &str) -> &'static str {
-    match status {
-        "up" => "●",
-        "degraded" => "◐",
-        "down" => "○",
-        _ => "·",
+fn status_style(state: DisplayState) -> Style {
+    match state {
+        DisplayState::Up => Style::new().fg(Color::Green),
+        DisplayState::Degraded => Style::new().fg(Color::Yellow),
+        DisplayState::Down => Style::new().fg(Color::Red),
+        DisplayState::Maint => Style::new().fg(Color::Cyan),
+        DisplayState::None => Style::new().fg(Color::DarkGray),
     }
 }
 
-fn status_style(status: &str) -> Style {
-    match status {
-        "up" => Style::new().fg(Color::Green),
-        "degraded" => Style::new().fg(Color::Yellow),
-        "down" => Style::new().fg(Color::Red),
-        _ => Style::new().fg(Color::DarkGray),
+/// The header's badge. The summary's `overall` folds the raw statuses; when
+/// every monitor that is not up is inside a maintenance window, the page
+/// says maintenance and so does this.
+pub(super) fn header_badge(summary: &super::fetch::Summary) -> (String, Style) {
+    let troubled = summary
+        .monitors
+        .iter()
+        .any(|monitor| matches!(monitor.shown(), DisplayState::Down | DisplayState::Degraded));
+    let maintained = summary
+        .monitors
+        .iter()
+        .any(|monitor| monitor.shown() == DisplayState::Maint);
+    if summary.overall != "up" && !troubled && maintained {
+        (
+            DisplayState::Maint.word().to_owned(),
+            Style::new().fg(Color::Black).bg(Color::Cyan),
+        )
+    } else {
+        (
+            summary.overall_label.clone(),
+            overall_style(&summary.overall),
+        )
     }
 }
 

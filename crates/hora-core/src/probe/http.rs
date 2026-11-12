@@ -363,23 +363,16 @@ fn request_failure(spec: &HttpSpec, err: &reqwest::Error) -> Outcome {
 /// refused / reset connection - found by walking the error chain. rustls and
 /// io errors never embed the request URL.
 fn transport_cause(err: &reqwest::Error) -> Option<String> {
-    let mut source = std::error::Error::source(err);
-    while let Some(current) = source {
-        if let Some(tls) = tls_error(current) {
+    super::local::causes(err).skip(1).find_map(|cause| {
+        if let Some(tls) = cause.downcast_ref::<tokio_rustls::rustls::Error>() {
             return Some(format!("TLS {tls}"));
         }
-        if let Some(io) = current.downcast_ref::<std::io::Error>() {
-            match io.kind() {
-                std::io::ErrorKind::ConnectionRefused => {
-                    return Some("connection refused".to_owned());
-                }
-                std::io::ErrorKind::ConnectionReset => return Some("connection reset".to_owned()),
-                _ => {}
-            }
+        match cause.downcast_ref::<std::io::Error>()?.kind() {
+            std::io::ErrorKind::ConnectionRefused => Some("connection refused".to_owned()),
+            std::io::ErrorKind::ConnectionReset => Some("connection reset".to_owned()),
+            _ => None,
         }
-        source = current.source();
-    }
-    None
+    })
 }
 
 /// The failure of the proxy itself, when that is what broke the request: an
@@ -389,31 +382,15 @@ fn transport_cause(err: &reqwest::Error) -> Option<String> {
 /// a private type), so they are recognised by their stable `Display`
 /// prefixes; neither embeds the request URL.
 fn proxy_failure(err: &reqwest::Error) -> Option<String> {
-    let mut source = std::error::Error::source(err);
     let mut socks = false;
-    while let Some(current) = source {
-        let text = current.to_string();
+    for cause in super::local::causes(err).skip(1) {
+        let text = cause.to_string();
         if text.starts_with("tunnel error: ") || text.starts_with("SOCKS error: ") {
             return Some(format!("proxy failed: {text}"));
         }
         socks |= text.starts_with("error connecting to socks proxy");
-        source = current.source();
     }
     socks.then(|| "proxy failed: could not connect through the SOCKS proxy".to_owned())
-}
-
-/// The rustls error behind `err`, looking through the `io::Error` wrappers
-/// hyper-rustls nests it in (`io::Error::source` skips the wrapped error
-/// itself, so the chain alone never reaches it).
-fn tls_error<'a>(
-    mut err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a tokio_rustls::rustls::Error> {
-    loop {
-        if let Some(tls) = err.downcast_ref::<tokio_rustls::rustls::Error>() {
-            return Some(tls);
-        }
-        err = err.downcast_ref::<std::io::Error>()?.get_ref()?;
-    }
 }
 
 /// A concise, URL-free description of a request error. The raw error embeds the

@@ -435,7 +435,7 @@ async fn an_oversized_announcement_changes_nothing_and_the_heartbeat_counts() {
     // the heartbeat either.
     let padded = format!(
         r#"{{"maintenance":[],"padding":"{}"}}"#,
-        "x".repeat(70 * 1024)
+        "x".repeat(hora_core::planned::MAX_ANNOUNCEMENT_BYTES)
     );
     let res = app.oneshot(heartbeat(&padded)).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);

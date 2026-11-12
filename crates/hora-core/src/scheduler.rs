@@ -748,7 +748,14 @@ fn alert_settings(config: &watch::Receiver<Arc<Config>>, monitor_id: &str) -> (u
 /// a monitor and for a watched peer (by its listen id).
 pub(crate) async fn muted(store: &Store, config: &watch::Receiver<Arc<Config>>, id: &str) -> bool {
     let snapshot = config.borrow().clone();
-    crate::planned::in_maintenance(store, &snapshot, id, chrono::Utc::now()).await
+    muted_under(store, &snapshot, id).await
+}
+
+/// [`muted`] against a config already in hand: the one answer every alert
+/// asks for - a down, a certificate or a domain about to expire, a new
+/// release - so that a silence mutes whatever a maintenance window does.
+pub(crate) async fn muted_under(store: &Store, config: &Config, id: &str) -> bool {
+    crate::planned::in_maintenance(store, config, id, chrono::Utc::now()).await
         || silenced(store, id).await
 }
 

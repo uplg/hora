@@ -227,25 +227,17 @@ pub(crate) fn span(month: &str) -> String {
     format!("1 to {last} {}", first.format("%B %Y"))
 }
 
-/// A report day's class in the strip, by the status bar's rule (see
-/// `summary::status::day_cell`): slow, or briefly down, stays amber; red
-/// once the day was mostly an outage. A planned window turns a day that
-/// was not an outage into maintenance.
+/// A report day's class in the strip, by the status bar's rule
+/// (`summary::bar_class`): slow, or briefly down, stays amber; red once the
+/// day was mostly an outage. A planned window turns a day that was not an
+/// outage into maintenance.
 fn day_class(day: DayTally, maintenance: bool) -> u8 {
-    let total = day.up + day.down + day.degraded;
-    if total == 0 {
-        return b'n';
-    }
-    let permille = (day.up + day.degraded).saturating_mul(1000) / total;
-    if permille < crate::summary::DAY_OUTAGE_BELOW_PERMILLE {
-        b'x'
-    } else if maintenance {
-        b'm'
-    } else if day.down == 0 && day.degraded == 0 {
-        b'u'
-    } else {
-        b'd'
-    }
+    let state = crate::summary::day_state(day.up, day.down, day.degraded);
+    crate::summary::bar_class(
+        state.map_or("empty", |(state, _)| state),
+        maintenance,
+        false,
+    )
 }
 
 /// How many days `month` (`2026-05`) has; 31 when it does not parse.

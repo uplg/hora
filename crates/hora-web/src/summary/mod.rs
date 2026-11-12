@@ -18,7 +18,7 @@ pub(crate) use view::{
 };
 
 use monitor::{MonitorData, build_groups, build_monitor_view};
-pub(crate) use status::{BudgetState, CertState, DAY_OUTAGE_BELOW_PERMILLE};
+pub(crate) use status::{BudgetState, CertState, bar_class, day_state};
 use status::{iso, overall_label, worse};
 
 use std::collections::HashMap;
@@ -189,7 +189,7 @@ pub(crate) async fn build_summary(
 
     // Watched peers form their own section; their state does not roll into the
     // overall badge (it tracks the monitored services, not the surveillance mesh).
-    let peers = build_peers(store, config, i64::from(ctx.alerts.fail_threshold.max(1))).await;
+    let peers = build_peers(store, config, i64::from(config.peer_fail_threshold())).await;
 
     // Banner order: ad-hoc announcements (the fresh operational news) first,
     // then the config-declared ones. A read failure costs the ad-hoc banners
@@ -464,7 +464,7 @@ async fn storage_view(store: &Store) -> Option<StorageView> {
 }
 
 /// How far ahead the page announces a window that has not started.
-const UPCOMING_DAYS: i64 = 7;
+pub(crate) const UPCOMING_DAYS: i64 = 7;
 
 /// Every maintenance window a build needs, in one read: from the oldest day
 /// a bar shows (`since`) to the furthest window the page announces.

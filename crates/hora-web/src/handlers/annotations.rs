@@ -207,12 +207,9 @@ pub(crate) async fn silence(
     )
     .await
     .map_err(|err| match err {
-        SilenceError::InvalidDuration => {
-            AppError::BadRequest("invalid duration (use e.g. 10m, 1h30m; max 7d)")
-        }
-        SilenceError::NoIds => AppError::BadRequest("no monitor ids given"),
-        SilenceError::UnknownId(_) => AppError::NotFound("unknown monitor id"),
+        SilenceError::UnknownId(_) => AppError::NotFound(err.message()),
         SilenceError::Database(err) => AppError::Internal(err.into()),
+        other => AppError::BadRequest(other.message()),
     })?;
     let (monitors, until) = (silenced.ids, silenced.until);
     tracing::info!(monitors = ?monitors, until, "alerts silenced via API");

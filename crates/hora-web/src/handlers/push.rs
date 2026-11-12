@@ -11,7 +11,7 @@ use hora_core::db::{self};
 use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::status::CheckStatus;
 
-use crate::auth::{Viewer, ct_eq, push_token};
+use crate::auth::{Viewer, push_token_is};
 use crate::error::AppError;
 use crate::flood;
 use crate::{AppState, MAX_ALERT_DEDUP_CHARS, MAX_ALERT_TAG_CHARS, MAX_ALERT_TAGS};
@@ -91,7 +91,7 @@ pub(crate) async fn push(
     // explicit `allow_unauthenticated` opens the id - config validation
     // refuses a push id with neither, and this holds even if it did not.
     let authorized = match expected_token {
-        Some(expected) => push_token(&headers).is_some_and(|token| ct_eq(token, expected.as_ref())),
+        Some(expected) => push_token_is(&headers, expected),
         None => open,
     };
     if !authorized {
@@ -124,9 +124,7 @@ pub(crate) async fn push(
     Ok("ok")
 }
 
-/// The largest heartbeat body read for an announcement. A full one (32
-/// windows, each with a 500-character reason) stays well under it.
-const MAX_ANNOUNCEMENT_BYTES: usize = 64 * 1024;
+use hora_core::planned::MAX_ANNOUNCEMENT_BYTES;
 
 /// Apply the maintenance windows a peer's heartbeat announces (see
 /// `hora_core::planned::apply_announcement`, which decides what is accepted
@@ -242,9 +240,7 @@ pub(crate) async fn post_alert(
     // known one, so the endpoint cannot be used to probe private monitor ids.
     let item_token_ok = monitor
         .and_then(|monitor| monitor.push_token.as_ref())
-        .is_some_and(|expected| {
-            push_token(&headers).is_some_and(|token| ct_eq(token, expected.as_ref()))
-        });
+        .is_some_and(|expected| push_token_is(&headers, expected));
     if !item_token_ok && !viewer.is_operator() {
         return Err(AppError::Unauthorized(
             "alerting requires the monitor's push_token (X-Push-Token) or server.auth_token",

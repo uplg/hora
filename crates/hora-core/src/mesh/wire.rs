@@ -11,6 +11,11 @@ use crate::status::MonitorState;
 
 // --- /healthz report ------------------------------------------------------
 
+/// The header carrying a push monitor's, a peer's or a pushed alert's token:
+/// a header, because it stays out of access logs. Sent by the mesh, read by
+/// the web layer.
+pub const PUSH_TOKEN_HEADER: &str = "x-push-token";
+
 /// The body of `/healthz`: this node's own health plus its view of every peer it
 /// watches. `status` is `"ok"` only when the node is fully healthy, so an external
 /// keyword monitor (e.g. `UptimeRobot` matching `"ok"`) detects trouble; the rest of

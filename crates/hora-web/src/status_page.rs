@@ -16,7 +16,7 @@ use hora_core::config::Config;
 
 use crate::display::DisplayState;
 use crate::layout::{count_word, join_and, ms, pct};
-use crate::render::{day_bar, day_class, meter, owl};
+use crate::render::{day_bar, meter, owl};
 use crate::summary::{MonitorView, Summary};
 
 /// Above this many monitors the page uses its scale layout.
@@ -484,7 +484,10 @@ fn next_window(summary: &Summary, now: DateTime<Utc>) -> Option<&crate::summary:
     summary
         .upcoming
         .iter()
-        .filter(|window| window.start > now && window.start <= now + chrono::TimeDelta::days(7))
+        .filter(|window| {
+            window.start > now
+                && window.start <= now + chrono::TimeDelta::days(crate::summary::UPCOMING_DAYS)
+        })
         .min_by_key(|window| window.start)
 }
 
@@ -987,21 +990,16 @@ fn seen_from(monitor: &MonitorView) -> (Vec<Place>, String) {
 /// touched is maintenance unless it still was an outage; maintenance now
 /// marks today.
 fn day_classes(monitor: &MonitorView) -> Vec<u8> {
-    let mut days: Vec<u8> = monitor
+    let last = monitor.bar.len().saturating_sub(1);
+    monitor
         .bar
         .iter()
-        .map(|cell| match day_class(cell.state) {
-            b'u' | b'd' if cell.maint => b'm',
-            class => class,
+        .enumerate()
+        .map(|(index, cell)| {
+            let now = index == last && monitor.maintenance.is_some();
+            crate::summary::bar_class(cell.state, cell.maint, now)
         })
-        .collect();
-    if monitor.maintenance.is_some()
-        && let Some(today) = days.last_mut()
-        && *today == b'u'
-    {
-        *today = b'm';
-    }
-    days
+        .collect()
 }
 
 /// Below this mean availability over a day (per mille), a group's day reads

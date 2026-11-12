@@ -45,18 +45,12 @@ impl Cadence {
                     FailureKind::MissedSchedule,
                     format!(
                         "missed scheduled heartbeat (was due {due_label} + {} grace)",
-                        grace_phrase(*grace_secs)
+                        crate::fmt::period(*grace_secs)
                     ),
                 ))
             }
         }
     }
-}
-
-/// A cron grace as a span: `30 min`, `2 h`, `20 s`, `1 min 30 s` - whole
-/// minutes alone would read "0 min grace" for a 20-second one.
-fn grace_phrase(secs: u64) -> String {
-    crate::fmt::duration(i64::try_from(secs).unwrap_or(i64::MAX))
 }
 
 /// A push monitor's heartbeat expectations, resolved once per task.
@@ -270,11 +264,11 @@ mod tests {
 
     #[test]
     fn the_grace_reads_as_configured() {
-        assert_eq!(grace_phrase(20), "20 s");
-        assert_eq!(grace_phrase(90), "1 min 30 s");
-        assert_eq!(grace_phrase(1_800), "30 min");
-        assert_eq!(grace_phrase(5_400), "1 h 30 min");
-        assert_eq!(grace_phrase(7_200), "2 h");
+        assert_eq!(crate::fmt::period(20), "20 s");
+        assert_eq!(crate::fmt::period(90), "1 min 30 s");
+        assert_eq!(crate::fmt::period(1_800), "30 min");
+        assert_eq!(crate::fmt::period(5_400), "1 h 30 min");
+        assert_eq!(crate::fmt::period(7_200), "2 h");
     }
 
     fn beat(time: i64, status: CheckStatus, error: Option<&str>) -> db::Heartbeat {

@@ -27,11 +27,32 @@ pub enum SilenceError {
     Database(crate::db::Error),
 }
 
+/// What an unparseable or too long duration is answered, wherever one is
+/// asked for (a silence, a maintenance window).
+pub const INVALID_DURATION: &str = "invalid duration (use e.g. 10m, 1h30m; max 7d)";
+
+/// The stored id of a silence (and the selector of a maintenance window)
+/// that covers every monitor.
+pub const ALL: &str = "*";
+
+impl SilenceError {
+    /// The error in words fit for an API answer: fixed, so nothing a caller
+    /// sent is echoed back.
+    #[must_use]
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::InvalidDuration => INVALID_DURATION,
+            Self::NoIds => "no monitor ids given",
+            Self::UnknownId(_) => "unknown monitor id",
+            Self::Database(_) => "recording the silence failed",
+        }
+    }
+}
+
 impl std::fmt::Display for SilenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidDuration => f.write_str("invalid duration (use e.g. 10m, 1h30m; max 7d)"),
-            Self::NoIds => f.write_str("no monitor ids given"),
+            Self::InvalidDuration | Self::NoIds => f.write_str(self.message()),
             Self::UnknownId(id) => write!(f, "unknown monitor id {id:?}"),
             Self::Database(err) => write!(f, "recording the silence failed: {err}"),
         }
@@ -86,8 +107,8 @@ pub async fn apply(
 /// each a configured monitor or watched peer.
 pub(crate) fn resolve_ids(config: &Config, ids: &str) -> Result<Vec<String>, SilenceError> {
     let ids = ids.trim();
-    if ids == "all" || ids == "*" {
-        return Ok(vec!["*".to_owned()]);
+    if ids == "all" || ids == ALL {
+        return Ok(vec![ALL.to_owned()]);
     }
     let ids: Vec<String> = ids
         .split(',')

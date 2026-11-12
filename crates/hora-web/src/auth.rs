@@ -18,9 +18,7 @@ use crate::error::AppError;
 use crate::visibility::Audience;
 use crate::{AppState, ConfiguredIp};
 
-/// The header carrying a push monitor's, a peer's or a pushed alert's item
-/// token. A header, because it stays out of access logs.
-pub(crate) const PUSH_TOKEN_HEADER: &str = "x-push-token";
+pub(crate) use hora_core::mesh::wire::PUSH_TOKEN_HEADER;
 
 /// The `Authorization: Bearer <token>` credential, if any.
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -57,6 +55,11 @@ pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
 
 /// Whether `provided` matches the optional `expected` secret. No expected
 /// secret never matches.
+/// Whether the request's `X-Push-Token` is `expected` (constant-time).
+pub(crate) fn push_token_is(headers: &HeaderMap, expected: &impl AsRef<str>) -> bool {
+    matches(push_token(headers), Some(expected))
+}
+
 fn matches(provided: Option<&str>, expected: Option<&impl AsRef<str>>) -> bool {
     match (provided, expected) {
         (Some(provided), Some(expected)) => ct_eq(provided, expected.as_ref()),

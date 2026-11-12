@@ -348,8 +348,14 @@ pub fn derive_status_by_threshold(recent: &[Latest], threshold: i64) -> MonitorS
         CheckStatus::Degraded => MonitorState::Degraded,
         CheckStatus::Down => {
             let needed = usize::try_from(threshold).unwrap_or(usize::MAX);
+            // Only the `threshold` newest count: a caller that read more
+            // rows than that must not have an older success undo a
+            // confirmed down.
             if recent.len() >= needed
-                && recent.iter().all(|check| check.status == CheckStatus::Down)
+                && recent
+                    .iter()
+                    .take(needed)
+                    .all(|check| check.status == CheckStatus::Down)
             {
                 MonitorState::Down
             } else {

@@ -42,6 +42,7 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// concurrently, so this is one slow receiver's worth plus slack): a dead
 /// receiver can never delay the dead-man cadence to the others.
 const HEARTBEAT_ROUND_DEADLINE: Duration = Duration::from_secs(12);
+const _: () = assert!(HEARTBEAT_ROUND_DEADLINE.as_secs() > HEARTBEAT_TIMEOUT.as_secs());
 
 /// A witness `/healthz` report is a small JSON object; cap the body so a
 /// compromised peer can't stream hundreds of MB into memory within the timeout.
@@ -281,7 +282,7 @@ async fn send_heartbeat(
         request = request.json(body);
     }
     if let Some(token) = token {
-        request = request.header("x-push-token", token);
+        request = request.header(crate::mesh::wire::PUSH_TOKEN_HEADER, token);
     }
     match request.send().await {
         Ok(response) if response.status().is_success() => {}

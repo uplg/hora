@@ -308,6 +308,4 @@ where
 pub(crate) fn default_timeout() -> u64 {
     10
 }
-fn default_true() -> bool {
-    true
-}
+use super::default_true;

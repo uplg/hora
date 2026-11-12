@@ -287,7 +287,7 @@ async fn deliver(channel: &Channel, event: Event<'_>) -> anyhow::Result<()> {
 /// `send_retrying` call already retries 3 times internally, so for the HTTP
 /// channels this represents 9 failed attempts — enough to ride through a
 /// transient blip. (E-mail does not retry: 3 failed SMTP sends.)
-const DEFAULT_CHANNEL_FAIL_THRESHOLD: u32 = 3;
+pub const DEFAULT_CHANNEL_FAIL_THRESHOLD: u32 = 3;
 
 impl Dispatcher {
     #[must_use]

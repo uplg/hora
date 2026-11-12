@@ -14,7 +14,7 @@ use hora_core::db::{EventMarker, Incident};
 
 use crate::display::DisplayState;
 use crate::layout::{Chrome, join_and, minutes, ms, pct};
-use crate::render::{Chart, day_class, meter, owls, sparkline};
+use crate::render::{Chart, meter, owls, sparkline};
 use crate::summary::{BudgetState, CertState, MonitorView};
 
 #[derive(Template)]
@@ -124,7 +124,7 @@ pub(crate) fn build(
     let now = Utc::now().timestamp();
     let state = m.display_state();
     let places_count = 1 + m.vantages.len();
-    let every = humanize_secs(monitor.interval_secs);
+    let every = hora_core::fmt::period(monitor.interval_secs);
     let checked = if monitor.kind() == Kind::Push {
         format!("expects a heartbeat every {every}")
     } else if places_count > 1 {
@@ -432,13 +432,8 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
         .iter()
         .enumerate()
         .map(|(index, cell)| {
-            let mut class = day_class(cell.state);
-            // A planned window marks the day unless it still was an outage.
-            if (cell.maint && matches!(class, b'u' | b'd'))
-                || (index == last && m.maintenance.is_some() && class == b'u')
-            {
-                class = b'm';
-            }
+            let now = index == last && m.maintenance.is_some();
+            let class = crate::summary::bar_class(cell.state, cell.maint, now);
             // `day_class` gives these five letters only; anything else
             // would be a day without data.
             let state = match class {
@@ -597,7 +592,7 @@ fn details(
     let mut probe = format!(
         "{} every {}",
         monitor.kind().as_str(),
-        humanize_secs(monitor.interval_secs)
+        hora_core::fmt::period(monitor.interval_secs)
     );
     if show_target && !monitor.target().is_empty() {
         probe = format!(
@@ -659,23 +654,17 @@ fn details(
     rows
 }
 
-/// A configured period (interval, timeout) as a span: `30 s`, `5 min`,
-/// `1 min 30 s`, `1 h`, `1 d`.
-fn humanize_secs(secs: u64) -> String {
-    hora_core::fmt::duration(i64::try_from(secs).unwrap_or(i64::MAX))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn intervals_read_like_a_person_says_them() {
-        assert_eq!(humanize_secs(30), "30 s");
-        assert_eq!(humanize_secs(300), "5 min");
-        assert_eq!(humanize_secs(90), "1 min 30 s");
-        assert_eq!(humanize_secs(3600), "1 h");
-        assert_eq!(humanize_secs(86_400), "1 d");
+        assert_eq!(hora_core::fmt::period(30), "30 s");
+        assert_eq!(hora_core::fmt::period(300), "5 min");
+        assert_eq!(hora_core::fmt::period(90), "1 min 30 s");
+        assert_eq!(hora_core::fmt::period(3600), "1 h");
+        assert_eq!(hora_core::fmt::period(86_400), "1 d");
     }
 
     /// The last day reads in hours and the last hour in minutes: truncated to

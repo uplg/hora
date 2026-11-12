@@ -214,7 +214,7 @@ pub(crate) async fn monitor_page(
             .heatmaps
             .get_or_build(&key, config, async {
                 let now = Utc::now().timestamp();
-                let since = (now / 86_400 - (crate::heatmap::HEATMAP_DAYS - 1)) * 86_400;
+                let since = crate::heatmap::since(now);
                 let cells = db::latency_hourly(&state.store, &id, since).await?;
                 Ok::<_, hora_core::db::Error>(crate::heatmap::render(
                     &cells,

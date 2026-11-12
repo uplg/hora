@@ -382,6 +382,30 @@ async fn fetch_errors_carry_the_http_status() {
     assert!(refused.contains("needs a token"));
 }
 
+/// A monitor that is down inside a maintenance window is in maintenance,
+/// here as on the status page: not a trouble, and not a red header when it
+/// is all there is.
+#[test]
+fn a_down_inside_maintenance_reads_as_maintenance() {
+    use hora_core::display::DisplayState;
+    let summary = |other: &str| -> Summary {
+        serde_json::from_str(&format!(
+            r#"{{"title":"t","overall":"down","overall_label":"Major outage","monitors":[
+                {{"id":"web","name":"Web","status":"down","maintenance":"kernel reboot"}},
+                {{"id":"api","name":"API","status":"{other}"}}]}}"#
+        ))
+        .unwrap()
+    };
+    let planned = summary("up");
+    assert_eq!(planned.monitors[0].shown(), DisplayState::Maint);
+    assert_eq!(planned.monitors[1].shown(), DisplayState::Up);
+    assert_eq!(super::ui::header_badge(&planned).0, "Maintenance");
+    // Something else is really down: the outage is the news.
+    let outage = summary("down");
+    assert_eq!(outage.monitors[1].shown(), DisplayState::Down);
+    assert_eq!(super::ui::header_badge(&outage).0, "Major outage");
+}
+
 #[test]
 fn the_compact_hint_shows_past_a_fifth_of_free_pages() {
     use super::fetch::Storage;

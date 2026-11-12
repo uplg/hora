@@ -43,27 +43,20 @@ pub fn duration(seconds: i64) -> String {
     out
 }
 
+/// [`duration`] for a configured period, which the config holds unsigned
+/// (an interval, a timeout, a grace): `30 s`, `5 min`, `1 min 30 s`, `1 d`.
+#[must_use]
+pub fn period(seconds: u64) -> String {
+    duration(i64::try_from(seconds).unwrap_or(i64::MAX))
+}
+
 /// `"2 d 3 h"`, `"6 h"`, `"45 min"`, `"30 s"`: a coarse span, for estimates
 /// and "failing for ..." phrasing where the exact figure is noise. One unit
 /// under two days, days and hours from there (`"2 d"` on the hour).
 ///
-/// `hora_notify::human_duration` is its twin (hora-notify sits below this
-/// crate); `the_notify_twin_writes_the_same_spans` holds the two together.
-#[must_use]
-pub fn elapsed(seconds: u64) -> String {
-    if seconds >= 2 * 86_400 {
-        match (seconds % 86_400) / 3600 {
-            0 => format!("{} d", seconds / 86_400),
-            hours => format!("{} d {hours} h", seconds / 86_400),
-        }
-    } else if seconds >= 3600 {
-        format!("{} h", seconds / 3600)
-    } else if seconds >= 60 {
-        format!("{} min", seconds / 60)
-    } else {
-        format!("{seconds} s")
-    }
-}
+/// It is the notifications' own wording (hora-notify sits below this
+/// crate), under the name the rest of the code reads.
+pub use hora_notify::human_duration as elapsed;
 
 /// `"2026-05-14 08:03:12 UTC"`. An out-of-range timestamp prints as the raw
 /// number rather than vanishing.
@@ -106,12 +99,35 @@ pub fn pct_bp(basis_points: i64) -> String {
     format!("{sign}{}.{:02} %", magnitude / 100, magnitude % 100)
 }
 
-/// `"99.9 %"` from permille (0..=1000, clamped): the one-decimal uptime the
-/// status page, the badges and `hora top` show.
+/// `"99.9 %"` from permille (clamped to 0..=1000), and `"100 %"` for all
+/// of it: the one-decimal uptime of the status page, the badges and
+/// `hora top`.
 #[must_use]
 pub fn permille(permille: i64) -> String {
     let permille = permille.clamp(0, 1000);
-    format!("{}.{} %", permille / 10, permille % 10)
+    if permille == 1000 {
+        "100 %".to_owned()
+    } else {
+        format!("{}.{} %", permille / 10, permille % 10)
+    }
+}
+
+/// The share `part / total` in permille, rounded down: an uptime never
+/// reads better than it was. `None` without data.
+#[must_use]
+pub fn permille_of(part: i64, total: i64) -> Option<i64> {
+    (total > 0).then(|| part.saturating_mul(1000) / total)
+}
+
+/// A latency in the unit a person reads: `64 ms`, `1.8 s`.
+#[must_use]
+pub fn latency(ms: i64) -> String {
+    if ms >= 1000 {
+        let tenths = (ms + 50) / 100;
+        format!("{}.{} s", tenths / 10, tenths % 10)
+    } else {
+        format!("{ms} ms")
+    }
 }
 
 /// `"99.97 %"` for `part / total`, or `"no checks"` when there is no data.
@@ -264,20 +280,6 @@ mod tests {
         }
     }
 
-    /// hora-notify cannot call [`elapsed`] (it sits below this crate) and
-    /// keeps a copy: a span must read the same in a notification as in
-    /// `hora top`, so the two are compared here, on the table and on a sweep
-    /// across every boundary.
-    #[test]
-    fn the_notify_twin_writes_the_same_spans() {
-        for (seconds, written) in COARSE {
-            assert_eq!(hora_notify::human_duration(seconds), written, "{seconds} s");
-        }
-        for seconds in (0..400_000).step_by(7).chain([u64::MAX]) {
-            assert_eq!(hora_notify::human_duration(seconds), elapsed(seconds));
-        }
-    }
-
     #[test]
     fn timestamps_are_utc() {
         assert_eq!(utc(1_700_000_540), "2023-11-14 22:22:20 UTC");
@@ -298,10 +300,10 @@ mod tests {
         assert_eq!(pct_bp(-150), "-1.50 %");
         assert_eq!(pct(0, 0), "no checks");
         assert_eq!(pct(9997, 10_000), "99.97 %");
-        assert_eq!(permille(1000), "100.0 %");
+        assert_eq!(permille(1000), "100 %");
         assert_eq!(permille(999), "99.9 %");
         assert_eq!(permille(0), "0.0 %");
-        assert_eq!(permille(1200), "100.0 %");
+        assert_eq!(permille(1200), "100 %");
     }
 
     #[test]

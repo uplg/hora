@@ -77,6 +77,17 @@ pub enum MonitorState {
 }
 
 impl MonitorState {
+    /// The state [`Self::as_str`] names; anything else is `Unknown`.
+    #[must_use]
+    pub fn from_word(word: &str) -> Self {
+        match word {
+            "up" => Self::Up,
+            "degraded" => Self::Degraded,
+            "down" => Self::Down,
+            _ => Self::Unknown,
+        }
+    }
+
     /// The word the page, the API and the badges use.
     #[must_use]
     pub fn as_str(self) -> &'static str {

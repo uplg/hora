@@ -196,7 +196,7 @@ pub async fn fetch_peer_monitors(
 ) -> Option<PeerMonitors> {
     let mut builder = client.get(url).query(&[("from", from)]);
     if let Some(token) = token {
-        builder = builder.header("x-push-token", token);
+        builder = builder.header(crate::mesh::wire::PUSH_TOKEN_HEADER, token);
     }
     crate::http::fetch_json_capped(builder, MAX_RESPONSE_BYTES, POLL_TIMEOUT).await
 }

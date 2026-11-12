@@ -175,28 +175,40 @@ pub(crate) fn build_bar(daily: &[DayRow], now: DateTime<Utc>, days: u16) -> Vec<
 /// was a real outage (majority down).
 pub(crate) const DAY_OUTAGE_BELOW_PERMILLE: i64 = 900; // < 90% availability over the day
 
-pub(crate) fn day_cell(date: String, row: &DayRow) -> DayCell {
-    let total = row.up + row.down + row.degraded;
-    if total == 0 {
-        return DayCell {
-            date,
-            state: "empty",
-            permille: None,
-            maint: false,
-        };
-    }
-    let permille = (row.up + row.degraded).saturating_mul(1000) / total;
-    let state = if row.down == 0 && row.degraded == 0 {
+/// A day's state from its counts, with its availability in permille: up
+/// without a failure, slow as long as it was mostly up, down below
+/// [`DAY_OUTAGE_BELOW_PERMILLE`]. `None` for a day without checks.
+pub(crate) fn day_state(up: i64, down: i64, degraded: i64) -> Option<(&'static str, i64)> {
+    let permille = hora_core::fmt::permille_of(up + degraded, up + down + degraded)?;
+    let state = if down == 0 && degraded == 0 {
         "up"
     } else if permille >= DAY_OUTAGE_BELOW_PERMILLE {
         "degraded"
     } else {
         "down"
     };
+    Some((state, permille))
+}
+
+/// A day's class in a bar (see `render::day_class`), maintenance applied:
+/// a day a planned window touched (`maint`) is maintenance unless it still
+/// was an outage, and a window open now (`maintenance_now`, for today's
+/// cell) marks a day that is up so far. The one rule of the status page's
+/// bar, the monitor page's and the monthly report's strip.
+pub(crate) fn bar_class(state: &str, maint: bool, maintenance_now: bool) -> u8 {
+    match crate::render::day_class(state) {
+        b'u' | b'd' if maint => b'm',
+        b'u' if maintenance_now => b'm',
+        class => class,
+    }
+}
+
+pub(crate) fn day_cell(date: String, row: &DayRow) -> DayCell {
+    let state = day_state(row.up, row.down, row.degraded);
     DayCell {
         date,
-        state,
-        permille: Some(permille),
+        state: state.map_or("empty", |(state, _)| state),
+        permille: state.map(|(_, permille)| permille),
         maint: false,
     }
 }

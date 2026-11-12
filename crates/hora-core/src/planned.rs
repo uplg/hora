@@ -48,10 +48,25 @@ pub const MAX_ANNOUNCED_WINDOWS: usize = 32;
 /// enough - would keep its host silent for good.
 pub const PEER_BUDGET_WINDOWS: i64 = 4;
 
+/// The largest heartbeat body read for an announcement: what a full one
+/// can weigh - [`MAX_ANNOUNCED_WINDOWS`] windows, each with a reason of
+/// [`MAX_SILENCE_REASON_CHARS`] characters of up to four bytes, plus its
+/// other fields - so that a legitimate announcement is never refused for
+/// its size.
+pub const MAX_ANNOUNCEMENT_BYTES: usize =
+    MAX_ANNOUNCED_WINDOWS * (MAX_SILENCE_REASON_CHARS * 4 + 256) + 64;
+
 /// The origin of a window planned on this node, as stored.
 const ORIGIN_API: &str = "api";
 /// The prefix of the origin of a window a peer announced (`peer:<peer id>`).
 const ORIGIN_PEER_PREFIX: &str = "peer:";
+
+/// The id of the peer that announced a window with this stored `origin`;
+/// `None` for one planned on this node.
+#[must_use]
+pub fn announcing_peer(origin: &str) -> Option<&str> {
+    origin.strip_prefix(ORIGIN_PEER_PREFIX)
+}
 
 /// What a stored window covers, as it is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +85,7 @@ impl Selector {
     /// From the stored text; `None` for a row this version cannot read.
     #[must_use]
     pub fn parse(stored: &str) -> Option<Self> {
-        if stored == "*" {
+        if stored == crate::silence::ALL {
             Some(Self::All)
         } else if stored == "peer" {
             Some(Self::Peer)
@@ -87,7 +102,7 @@ impl Selector {
 impl std::fmt::Display for Selector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::All => f.write_str("*"),
+            Self::All => f.write_str(crate::silence::ALL),
             Self::Peer => f.write_str("peer"),
             Self::Ids(ids) => write!(f, "ids:{}", ids.join(",")),
             Self::Host(host) => write!(f, "host:{host}"),
@@ -391,7 +406,7 @@ impl PlanError {
                 "invalid starts_at (RFC 3339 such as 2026-11-13T05:00:00Z, or unix seconds; \
                  at most a year ahead)"
             }
-            Self::InvalidDuration => "invalid duration (use e.g. 10m, 1h30m; max 7d)",
+            Self::InvalidDuration => crate::silence::INVALID_DURATION,
             Self::AlreadyOver => "the window would already be over",
             Self::NoReason => "reason must not be empty",
             Self::NoIds => "no monitor ids given",
@@ -461,7 +476,7 @@ pub async fn plan(
 ) -> Result<Planned, PlanError> {
     let selector = match (plan.monitors, plan.host.map(str::trim)) {
         (Some(ids), None) => match crate::silence::resolve_ids(config, ids) {
-            Ok(ids) if ids == ["*"] => Selector::All,
+            Ok(ids) if ids == [crate::silence::ALL] => Selector::All,
             Ok(mut ids) => {
                 // One spelling per set of ids, so `web,api` repeats `api,web`.
                 ids.sort_unstable();
