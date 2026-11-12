@@ -16,7 +16,7 @@ use crate::display::DisplayState;
 #[derive(Serialize, ToSchema)]
 pub(crate) struct Summary {
     pub(crate) title: String,
-    pub(crate) overall: MonitorState,
+    pub(crate) overall: super::Overall,
     pub(crate) overall_label: &'static str,
     pub(crate) generated_at: String,
     #[serde(skip)]

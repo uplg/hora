@@ -199,6 +199,11 @@ roll out:
   `accept_maintenance_secs` of muted time in any 24 hours. Nothing to do
   for a host that reboots a few times a day; a peer that announces windows
   back to back is cut, with a warning in the log.
+- **`/api/summary`'s `overall` has a fifth value, `maintenance`**, and
+  follows the status page: a monitor down inside a planned window no
+  longer makes it `down`. Uptime figures read `100 %` (not `100.0 %`) and
+  a latency over a second reads `1.8 s` in the text view, `hora top` and
+  `hora probe`: adjust a script that parses them.
 - **Request bodies are limited to 64 KiB** on the JSON endpoints (it was
   2 MiB): a pushed alert with a larger body gets a 413.
 - **`/healthz` has a new field, `probes_ok`**, and a new reason to answer

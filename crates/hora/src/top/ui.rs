@@ -295,9 +295,9 @@ fn status_style(state: DisplayState) -> Style {
     }
 }
 
-/// The header's badge. The summary's `overall` folds the raw statuses; when
-/// every monitor that is not up is inside a maintenance window, the page
-/// says maintenance and so does this.
+/// The header's badge. A daemon older than 0.12 folds the raw statuses
+/// into `overall`: when every monitor that is not up is inside a
+/// maintenance window, the page says maintenance and so does this.
 pub(super) fn header_badge(summary: &super::fetch::Summary) -> (String, Style) {
     let troubled = summary
         .monitors
@@ -326,6 +326,7 @@ pub(super) fn overall_style(overall: &str) -> Style {
         "up" => Style::new().fg(Color::Black).bg(Color::Green),
         "degraded" => Style::new().fg(Color::Black).bg(Color::Yellow),
         "down" => Style::new().fg(Color::White).bg(Color::Red),
+        "maintenance" => Style::new().fg(Color::Black).bg(Color::Cyan),
         _ => Style::new().fg(Color::Black).bg(Color::DarkGray),
     }
 }

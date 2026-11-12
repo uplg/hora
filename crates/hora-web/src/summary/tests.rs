@@ -18,15 +18,6 @@ fn check(status: CheckStatus) -> Latest {
     }
 }
 #[test]
-fn worse_picks_higher_severity() {
-    use MonitorState::{Degraded, Down, Unknown, Up};
-    assert_eq!(worse(Up, Degraded), Degraded);
-    assert_eq!(worse(Down, Degraded), Down);
-    assert_eq!(worse(Up, Unknown), Unknown);
-    assert_eq!(worse(Degraded, Up), Degraded);
-}
-
-#[test]
 fn derive_status_confirms_down_only_after_threshold() {
     let down = CheckStatus::Down;
     assert_eq!(
@@ -259,7 +250,7 @@ async fn derived_views_share_unchanged_cards_and_redact_the_rest() {
     assert!(std::ptr::eq(theirs.bar.as_ptr(), ours.bar.as_ptr()));
     assert_eq!(public.groups.len(), 1);
     assert_eq!(public.groups[0].ids, ["ok", "bad"]);
-    assert_eq!(public.overall, MonitorState::Degraded);
+    assert_eq!(public.overall, Overall::Degraded);
 }
 
 #[tokio::test]

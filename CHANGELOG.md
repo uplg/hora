@@ -289,6 +289,20 @@ database serve five times as many visitors.
 
 ### Changed
 
+- **`/api/summary` reads a page as the page does.** `overall` folded the
+  raw statuses: a monitor down inside a planned maintenance window made it
+  `down` ("Major outage") while the status page said maintenance, and one
+  monitor without data yet made it `unknown` while the page said all was
+  well. It is now the page's own rule, with a new value: `maintenance`
+  ("Planned maintenance") when nothing is slow or down outside a window.
+  A down seen from this node only counts as up, as on the page. A script
+  that matches `overall` should expect the fifth value.
+- **One wording for the same thing.** Uptime is `100 %`, not `100.0 %` on
+  some pages; a latency over a second is `1.8 s` in `curl`, `hora top` and
+  `hora probe` as on the page (it was `1800 ms`); `hora top` shows a
+  monitor inside a maintenance window as in maintenance. A silence now
+  mutes a monitor's certificate, domain and release alerts too, as a
+  maintenance window always did.
 - **A channel disabled by an empty secret says so.** An unset `${VAR}`
   expands to nothing, and a channel left with an empty token or URL is left
   out while the others keep working: that has not changed, since the config

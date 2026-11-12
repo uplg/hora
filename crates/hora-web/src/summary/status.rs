@@ -7,9 +7,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use hora_core::SECONDS_PER_DAY;
 use hora_core::db::DayRow;
-use hora_core::status::MonitorState;
 
-use super::view::DayCell;
+use super::view::{DayCell, MonitorView};
+use crate::display::DisplayState;
 
 /// Whether the measured p95 meets the configured latency objective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,31 +75,41 @@ impl CertState {
     }
 }
 
-pub(crate) fn worse(current: MonitorState, candidate: MonitorState) -> MonitorState {
-    if rank(candidate) > rank(current) {
-        candidate
-    } else {
-        current
-    }
+/// The state of a whole view, as the API names it. It is the page's own
+/// reading ([`DisplayState::overall`]): a monitor inside a planned
+/// maintenance window counts as maintenance, not as the outage its checks
+/// report, and a down seen from this node only counts as up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Overall {
+    Up,
+    Degraded,
+    Down,
+    /// Nothing is slow or down outside a planned maintenance window.
+    Maintenance,
+    /// No monitor has data yet.
+    Unknown,
 }
 
-/// How bad a state is for the overall badge: no data ranks above up (the
-/// page cannot claim all is well) and below any trouble.
-pub(crate) fn rank(status: MonitorState) -> u8 {
-    match status {
-        MonitorState::Up => 0,
-        MonitorState::Unknown => 1,
-        MonitorState::Degraded => 2,
-        MonitorState::Down => 3,
+impl Overall {
+    pub(crate) fn of<'a>(monitors: impl IntoIterator<Item = &'a MonitorView>) -> Self {
+        match DisplayState::overall(monitors.into_iter().map(MonitorView::display_state)) {
+            DisplayState::Up => Self::Up,
+            DisplayState::Degraded => Self::Degraded,
+            DisplayState::Down => Self::Down,
+            DisplayState::Maint => Self::Maintenance,
+            DisplayState::None => Self::Unknown,
+        }
     }
-}
 
-pub(crate) fn overall_label(status: MonitorState) -> &'static str {
-    match status {
-        MonitorState::Up => "All systems operational",
-        MonitorState::Degraded => "Degraded performance",
-        MonitorState::Down => "Major outage",
-        MonitorState::Unknown => "Awaiting data",
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Up => "All systems operational",
+            Self::Degraded => "Degraded performance",
+            Self::Down => "Major outage",
+            Self::Maintenance => "Planned maintenance",
+            Self::Unknown => "Awaiting data",
+        }
     }
 }
 

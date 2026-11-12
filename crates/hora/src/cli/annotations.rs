@@ -206,11 +206,8 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
                     }
                 };
             let until = silenced.until;
-            let target = if silenced.ids == [hora_core::silence::ALL] {
-                "all monitors".to_owned()
-            } else {
-                silenced.ids.join(", ")
-            };
+            let all = silenced.ids == [hora_core::silence::ALL];
+            let target = hora_core::planned::covered(all, &silenced.ids);
             println!("Silenced {target} until {}.", fmt::utc(until));
         }
         _ => return Err(usage(SILENCE_USAGE)),
@@ -408,11 +405,8 @@ fn covered(
         .as_ref()
         .map(|host| format!("Host {host}: "))
         .unwrap_or_default();
-    if resolved.all {
-        format!("{host}covers all monitors.")
-    } else if resolved.monitors.is_empty() {
-        format!("{host}covers nothing monitored from this node.")
-    } else {
-        format!("{host}covers {}.", resolved.monitors.join(", "))
-    }
+    format!(
+        "{host}covers {}.",
+        hora_core::planned::covered(resolved.all, &resolved.monitors)
+    )
 }

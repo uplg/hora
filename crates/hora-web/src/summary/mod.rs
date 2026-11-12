@@ -18,8 +18,9 @@ pub(crate) use view::{
 };
 
 use monitor::{MonitorData, build_groups, build_monitor_view};
+pub(crate) use status::Overall;
+use status::iso;
 pub(crate) use status::{BudgetState, CertState, bar_class, day_state};
-use status::{iso, overall_label, worse};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -183,9 +184,7 @@ pub(crate) async fn build_summary(
 
     let monitors = cards(&monitors, &ctx, &data, config, &schedule, &visibility).await;
 
-    let overall = monitors
-        .iter()
-        .fold(MonitorState::Up, |worst, m| worse(worst, m.status));
+    let overall = Overall::of(monitors.iter().map(AsRef::as_ref));
 
     // Watched peers form their own section; their state does not roll into the
     // overall badge (it tracks the monitored services, not the surveillance mesh).
@@ -204,7 +203,7 @@ pub(crate) async fn build_summary(
     let summary = Summary {
         title: config.page.title.clone(),
         overall,
-        overall_label: overall_label(overall),
+        overall_label: overall.label(),
         generated_at: now.to_rfc3339(),
         updated_utc: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
         incidents,
@@ -392,16 +391,14 @@ pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>
             Some(derive_view(view, monitor, built, config, visibility))
         })
         .collect();
-    let overall = monitors
-        .iter()
-        .fold(MonitorState::Up, |worst, m| worse(worst, m.status));
+    let overall = Overall::of(monitors.iter().map(AsRef::as_ref));
     let groups = build_groups(&monitors, &config.monitors);
     let (maintenances, upcoming) =
         build_maintenances(&built.schedule, config, Utc::now(), visibility);
     let summary = Summary {
         title: operator.title.clone(),
         overall,
-        overall_label: overall_label(overall),
+        overall_label: overall.label(),
         generated_at: operator.generated_at.clone(),
         updated_utc: operator.updated_utc.clone(),
         incidents: operator.incidents.clone(),
@@ -579,16 +576,8 @@ fn maintenance_view(
 
 /// What a window covers, in words: "all monitors", or the monitors' names.
 fn covered_names(all: bool, ids: &[String], config: &Config) -> String {
-    if all {
-        "all monitors".to_owned()
-    } else if ids.is_empty() {
-        "no monitor of this node".to_owned()
-    } else {
-        ids.iter()
-            .map(|id| config.monitor_name(id))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
+    let names: Vec<&str> = ids.iter().map(|id| config.monitor_name(id)).collect();
+    hora_core::planned::covered(all, &names)
 }
 
 /// Cut a page's windows down to a group's: the ones touching one of its
@@ -657,9 +646,7 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
         return None;
     }
 
-    let overall = monitors.iter().fold(MonitorState::Up, |worst, monitor| {
-        worse(worst, monitor.status)
-    });
+    let overall = Overall::of(monitors.iter().map(AsRef::as_ref));
     let ids: std::collections::HashSet<&str> =
         monitors.iter().map(|monitor| monitor.id.as_str()).collect();
     let maintenances =
@@ -669,7 +656,7 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
     Some(Summary {
         title: format!("{} · {group}", config.page.title),
         overall,
-        overall_label: overall_label(overall),
+        overall_label: overall.label(),
         generated_at: summary.generated_at.clone(),
         updated_utc: summary.updated_utc.clone(),
         // The operator's announcements are page-wide communication; keep them

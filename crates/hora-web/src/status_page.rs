@@ -250,17 +250,7 @@ impl Counts {
 
     /// The page's state: the worst shown; `none` only when nothing has data.
     fn state(&self, total: usize) -> DisplayState {
-        if self.down > 0 {
-            DisplayState::Down
-        } else if self.degraded > 0 {
-            DisplayState::Degraded
-        } else if self.maint > 0 {
-            DisplayState::Maint
-        } else if self.none == total {
-            DisplayState::None
-        } else {
-            DisplayState::Up
-        }
+        DisplayState::of_counts(self.down, self.degraded, self.maint, self.none, total)
     }
 }
 

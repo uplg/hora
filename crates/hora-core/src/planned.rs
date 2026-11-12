@@ -61,6 +61,25 @@ const ORIGIN_API: &str = "api";
 /// The prefix of the origin of a window a peer announced (`peer:<peer id>`).
 const ORIGIN_PEER_PREFIX: &str = "peer:";
 
+/// What a window or a silence covers, in words: `all monitors`, the names
+/// given, or - for a window whose monitors are all elsewhere - `no monitor
+/// of this node`. The one wording of the status page, the API's summary
+/// and the command line.
+#[must_use]
+pub fn covered(all: bool, names: &[impl AsRef<str>]) -> String {
+    if all {
+        "all monitors".to_owned()
+    } else if names.is_empty() {
+        "no monitor of this node".to_owned()
+    } else {
+        names
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// The id of the peer that announced a window with this stored `origin`;
 /// `None` for one planned on this node.
 #[must_use]

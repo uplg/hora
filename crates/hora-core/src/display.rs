@@ -95,6 +95,48 @@ impl DisplayState {
         }
     }
 
+    /// A whole page's state from how many of its `total` monitors show each
+    /// state: the worst shown, maintenance when nothing is worse, and no
+    /// data only when nothing has any. The status page's headline and the
+    /// API's `overall` are this one rule.
+    #[must_use]
+    pub const fn of_counts(
+        down: usize,
+        degraded: usize,
+        maint: usize,
+        none: usize,
+        total: usize,
+    ) -> Self {
+        if down > 0 {
+            Self::Down
+        } else if degraded > 0 {
+            Self::Degraded
+        } else if maint > 0 {
+            Self::Maint
+        } else if none == total {
+            Self::None
+        } else {
+            Self::Up
+        }
+    }
+
+    /// [`Self::of_counts`] over the states themselves.
+    #[must_use]
+    pub fn overall(states: impl IntoIterator<Item = Self>) -> Self {
+        let (mut down, mut degraded, mut maint, mut none, mut total) = (0, 0, 0, 0, 0);
+        for state in states {
+            total += 1;
+            match state {
+                Self::Down => down += 1,
+                Self::Degraded => degraded += 1,
+                Self::Maint => maint += 1,
+                Self::None => none += 1,
+                Self::Up => {}
+            }
+        }
+        Self::of_counts(down, degraded, maint, none, total)
+    }
+
     /// Worth a look: down, slow or in maintenance.
     #[must_use]
     pub const fn notable(self) -> bool {
