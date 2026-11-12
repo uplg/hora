@@ -9,7 +9,7 @@ use badgelib::{Badge, Color, Style};
 use chrono::DateTime;
 
 use hora_core::db::{EventMarker, Point};
-use hora_core::fmt::xml_escape;
+use maud::{Markup, PreEscaped, html};
 
 // --- The owl ------------------------------------------------------------
 // HoraFace: outlined (surface fill, ink line) so it follows the theme; its
@@ -37,11 +37,11 @@ pub(crate) const OWL_PARTS: &str = concat!(
 
 /// The owl in the pose of `state` (`up`, `degraded`, `down`, `maint`,
 /// `none`), `size` CSS pixels square. One per page, beside its sentence.
-pub(crate) fn owl(state: &str, size: u32) -> String {
-    format!(
-        "<svg class=\"owl\" data-state=\"{state}\" viewBox=\"6 6 40 40\" width=\"{size}\" \
-         height=\"{size}\" aria-hidden=\"true\" focusable=\"false\">{OWL_PARTS}</svg>"
-    )
+pub(crate) fn owl(state: &str, size: u32) -> Markup {
+    html! {
+        svg.owl data-state=(state) viewBox="6 6 40 40" width=(size) height=(size)
+            aria-hidden="true" focusable="false" { (PreEscaped(OWL_PARTS)) }
+    }
 }
 
 /// A service's answer times over the last 24 hours as a bare line, to sit
@@ -49,14 +49,14 @@ pub(crate) fn owl(state: &str, size: u32) -> String {
 /// step, a spike), each point at its own time so a hole stays a hole in
 /// width. Empty with fewer than two points. Decorative: the figures are on
 /// the monitor's page.
-pub(crate) fn mini_spark(points: &[Point]) -> String {
+pub(crate) fn mini_spark(points: &[Point]) -> Markup {
     const W: f64 = 88.0;
     const H: f64 = 18.0;
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
-        return String::new();
+        return html! {};
     };
     if points.len() < 2 {
-        return String::new();
+        return html! {};
     }
     let low = points
         .iter()
@@ -79,57 +79,50 @@ pub(crate) fn mini_spark(points: &[Point]) -> String {
         let y = H / 2.0 - (coord(point.latency_ms) - mid) / range * (H - 2.0);
         let _ = write!(path, "{}{x:.1} {y:.1}", if index == 0 { 'M' } else { 'L' });
     }
-    format!(
-        "<svg class=\"mini-spark\" viewBox=\"0 0 {W:.0} {H:.0}\" preserveAspectRatio=\"none\" \
-         aria-hidden=\"true\" focusable=\"false\"><path d=\"{path}\"/></svg>"
-    )
+    html! {
+        svg.mini-spark viewBox={ "0 0 " (format!("{W:.0} {H:.0}")) } preserveAspectRatio="none"
+            aria-hidden="true" focusable="false" { path d=(path) {} }
+    }
 }
 
 /// Several owls on one branch, one per place, each in its own pose: the mesh
 /// drawn (the watchers page and the vantage panels only). `label` is the
 /// sentence the picture says, for assistive tech.
-pub(crate) fn owls(places: &[(&str, &str)], label: &str) -> String {
+pub(crate) fn owls(places: &[(&str, &str)], label: &str) -> Markup {
     const STEP: usize = 46;
     // Drawn at one and a half CSS pixels a unit, so the 8-unit names read at
     // 12 px; the stylesheet only ever shrinks it to fit a narrow screen.
     let width = STEP * places.len() + 8;
-    let mut out = format!(
-        "<svg class=\"owls\" viewBox=\"0 0 {width} 62\" width=\"{}\" height=\"93\" role=\"img\" \
-         aria-label=\"{}\">\
-         <path class=\"branch\" d=\"M0 45.5C{:.0} 43.5 {:.0} 47.5 {width} 44.5\"/>",
-        width * 3 / 2,
-        xml_escape(label),
+    let branch = format!(
+        "M0 45.5C{:.0} 43.5 {:.0} 47.5 {width} 44.5",
         coord(width) * 0.3,
         coord(width) * 0.7,
     );
-    for (index, (state, _)) in places.iter().enumerate() {
-        let x = 4 + index * STEP;
-        let _ = write!(
-            out,
-            "<svg class=\"owl\" data-state=\"{state}\" x=\"{x}\" y=\"0\" width=\"46\" height=\"46\" \
-             viewBox=\"6 6 40 40\">{OWL_PARTS}</svg>"
-        );
-    }
-    for (index, (_, name)) in places.iter().enumerate() {
-        // A perch is 46 units wide: a long name is cut here (it is whole in
-        // the list beside the picture, and in the picture's label).
-        let short: String = if name.chars().count() > OWL_NAME {
+    // A perch is 46 units wide: a long name is cut here (it is whole in the
+    // list beside the picture, and in the picture's label).
+    let short = |name: &str| -> String {
+        if name.chars().count() > OWL_NAME {
             name.chars()
                 .take(OWL_NAME - 1)
                 .chain(['\u{2026}'])
                 .collect()
         } else {
-            (*name).to_owned()
-        };
-        let _ = write!(
-            out,
-            "<text class=\"olab\" x=\"{}\" y=\"58\" text-anchor=\"middle\">{}</text>",
-            4 + index * STEP + 23,
-            xml_escape(&short),
-        );
+            name.to_owned()
+        }
+    };
+    html! {
+        svg.owls viewBox={ "0 0 " (width) " 62" } width=(width * 3 / 2) height="93" role="img"
+            aria-label=(label) {
+            path.branch d=(branch) {}
+            @for (index, (state, _)) in places.iter().enumerate() {
+                svg.owl data-state=(state) x=(4 + index * STEP) y="0" width="46" height="46"
+                    viewBox="6 6 40 40" { (PreEscaped(OWL_PARTS)) }
+            }
+            @for (index, (_, name)) in places.iter().enumerate() {
+                text.olab x=(4 + index * STEP + 23) y="58" text-anchor="middle" { (short(name)) }
+            }
+        }
     }
-    out.push_str("</svg>");
-    out
 }
 
 /// The longest name written whole under an owl, in characters.
@@ -153,34 +146,41 @@ pub(crate) fn day_class(state: &str) -> u8 {
     }
 }
 
-/// Render the daily bar, oldest day first, from day cell classes.
-pub(crate) fn day_bar(days: &[u8]) -> String {
-    let mut rects = String::new();
+/// The runs of a row of day classes: each `(class, first day, length)`.
+fn runs(days: &[u8]) -> Vec<(u8, usize, usize)> {
+    let mut out = Vec::new();
     let mut start = 0;
     while let Some(&class) = days.get(start) {
         let run = days[start..]
             .iter()
             .take_while(|day| **day == class)
             .count();
-        let (y, height) = match class {
-            b'u' => (0, 22),
-            b'd' => (7, 15),
-            b'x' => (0, 29),
-            b'm' => (11, 11),
-            _ => (18, 4),
-        };
-        let _ = write!(
-            rects,
-            "<rect class=\"{}\" x=\"{start}\" y=\"{y}\" width=\"{run}\" height=\"{height}\"/>",
-            char::from(class)
-        );
+        out.push((class, start, run));
         start += run;
     }
-    format!(
-        "<svg viewBox=\"0 0 {} 29\" preserveAspectRatio=\"none\" aria-hidden=\"true\" \
-         focusable=\"false\"><g mask=\"url(#gaps)\">{rects}</g></svg>",
-        days.len().max(1)
-    )
+    out
+}
+
+/// Render the daily bar, oldest day first, from day cell classes.
+pub(crate) fn day_bar(days: &[u8]) -> Markup {
+    let shape = |class: u8| match class {
+        b'u' => (0, 22),
+        b'd' => (7, 15),
+        b'x' => (0, 29),
+        b'm' => (11, 11),
+        _ => (18, 4),
+    };
+    html! {
+        svg viewBox={ "0 0 " (days.len().max(1)) " 29" } preserveAspectRatio="none"
+            aria-hidden="true" focusable="false" {
+            g mask="url(#gaps)" {
+                @for (class, start, run) in runs(days) {
+                    @let (y, height) = shape(class);
+                    rect class=(char::from(class)) x=(start) y=(y) width=(run) height=(height) {}
+                }
+            }
+        }
+    }
 }
 
 /// A month's day strip for the report, first day first, from day cell
@@ -190,48 +190,43 @@ pub(crate) fn day_bar(days: &[u8]) -> String {
 /// stylesheet one lost its gaps on paper). The svg's class says the month's
 /// length (`d31`), which sets its width: a running month's strip keeps the
 /// whole month's width, its days to come left empty.
-pub(crate) fn day_strip(days: &[u8], month_days: usize) -> String {
-    let mut rects = String::new();
-    let mut start = 0;
-    while let Some(&class) = days.get(start) {
-        let run = days[start..]
-            .iter()
-            .take_while(|day| **day == class)
-            .count();
-        let (y, height) = match class {
-            b'u' => (4, 12),
-            b'd' => (8, 8),
-            b'x' => (0, 16),
-            b'm' => (10, 6),
-            _ => (14, 2),
-        };
-        let _ = write!(
-            rects,
-            "<rect class=\"{}\" x=\"{start}\" y=\"{y}\" width=\"{run}\" height=\"{height}\"/>",
-            char::from(class)
-        );
-        start += run;
-    }
+pub(crate) fn day_strip(days: &[u8], month_days: usize) -> Markup {
+    let shape = |class: u8| match class {
+        b'u' => (4, 12),
+        b'd' => (8, 8),
+        b'x' => (0, 16),
+        b'm' => (10, 6),
+        _ => (14, 2),
+    };
     let width = month_days.max(days.len()).max(1);
-    format!(
-        "<svg class=\"d{width}\" viewBox=\"0 0 {width} 16\" preserveAspectRatio=\"none\" \
-         aria-hidden=\"true\" focusable=\"false\"><g mask=\"url(#gaps)\">{rects}</g></svg>"
-    )
+    html! {
+        svg class={ "d" (width) } viewBox={ "0 0 " (width) " 16" } preserveAspectRatio="none"
+            aria-hidden="true" focusable="false" {
+            g mask="url(#gaps)" {
+                @for (class, start, run) in runs(days) {
+                    @let (y, height) = shape(class);
+                    rect class=(char::from(class)) x=(start) y=(y) width=(run) height=(height) {}
+                }
+            }
+        }
+    }
 }
 
 /// A thin horizontal meter (`value` of `max`), drawn as an svg so its width is
 /// an attribute, not an inline style the CSP would refuse.
-pub(crate) fn meter(value: i64, max: i64, class: &str) -> String {
+pub(crate) fn meter(value: i64, max: i64, class: &str) -> Markup {
     let filled = if max > 0 {
         (value.clamp(0, max) * 100) / max
     } else {
         0
     };
-    format!(
-        "<svg class=\"{class}\" viewBox=\"0 0 100 8\" preserveAspectRatio=\"none\" aria-hidden=\"true\" \
-         focusable=\"false\"><rect class=\"track\" width=\"100\" height=\"8\"/>\
-         <rect class=\"fill\" width=\"{filled}\" height=\"8\"/></svg>"
-    )
+    html! {
+        svg class=(class) viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true"
+            focusable="false" {
+            rect.track width="100" height="8" {}
+            rect.fill width=(filled) height="8" {}
+        }
+    }
 }
 
 // --- Server-rendered latency chart --------------------------------------
@@ -251,7 +246,7 @@ pub(crate) fn coord<T: TryInto<i32>>(value: T) -> f64 {
 /// is carried by the drawing (or by a hover tooltip) alone.
 pub(crate) struct Chart {
     /// The scale's labels, the svg and the time labels.
-    pub(crate) html: String,
+    pub(crate) html: Markup,
     /// "between 58 ms and 212 ms, typically 64 ms"; empty without data.
     pub(crate) summary: String,
     /// The markers drawn, oldest first, for the list under the chart.
@@ -378,57 +373,57 @@ fn series_paths(points: &[Point], scale: &Scale) -> (String, String) {
     (line, area)
 }
 
-/// The chart's svg, opened: the three gridlines, the four time ticks, then
-/// the area and the line. The caller adds what lies over them and closes it.
-fn chart_frame(status: &str, line: &str, area: &str) -> String {
-    let mut svg = format!(
-        "<svg viewBox=\"0 0 {CHART_W} {CHART_H}\" class=\"spark {status}\" \
-         preserveAspectRatio=\"none\" aria-hidden=\"true\" focusable=\"false\">"
-    );
-    for y in [0.0, CHART_H / 2.0, CHART_H] {
-        let _ = write!(
-            svg,
-            "<line class=\"spark-grid\" x1=\"0\" x2=\"{CHART_W}\" y1=\"{y:.0}\" y2=\"{y:.0}\"/>"
-        );
+/// What lies over the chart's line: the "slow above" line, a recorded event.
+struct Overlay {
+    class: &'static str,
+    x: (String, String),
+    y: (String, String),
+    title: Option<String>,
+}
+
+/// The chart's svg: the three gridlines, the four time ticks, the area and
+/// the line, then what lies over them.
+fn chart_svg(status: &str, line: &str, area: &str, over: &[Overlay]) -> Markup {
+    let whole = |value: f64| format!("{value:.0}");
+    html! {
+        svg viewBox={ "0 0 " (CHART_W) " " (CHART_H) } class={ "spark " (status) }
+            preserveAspectRatio="none" aria-hidden="true" focusable="false" {
+            @for y in [0.0, CHART_H / 2.0, CHART_H] {
+                line.spark-grid x1="0" x2=(CHART_W) y1=(whole(y)) y2=(whole(y)) {}
+            }
+            @for third in 0..4_i32 {
+                @let x = format!("{:.1}", CHART_W * f64::from(third) / 3.0);
+                line.spark-tick x1=(x) x2=(x) y1=(whole(CHART_H)) y2=(whole(CHART_H + 4.0)) {}
+            }
+            @if !area.is_empty() { path.spark-area d=(area) {} }
+            path.spark-line d=(line) {}
+            @for mark in over {
+                line class=(mark.class) x1=(mark.x.0) x2=(mark.x.1) y1=(mark.y.0) y2=(mark.y.1) {
+                    @if let Some(title) = &mark.title { title { (title) } }
+                }
+            }
+        }
     }
-    for third in 0..4_i32 {
-        let x = CHART_W * f64::from(third) / 3.0;
-        let _ = write!(
-            svg,
-            "<line class=\"spark-tick\" x1=\"{x:.1}\" x2=\"{x:.1}\" y1=\"{CHART_H:.0}\" y2=\"{:.0}\"/>",
-            CHART_H + 4.0
-        );
-    }
-    if !area.is_empty() {
-        let _ = write!(svg, "<path class=\"spark-area\" d=\"{area}\"/>");
-    }
-    let _ = write!(svg, "<path class=\"spark-line\" d=\"{line}\"/>");
-    svg
 }
 
 /// The labels, as HTML around the svg: the scale on its left (top, half,
 /// zero), four times under it (a lone sample has one).
-fn chart_labels(svg: &str, top: i64, first: i64, last: i64) -> String {
-    let mut html = format!(
-        "<div class=\"chart\"><div class=\"chart-y\"><span>{}</span><span>{}</span>\
-         <span>{}</span></div>{svg}<div class=\"chart-x\">",
-        axis_label(top),
-        axis_label(top / 2),
-        axis_label(0),
-    );
+fn chart_labels(svg: &Markup, top: i64, first: i64, last: i64) -> Markup {
     let ticks = if last > first { 4 } else { 1 };
-    for third in 0..ticks {
-        let at = first + (last - first) * third / 3;
-        if let Some(at) = DateTime::from_timestamp(at, 0) {
-            let _ = write!(
-                html,
-                "<span class=\"x{third}\">{}</span>",
-                at.format("%H:%M")
-            );
+    let times = (0..ticks).filter_map(|third| {
+        DateTime::from_timestamp(first + (last - first) * third / 3, 0).map(|at| (third, at))
+    });
+    html! {
+        div.chart {
+            div.chart-y {
+                span { (axis_label(top)) } span { (axis_label(top / 2)) } span { (axis_label(0)) }
+            }
+            (svg)
+            div.chart-x {
+                @for (third, at) in times { span class={ "x" (third) } { (at.format("%H:%M")) } }
+            }
         }
     }
-    html.push_str("</div></div>");
-    html
 }
 
 /// Render the last-24h latency series: a line and its area on a scale from
@@ -451,11 +446,12 @@ pub(crate) fn sparkline(
         // coordinates would squash the text too. Without one, user units are
         // CSS pixels and the label is centred undistorted at any card width.
         return Chart {
-            html: format!(
-                "<svg class=\"spark {status}\">\
-                 <text x=\"50%\" y=\"50%\" class=\"spark-empty\" text-anchor=\"middle\" \
-                 dominant-baseline=\"middle\">no data yet</text></svg>"
-            ),
+            html: html! {
+                svg class={ "spark " (status) } {
+                    text x="50%" y="50%" class="spark-empty" text-anchor="middle"
+                        dominant-baseline="middle" { "no data yet" }
+                }
+            },
             summary: String::new(),
             events: Vec::new(),
             limit: limit.map(|limit| ChartLimit {
@@ -481,26 +477,28 @@ pub(crate) fn sparkline(
     let top = scale.top;
     let (line, area) = series_paths(points, &scale);
 
-    let mut svg = chart_frame(status, &line, &area);
+    let mut over = Vec::new();
     if let Some(limit) = limit_drawn {
-        let y = scale.y(limit);
-        let _ = write!(
-            svg,
-            "<line class=\"spark-limit\" x1=\"0\" x2=\"{CHART_W}\" y1=\"{y:.1}\" y2=\"{y:.1}\"/>"
-        );
+        let y = format!("{:.1}", scale.y(limit));
+        over.push(Overlay {
+            class: "spark-limit",
+            x: ("0".to_owned(), CHART_W.to_string()),
+            y: (y.clone(), y),
+            title: None,
+        });
     }
     let mut listed = Vec::new();
     for event in events
         .iter()
         .filter(|event| event.created_at >= first.t && event.created_at <= last.t)
     {
-        let x = scale.x(event.created_at);
-        let _ = write!(
-            svg,
-            "<line class=\"spark-event\" x1=\"{x:.1}\" x2=\"{x:.1}\" y1=\"0\" \
-             y2=\"{CHART_H:.0}\"><title>{}</title></line>",
-            xml_escape(&event.title),
-        );
+        let x = format!("{:.1}", scale.x(event.created_at));
+        over.push(Overlay {
+            class: "spark-event",
+            x: (x.clone(), x),
+            y: ("0".to_owned(), format!("{CHART_H:.0}")),
+            title: Some(event.title.clone()),
+        });
         if let Some(at) = DateTime::from_timestamp(event.created_at, 0) {
             listed.push(ChartEvent {
                 at: at.format("%a %H:%M UTC").to_string(),
@@ -509,9 +507,9 @@ pub(crate) fn sparkline(
             });
         }
     }
-    svg.push_str("</svg>");
     listed.sort_by(|a, b| a.iso.cmp(&b.iso));
 
+    let svg = chart_svg(status, &line, &area, &over);
     let html = chart_labels(&svg, top, first.t, last.t);
 
     Chart {
@@ -600,15 +598,15 @@ mod tests {
     #[test]
     fn sparkline_renders_svg_with_status_class() {
         let empty = sparkline(&[], "up", &[], None);
-        assert!(empty.html.contains("no data"));
+        assert!(empty.html.0.contains("no data"));
         assert_eq!(empty.summary, "");
         // The placeholder text must not be stretched with the chart.
-        assert!(!empty.html.contains("preserveAspectRatio") && !empty.html.contains("viewBox"));
+        assert!(!empty.html.0.contains("preserveAspectRatio") && !empty.html.0.contains("viewBox"));
         let chart = sparkline(&points(&[(1, 10), (2, 20)]), "degraded", &[], None);
-        assert!(chart.html.contains("class=\"spark degraded\""));
-        assert!(chart.html.contains("spark-line"));
+        assert!(chart.html.0.contains("class=\"spark degraded\""));
+        assert!(chart.html.0.contains("spark-line"));
         // No text inside the stretched svg: the labels are HTML around it.
-        assert!(!chart.html.contains("<text"), "{}", chart.html);
+        assert!(!chart.html.0.contains("<text"), "{}", chart.html.0);
         assert_eq!(chart.summary, "between 10 ms and 20 ms, typically 20 ms");
     }
 
@@ -634,19 +632,19 @@ mod tests {
         // scale it sits flat, a little over the half line.
         let chart = sparkline(&points(&[(0, 60), (60, 64), (120, 62)]), "up", &[], None);
         assert!(
-            chart.html.contains(
+            chart.html.0.contains(
                 "<div class=\"chart-y\"><span>100 ms</span><span>50 ms</span><span>0</span></div>"
             ),
             "{}",
-            chart.html
+            chart.html.0
         );
         assert!(
-            chart.html.contains("M0.0 48.0L340.0 43.2L680.0 45.6"),
+            chart.html.0.contains("M0.0 48.0L340.0 43.2L680.0 45.6"),
             "{}",
-            chart.html
+            chart.html.0
         );
-        assert_eq!(chart.html.matches("spark-grid").count(), 3);
-        assert_eq!(chart.html.matches("<span class=\"x").count(), 4);
+        assert_eq!(chart.html.0.matches("spark-grid").count(), 3);
+        assert_eq!(chart.html.0.matches("<span class=\"x").count(), 4);
     }
 
     #[test]
@@ -656,9 +654,9 @@ mod tests {
         let series = points(&[(0, 5), (10, 5), (20, 5), (80, 5), (100, 5)]);
         let chart = sparkline(&series, "up", &[], None);
         assert!(
-            chart.html.contains("L136.0 60.0M544.0 60.0L680.0 60.0"),
+            chart.html.0.contains("L136.0 60.0M544.0 60.0L680.0 60.0"),
             "{}",
-            chart.html
+            chart.html.0
         );
         assert_eq!(chart.summary, "steady at 5 ms");
         // A short last step (the newest bucket) makes no hole of the others.
@@ -668,7 +666,7 @@ mod tests {
             &[],
             None,
         );
-        assert_eq!(fresh.html.matches('M').count(), 2, "{}", fresh.html);
+        assert_eq!(fresh.html.0.matches('M').count(), 2, "{}", fresh.html.0);
         // A sample alone between two holes is a dot, not nothing.
         let lone = sparkline(
             &points(&[(0, 5), (10, 5), (100, 5), (200, 5), (210, 5)]),
@@ -676,25 +674,27 @@ mod tests {
             &[],
             None,
         );
-        assert!(lone.html.contains("M323.8 60.0h0"), "{}", lone.html);
+        assert!(lone.html.0.contains("M323.8 60.0h0"), "{}", lone.html.0);
     }
 
     #[test]
     fn threshold_is_drawn_when_it_is_near_and_said_either_way() {
         let series = points(&[(0, 300), (60, 420)]);
         let near = sparkline(&series, "up", &[], Some(800));
-        assert!(near.html.contains("spark-limit"), "{}", near.html);
+        assert!(near.html.0.contains("spark-limit"), "{}", near.html.0);
         // The scale makes room for it: 0 to 1 s, the line at 800 ms.
         assert!(
-            near.html.contains("<span>1.0 s</span><span>500 ms</span>"),
-            "{}",
             near.html
+                .0
+                .contains("<span>1.0 s</span><span>500 ms</span>"),
+            "{}",
+            near.html.0
         );
-        assert!(near.html.contains("y1=\"24.0\""), "{}", near.html);
+        assert!(near.html.0.contains("y1=\"24.0\""), "{}", near.html.0);
         let limit = near.limit.unwrap();
         assert!(limit.drawn && limit.text == "800 ms");
         let far = sparkline(&series, "up", &[], Some(5000));
-        assert!(!far.html.contains("spark-limit"));
+        assert!(!far.html.0.contains("spark-limit"));
         assert!(!far.limit.unwrap().drawn);
         assert!(sparkline(&series, "up", &[], None).limit.is_none());
     }
@@ -715,7 +715,7 @@ mod tests {
             },
         ];
         let chart = sparkline(&series, "up", &events, None);
-        let svg = &chart.html;
+        let svg = &chart.html.0;
         // In-span marker drawn at the interpolated midpoint, title escaped.
         assert!(svg.contains("spark-event"), "{svg}");
         assert!(svg.contains("<title>deploy &lt;v2&gt;</title>"), "{svg}");
@@ -765,7 +765,7 @@ mod tests {
         days[40] = b'x';
         days[88] = b'd';
         days[89] = b'd';
-        let svg = day_bar(&days);
+        let svg = day_bar(&days).into_string();
         assert!(svg.starts_with("<svg viewBox=\"0 0 90 29\""), "{svg}");
         // up, down, up, slow: four runs, not ninety nodes.
         assert_eq!(svg.matches("<rect").count(), 4, "{svg}");
@@ -779,30 +779,31 @@ mod tests {
         );
         assert!(svg.contains("mask=\"url(#gaps)\""));
         // An empty bar still renders a valid (blank) svg.
-        assert!(day_bar(&[]).contains("viewBox=\"0 0 1 29\""));
+        assert!(day_bar(&[]).0.contains("viewBox=\"0 0 1 29\""));
     }
 
     #[test]
     fn owl_is_decorative_and_posed_by_state() {
-        let svg = owl("degraded", 96);
+        let svg = owl("degraded", 96).into_string();
         assert!(svg.contains("data-state=\"degraded\"") && svg.contains("aria-hidden=\"true\""));
         let many = owls(
             &[("down", "Paris <1>"), ("up", "Frankfurt")],
             "Paris sees it down",
-        );
+        )
+        .into_string();
         assert_eq!(many.matches("class=\"owl\"").count(), 2);
         assert!(many.contains("Paris &lt;1&gt;") && many.contains("role=\"img\""));
         // Sized so the names read at 12 px; a long one is cut, not overlapping.
         assert!(many.contains("viewBox=\"0 0 100 62\" width=\"150\" height=\"93\""));
-        let long = owls(&[("up", "Johannesburg")], "one place");
+        let long = owls(&[("up", "Johannesburg")], "one place").into_string();
         assert!(long.contains(">Johannesb\u{2026}</text>"), "{long}");
     }
 
     #[test]
     fn meter_width_is_an_attribute() {
-        let svg = meter(31, 43, "meter");
+        let svg = meter(31, 43, "meter").into_string();
         assert!(svg.contains("class=\"fill\" width=\"72\""), "{svg}");
         assert!(!svg.contains("style"));
-        assert!(meter(5, 0, "meter").contains("width=\"0\""));
+        assert!(meter(5, 0, "meter").0.contains("width=\"0\""));
     }
 }

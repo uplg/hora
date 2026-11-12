@@ -18,6 +18,7 @@ use crate::display::DisplayState;
 use crate::layout::{count_word, join_and, ms, pct};
 use crate::render::{day_bar, meter, owl};
 use crate::summary::{MonitorView, Summary};
+use maud::Markup;
 
 /// Above this many monitors the page uses its scale layout.
 pub(crate) const SCALE_AT: usize = 30;
@@ -36,7 +37,7 @@ pub(crate) struct StatusPage<'a> {
     /// The page's state: `up`, `degraded`, `down`, `maint` or `none`.
     pub(crate) state: &'static str,
     /// The owl in that state's pose (one per page).
-    pub(crate) owl: String,
+    pub(crate) owl: Markup,
     /// The hour, the hero's eyebrow.
     pub(crate) when: String,
     /// The one sentence: "Everything is running."
@@ -148,7 +149,7 @@ pub(crate) struct Window {
     /// The same as numbers, in minutes, for the progress bar's values.
     pub(crate) done: i64,
     pub(crate) length: i64,
-    pub(crate) meter: String,
+    pub(crate) meter: Markup,
 }
 
 /// Monitors down from this node only, and what the page says about them.
@@ -163,7 +164,7 @@ pub(crate) struct LocalNotice<'a> {
 /// One local-only monitor in the operator's panel: who sees what.
 pub(crate) struct LocalDetail<'a> {
     pub(crate) monitor: &'a MonitorView,
-    pub(crate) owls: String,
+    pub(crate) owls: Markup,
     pub(crate) places: Vec<Place>,
 }
 
@@ -194,10 +195,10 @@ pub(crate) struct Row<'a> {
     /// The group, named on the "Needs attention" rows.
     pub(crate) group: Option<&'a str>,
     /// The daily bar (full rows only), and its words for assistive tech.
-    pub(crate) bar: String,
+    pub(crate) bar: Markup,
     pub(crate) bar_label: String,
     /// The last 24 hours of answer times as a bare line (full rows only).
-    pub(crate) spark: String,
+    pub(crate) spark: Markup,
     /// Where a down was seen from ("confirmed from").
     pub(crate) seen: Vec<Place>,
     pub(crate) seen_note: String,
@@ -218,7 +219,7 @@ pub(crate) struct GroupBlock<'a> {
     /// Open on arrival: something is wrong in it, or it is the group's page.
     pub(crate) open: bool,
     /// The group's daily bar (scale layout), see [`group_day_classes`].
-    pub(crate) bar: String,
+    pub(crate) bar: Markup,
     pub(crate) uptime: String,
     pub(crate) rows: Vec<Row<'a>>,
     pub(crate) total: usize,
@@ -858,13 +859,13 @@ fn row(monitor: &MonitorView, with_bar: bool) -> Row<'_> {
         bar: if with_bar {
             day_bar(&day_classes(monitor))
         } else {
-            String::new()
+            Markup::default()
         },
         bar_label: bar_label(monitor),
         spark: if with_bar {
             crate::render::mini_spark(&monitor.spark)
         } else {
-            String::new()
+            Markup::default()
         },
         seen,
         seen_note,
@@ -1178,7 +1179,7 @@ fn group_block<'a>(
     let bar = if scale {
         day_bar(&group_day_classes(monitors))
     } else {
-        String::new()
+        Markup::default()
     };
     let measured: Vec<i64> = monitors.iter().filter_map(|m| m.uptime_permille).collect();
     let uptime = if measured.is_empty() {

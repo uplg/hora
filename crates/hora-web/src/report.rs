@@ -171,7 +171,7 @@ impl ReportTemplate {
                                 th role="rowheader" scope="row" {
                                     span.svc {
                                         span { (row.name) }
-                                        span.bar.strip role="img" aria-label=(row.days_label) { (raw(&row.days)) }
+                                        span.bar.strip role="img" aria-label=(row.days_label) { (row.days) }
                                     }
                                 }
                                 td role="cell" data-l="Up" { (row.uptime) }
@@ -272,7 +272,7 @@ pub(crate) struct ReportRow {
     mttr: String,
     left: String,
     /// The month's days as a strip (an inline SVG), and its words.
-    days: String,
+    days: Markup,
     days_label: String,
 }
 

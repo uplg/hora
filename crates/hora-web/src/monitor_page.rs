@@ -56,7 +56,7 @@ impl MonitorTemplate {
                                 (tile.value)
                                 @if !tile.unit.is_empty() { small { (tile.unit) } }
                             }
-                            (raw(&tile.meter))
+                            (tile.meter)
                             @if !tile.note.is_empty() { span.n { (tile.note) } }
                         }
                     }
@@ -83,7 +83,7 @@ impl MonitorTemplate {
                     h2 id="rt" { "Response time" }
                     span.aside { "Last 24 h, times in UTC" }
                 }
-                div role="img" aria-label=(label) { (raw(&chart.html)) }
+                div role="img" aria-label=(label) { (chart.html) }
                 div.key {
                     span { i {} "Response time (averaged over a few minutes)" }
                     @if let Some(limit) = &chart.limit {
@@ -171,7 +171,7 @@ impl MonitorTemplate {
                         span.aside { (state(page.places_state, &page.places_word)) }
                     }
                     div.vpwrap {
-                        (raw(&page.places_owls))
+                        (page.places_owls)
                         p.muted.small {
                             "Each place checks on its own. An outage is called only when they agree, so a hiccup near one place does not page anyone."
                         }
@@ -183,7 +183,7 @@ impl MonitorTemplate {
                                 span.n { (place.name) small { (place.sub) } }
                                 span.r {
                                     span class={ "word " (place.state) } { (place.word) }
-                                    (raw(&place.meter))
+                                    (place.meter)
                                     (place.latency)
                                 }
                             }
@@ -276,7 +276,7 @@ pub(crate) struct MonitorPage {
     pub(crate) day30: String,
     pub(crate) heatmap: Option<String>,
     pub(crate) places: Vec<PlaceRow>,
-    pub(crate) places_owls: String,
+    pub(crate) places_owls: Markup,
     pub(crate) places_state: &'static str,
     pub(crate) places_word: String,
     pub(crate) incidents: Vec<IncidentLine>,
@@ -298,7 +298,7 @@ pub(crate) struct Tile {
     pub(crate) value: String,
     pub(crate) unit: String,
     pub(crate) note: String,
-    pub(crate) meter: String,
+    pub(crate) meter: Markup,
 }
 
 /// One day of the bar: a link to its own detail (`#day-2026-09-18`).
@@ -327,7 +327,7 @@ pub(crate) struct PlaceRow {
     pub(crate) state: &'static str,
     pub(crate) word: &'static str,
     pub(crate) latency: String,
-    pub(crate) meter: String,
+    pub(crate) meter: Markup,
 }
 
 /// One past incident of this monitor.
@@ -523,7 +523,7 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
             value: pct(permille),
             unit: String::new(),
             note: outage_note(m, incidents),
-            meter: String::new(),
+            meter: Markup::default(),
         });
     }
     if let Some(p50) = m.p50_ms {
@@ -535,7 +535,7 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
             note: m
                 .p95_ms
                 .map_or_default(|p95| format!("Slowest 1 in 20: {}", ms(p95))),
-            meter: String::new(),
+            meter: Markup::default(),
         });
     }
     if let (Some(left), Some(total)) = (m.budget_minutes_left, m.budget_minutes_total) {
@@ -567,7 +567,7 @@ fn tiles(m: &MonitorView, monitor: &Monitor, incidents: &[Incident]) -> Vec<Tile
                 CertState::Warn => "Renew it soon".to_owned(),
                 CertState::Ok | CertState::None => "Valid".to_owned(),
             },
-            meter: String::new(),
+            meter: Markup::default(),
         });
     }
     tiles
@@ -723,11 +723,11 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
 
 /// Where it is checked from: this node, then each peer watching the same
 /// target, with each one's typical answer time.
-fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
+fn places(m: &MonitorView) -> (Vec<PlaceRow>, Markup, &'static str, String) {
     if m.vantages.is_empty() {
         return (
             Vec::new(),
-            String::new(),
+            Markup::default(),
             DisplayState::None.class(),
             String::new(),
         );
@@ -745,7 +745,7 @@ fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
         state: here.class(),
         word: here.word(),
         latency: m.p50_ms.or(m.last_latency_ms).map_or_default(ms),
-        meter: String::new(),
+        meter: Markup::default(),
     }];
     for vantage in &m.vantages {
         let state = DisplayState::from(vantage.status);
@@ -755,7 +755,7 @@ fn places(m: &MonitorView) -> (Vec<PlaceRow>, String, &'static str, String) {
             state: state.class(),
             word: state.word(),
             latency: vantage.p50_ms.map_or_default(ms),
-            meter: String::new(),
+            meter: Markup::default(),
         });
     }
     let slowest = m

@@ -238,7 +238,7 @@ pub(crate) struct IncidentTemplate {
     /// The markdown post-mortem, shown in a copyable block.
     pub(crate) markdown: String,
     /// The owl: awake while it is down, asleep once it is over.
-    pub(crate) owl: String,
+    pub(crate) owl: Markup,
     /// The raw verdict, for the operator (the visitor reads it humanized).
     pub(crate) operator: bool,
 }
@@ -342,7 +342,7 @@ impl IncidentTemplate {
                     span aria-current="page" { "Incident #" (row.id) }
                 }
                 header.pm-head {
-                    (raw(&self.owl))
+                    (self.owl)
                     div {
                         p.eyebrow {
                             span { "Post-mortem #" (row.id) }

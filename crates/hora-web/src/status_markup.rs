@@ -47,7 +47,7 @@ impl StatusTemplate<'_> {
         html! {
             section.screen aria-labelledby="h" {
                 div.first {
-                    (raw(&self.page.owl))
+                    (self.page.owl)
                     h1 id="h" { "Nothing to watch yet." }
                     p.lead {
                         "Add a monitor to " code { "config.toml" }
@@ -117,7 +117,7 @@ impl StatusTemplate<'_> {
         let page = &self.page;
         html! {
             section class={ "hero " (page.state) } aria-labelledby="h" {
-                (raw(&page.owl))
+                (page.owl)
                 div {
                     p.when { (page.when) }
                     h1 id="h" { (page.headline) }
@@ -129,7 +129,7 @@ impl StatusTemplate<'_> {
                             }
                             div role="progressbar" aria-label="Maintenance window" aria-valuemin="0"
                                 aria-valuemax=(window.length) aria-valuenow=(window.done)
-                                aria-valuetext=(window.progress) { (raw(&window.meter)) }
+                                aria-valuetext=(window.progress) { (window.meter) }
                         }
                     }
                 }
@@ -172,7 +172,7 @@ impl StatusTemplate<'_> {
                     div.why-in {
                         @for detail in &local.monitors {
                             div {
-                                (raw(&detail.owls))
+                                (detail.owls)
                                 table.vt {
                                     caption { (detail.monitor.name) }
                                     thead { tr {
@@ -256,7 +256,7 @@ impl StatusTemplate<'_> {
                     h3.gname {
                         (group.name)
                         small { (group.total) " " (services(group.total)) }
-                        span.bar.mini { (raw(&group.bar)) }
+                        span.bar.mini { (group.bar) }
                         span.bar-cap aria-hidden="true" {
                             span { (page.days) " days ago" } span { "Today" }
                         }
@@ -307,13 +307,13 @@ impl StatusTemplate<'_> {
                 (glyph(row.state))
                 a.name href=(href) { (row.m.name) span.vh { ". " (row.bar_label) } }
                 span.state {
-                    (raw(&row.spark))
+                    (row.spark)
                     span class={ "word " (row.state) } { (row.word) }
                     @if !row.detail.is_empty() { " " span.muted { "· " (row.detail) } }
                 }
                 @if let Some(why) = &row.why { span.why { (why) } }
                 " "
-                a.bar href=(href) tabindex="-1" aria-hidden="true" { (raw(&row.bar)) }
+                a.bar href=(href) tabindex="-1" aria-hidden="true" { (row.bar) }
             } }
         }
     }

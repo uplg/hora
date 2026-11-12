@@ -49,7 +49,7 @@ impl WatchersTemplate {
                     ul.nodes {
                         @for node in &page.nodes {
                             li class={ "node " (node.state) } {
-                                (raw(&node.owl))
+                                (node.owl)
                                 span.n { (node.name) small { (node.id) } }
                                 span.s { (state(node.state, node.word)) }
                                 span.d { (node.detail) }
@@ -170,7 +170,7 @@ pub(crate) struct WatchersPage {
 }
 
 pub(crate) struct Node {
-    pub(crate) owl: String,
+    pub(crate) owl: Markup,
     pub(crate) name: String,
     pub(crate) id: String,
     pub(crate) state: &'static str,
