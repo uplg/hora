@@ -50,6 +50,11 @@ rate_limit_burst = 30
 # container), and never more than half the open-files limit: the other half is
 # for the checks' own sockets. Read once at startup.
 # max_connections = 1024
+# How many of them one client address may hold (an IPv6 client is its /64).
+# Default: a quarter of max_connections; no limit for loopback, nor when
+# client_ip_header is set (every connection then comes from your proxy).
+# 0 turns it off. Read once at startup.
+# max_connections_per_ip = 256
 # The operator token: required to view private monitors (those with
 # `public = false`) and to call the write endpoints (/api/silence,
 # /api/maintenance, /api/announce, /api/event, /api/monitors/{id}/alert). Sent as

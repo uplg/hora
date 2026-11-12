@@ -132,12 +132,12 @@ pub(crate) struct Snapshot {
     /// against (a reload invalidates them before the next build lands).
     derived: Mutex<Derived>,
     /// Held by whoever is rendering a body nobody has rendered yet: the
-    /// requests that arrive meanwhile wait for it instead of each rendering
-    /// their own. A new snapshot lands every few seconds with every body to
+    /// requests that arrive meanwhile wait for it (without holding a
+    /// runtime thread) instead of each rendering their own. A new snapshot lands every few seconds with every body to
     /// render again, and a hundred requests in flight rendered a hundred
     /// copies of `/api/summary` at once - a megabyte each on a large fleet,
     /// enough to get a small container killed.
-    rendering: Mutex<()>,
+    rendering: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -171,18 +171,12 @@ impl Snapshot {
             built,
             built_at: Instant::now(),
             derived: Mutex::new(Derived::default()),
-            rendering: Mutex::new(()),
+            rendering: tokio::sync::Mutex::new(()),
         }
     }
 
     fn derived(&self) -> std::sync::MutexGuard<'_, Derived> {
         self.derived.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn rendering(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.rendering
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The summary as `audience` sees it under `config`.
@@ -206,7 +200,7 @@ impl Snapshot {
 
     /// A rendered body, rendered once per snapshot. `render` returning `None`
     /// (a group nobody here may see) is not cached.
-    pub(crate) fn body<E>(
+    pub(crate) async fn body<E>(
         &self,
         config: &Arc<Config>,
         key: Body,
@@ -216,8 +210,10 @@ impl Snapshot {
         if let Some(body) = cached() {
             return Ok(Some(body));
         }
-        // One render at a time; whoever waited finds it done.
-        let _rendering = self.rendering();
+        // One render at a time; whoever waited finds it done. The wait is
+        // asynchronous: a request queued here does not hold a runtime thread
+        // the scheduler could use.
+        let _rendering = self.rendering.lock().await;
         if let Some(body) = cached() {
             return Ok(Some(body));
         }
@@ -235,7 +231,7 @@ impl Snapshot {
 impl Snapshot {
     /// A page with holes, rendered and cut once per snapshot (see
     /// [`Snapshot::body`]); each request splices its own parts in.
-    pub(crate) fn page<E>(
+    pub(crate) async fn page<E>(
         &self,
         config: &Arc<Config>,
         key: Body,
@@ -245,7 +241,7 @@ impl Snapshot {
         if let Some(page) = cached() {
             return Ok(Some(page));
         }
-        let _rendering = self.rendering();
+        let _rendering = self.rendering.lock().await;
         if let Some(page) = cached() {
             return Ok(Some(page));
         }
@@ -540,13 +536,15 @@ mod tests {
                     Arc::clone(&config),
                     Arc::clone(&renders),
                 );
-                tokio::task::spawn_blocking(move || {
-                    snapshot.body(&config, Body::Json(Audience::Public), || {
-                        renders.fetch_add(1, Ordering::AcqRel);
-                        // Long enough for every other caller to arrive.
-                        std::thread::sleep(Duration::from_millis(100));
-                        Ok::<_, std::convert::Infallible>(Some(Bytes::from_static(b"{}")))
-                    })
+                tokio::spawn(async move {
+                    snapshot
+                        .body(&config, Body::Json(Audience::Public), || {
+                            renders.fetch_add(1, Ordering::AcqRel);
+                            // Long enough for every other caller to arrive.
+                            std::thread::sleep(Duration::from_millis(100));
+                            Ok::<_, std::convert::Infallible>(Some(Bytes::from_static(b"{}")))
+                        })
+                        .await
                 })
             })
             .collect();

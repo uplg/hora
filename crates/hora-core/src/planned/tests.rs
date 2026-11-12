@@ -650,9 +650,13 @@ async fn a_window_no_longer_announced_is_withdrawn() {
         .unwrap();
     assert_eq!(applied.withdrawn.len(), 1);
     assert!(!in_maintenance(&store, &config, "frank-in", at(NOW + 130)).await);
+    // What it muted before being withdrawn stays on record (it counts
+    // against the peer's budget); the rest of it is given back.
     let left = stored(&store).await;
-    assert_eq!(left.len(), 1);
-    assert_eq!(left[0].id, own.window.id);
+    assert_eq!(left.len(), 2);
+    assert!(left.iter().any(|row| row.id == own.window.id));
+    let ended = left.iter().find(|row| row.remote_id == Some(2)).unwrap();
+    assert_eq!((ended.starts_at, ended.ends_at), (NOW + 60, NOW + 119));
 
     // The same id announced with other hours replaces the window.
     apply_announcement(&store, peer, true, std::slice::from_ref(&reboot), NOW)
@@ -681,6 +685,131 @@ async fn a_window_no_longer_announced_is_withdrawn() {
         cancel(&store, row.id).await,
         Err(CancelError::FromPeer(peer)) if peer == "hora-frank"
     ));
+}
+
+/// A script on the peer that plans "now, for ten minutes" every minute:
+/// each window is within the accepted length, and together they would mute
+/// the host for good. The budget (four accepted lengths a day) ends it.
+#[tokio::test]
+async fn a_peer_cannot_chain_windows_past_its_daily_budget() {
+    let store = Store::in_memory().await;
+    let config = trusting();
+    let peer = &config.peers[0];
+    let budget = 900 * PEER_BUDGET_WINDOWS;
+    let mut refused = false;
+    for minute in 0..180 {
+        let now = NOW + minute * 60;
+        // The windows still running, as the peer's heartbeat lists them.
+        let listed: Vec<AnnouncedWindow> = (minute.saturating_sub(9)..=minute)
+            .map(|planned| {
+                let start = NOW + planned * 60;
+                announced(100 + planned, start, start + 600, Some("frank"))
+            })
+            .collect();
+        let applied = apply_announcement(&store, peer, true, &listed, now)
+            .await
+            .unwrap();
+        refused |= applied
+            .refused
+            .contains(&"this peer has used its maintenance budget for 24 hours");
+    }
+    assert!(refused, "the budget was never reached");
+    assert!(in_maintenance(&store, &config, "mail", at(NOW + budget - 1)).await);
+    for later in [budget + 1, 2 * 3600, 3 * 3600 - 1] {
+        assert!(
+            !in_maintenance(&store, &config, "mail", at(NOW + later)).await,
+            "still muted {later} s in"
+        );
+        assert!(!in_maintenance(&store, &config, "frank-in", at(NOW + later)).await);
+    }
+
+    // A day later the peer has its budget again.
+    let tomorrow = NOW + SECONDS_PER_DAY + budget + 60;
+    let applied = apply_announcement(
+        &store,
+        peer,
+        true,
+        &[announced(900, tomorrow, tomorrow + 600, Some("frank"))],
+        tomorrow,
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied.refused, Vec::<&str>::new());
+    assert!(in_maintenance(&store, &config, "mail", at(tomorrow + 599)).await);
+}
+
+/// The ordinary case is untouched: a window listed again on every heartbeat
+/// while it runs keeps its hours, and several in a day fit.
+#[tokio::test]
+async fn a_window_announced_again_keeps_its_hours() {
+    let store = Store::in_memory().await;
+    let config = trusting();
+    let peer = &config.peers[0];
+    let reboot = announced(1, NOW, NOW + 900, Some("frank"));
+    for elapsed in [0, 60, 300, 840] {
+        let applied = apply_announcement(
+            &store,
+            peer,
+            true,
+            std::slice::from_ref(&reboot),
+            NOW + elapsed,
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.refused, Vec::<&str>::new());
+        assert!(applied.withdrawn.is_empty(), "replaced {elapsed} s in");
+    }
+    assert!(in_maintenance(&store, &config, "mail", at(NOW + 899)).await);
+    // Three more reboots the same day: four accepted lengths in all.
+    for (id, hours) in [(2, 3), (3, 6), (4, 9)] {
+        let start = NOW + hours * 3600;
+        let applied = apply_announcement(
+            &store,
+            peer,
+            true,
+            &[announced(id, start, start + 900, Some("frank"))],
+            start,
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.refused, Vec::<&str>::new(), "reboot {id}");
+        assert!(in_maintenance(&store, &config, "mail", at(start + 899)).await);
+    }
+    // The fifth is one too many.
+    let start = NOW + 12 * 3600;
+    let applied = apply_announcement(
+        &store,
+        peer,
+        true,
+        &[announced(5, start, start + 900, Some("frank"))],
+        start,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        applied.refused,
+        ["this peer has used its maintenance budget for 24 hours"]
+    );
+    assert!(!in_maintenance(&store, &config, "mail", at(start + 10)).await);
+}
+
+#[test]
+fn overlapping_time_is_counted_once() {
+    let muted = [(100, 200), (150, 300), (500, 600)];
+    assert_eq!(measure(&muted, 0, 1000), 300);
+    assert_eq!(measure(&muted, 250, 550), 100);
+    // 100 s to spend from 0: the gap before the first span takes them
+    // all, and the span itself, muted already, comes free.
+    assert_eq!(end_within(&muted, 0, 1000, 100), 300);
+    assert_eq!(end_within(&muted, 0, 1000, 99), 99);
+    // 150: the gap (100), free through the spans to 300, then 50 more.
+    assert_eq!(end_within(&muted, 0, 1000, 150), 350);
+    // Enough for everything.
+    assert_eq!(end_within(&muted, 0, 1000, 10_000), 1000);
+    // Nothing to spend: only time already muted is left.
+    assert_eq!(end_within(&muted, 100, 400, 0), 300);
+    assert_eq!(end_within(&muted, 0, 400, 0), 0);
+    assert_eq!(end_within(&muted, 0, 400, -5), 0);
 }
 
 #[test]

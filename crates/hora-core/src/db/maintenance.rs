@@ -171,6 +171,25 @@ pub async fn delete_maintenance_window(store: &Store, id: i64) -> sqlx::Result<b
 }
 
 /// Drop the windows that ended before `cutoff`.
+/// End a window at `now`: what it already muted stays on record, the rest
+/// is given back. A window that would then be another one's twin (same origin,
+/// selector and hours) is deleted instead.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be written.
+pub async fn end_maintenance_window(store: &Store, id: i64, now: i64) -> sqlx::Result<()> {
+    let ended = sqlx::query("UPDATE OR IGNORE maintenance_windows SET ends_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(id)
+        .execute(store.sqlx())
+        .await?;
+    if ended.rows_affected() == 0 {
+        delete_maintenance_window(store, id).await?;
+    }
+    Ok(())
+}
+
 pub(super) async fn prune_maintenance_windows(store: &Store, cutoff: i64) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM maintenance_windows WHERE ends_at < ?")
         .bind(cutoff)

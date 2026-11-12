@@ -175,6 +175,14 @@ peer is deliberately small.
 - A window lasts at most `accept_maintenance_secs`: a longer one is cut
   from its start, not refused. A window that starts more than 7 days ahead
   is refused.
+- A peer has a budget of four times `accept_maintenance_secs` of muted
+  time in any 24 hours (an hour a day at 900 seconds), overlapping windows
+  counted once. Past it a window is cut, then refused, and the alerts come
+  back: a script that plans a window every minute cannot keep a host silent.
+- A peer has a budget of four times `accept_maintenance_secs` of muted
+  time in any 24 hours (an hour a day at 900 seconds), overlapping windows
+  counted once. Past it a window is cut, then refused, and the alerts come
+  back: a script that plans a window every minute cannot keep a host silent.
 - It always mutes the watch of **that peer**, and nothing else of the mesh.
 - It mutes this node's monitors labelled with a host only when the
   announcement names a host **and** that host is the `host` of the peer's

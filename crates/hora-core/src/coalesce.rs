@@ -418,6 +418,14 @@ struct Lanes {
     store: Store,
     senders: HashMap<String, mpsc::Sender<Delivery>>,
     workers: JoinSet<()>,
+    /// The downs a full lane did not take, as (channel, monitor name): the
+    /// recovery of an outage a channel was never told about is not sent to
+    /// it either. The down itself is not lost for good: its incident stays
+    /// unannounced, and the scheduler sends it again (see
+    /// `scheduler::REANNOUNCE_SECS`).
+    dropped: HashSet<(String, String)>,
+    /// [`LANE_DEPTH`], but for the tests.
+    depth: usize,
 }
 
 impl Lanes {
@@ -427,6 +435,8 @@ impl Lanes {
             store,
             senders: HashMap::new(),
             workers: JoinSet::new(),
+            dropped: HashSet::new(),
+            depth: LANE_DEPTH,
         }
     }
 
@@ -449,7 +459,7 @@ impl Lanes {
             let sender = if let Some(sender) = self.senders.get(name) {
                 sender.clone()
             } else {
-                let (sender, inbox) = mpsc::channel(LANE_DEPTH);
+                let (sender, inbox) = mpsc::channel(self.depth);
                 self.workers.spawn(lane(
                     name.to_owned(),
                     Arc::clone(&self.notifier),
@@ -459,8 +469,23 @@ impl Lanes {
                 self.senders.insert(name.to_owned(), sender.clone());
                 sender
             };
-            if sender.try_send(delivery.clone()).is_err() {
-                error!(channel = %name, "notification dropped: {LANE_DEPTH} already wait for this channel");
+            let key = |monitor: &str| (name.to_owned(), monitor.to_owned());
+            if let Delivery::Recovered { name: monitor, .. } = delivery
+                && self.dropped.remove(&key(monitor))
+            {
+                info!(channel = %name, monitor = %monitor, "recovery not sent: this channel never got the down");
+                continue;
+            }
+            let sent = sender.try_send(delivery.clone()).is_ok();
+            if !sent {
+                error!(channel = %name, depth = self.depth, "notification dropped: the queue of this channel is full");
+            }
+            if let Delivery::Down(alert) = delivery {
+                if sent {
+                    self.dropped.remove(&key(&alert.name));
+                } else {
+                    self.dropped.insert(key(&alert.name));
+                }
             }
         }
         !targets.is_empty()
@@ -1049,5 +1074,67 @@ mod tests {
         assert!(db::incident_notified(&store, incident).await.unwrap());
         // The silent lane is still on its first delivery: don't wait for it.
         task.abort();
+    }
+
+    /// A lane that is full refuses a down; the recovery of that outage is
+    /// then not sent to that channel either, and a later down that does get
+    /// in clears the slate.
+    #[tokio::test]
+    async fn a_recovery_is_not_sent_where_its_down_was_dropped() {
+        // Accepts, reads nothing, answers nothing: the lane's worker stays
+        // on its first delivery.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_url = format!("http://{}/hook", silent.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                held.push(socket);
+            }
+        });
+        let config = Arc::new(
+            crate::config::parse(&format!(
+                r#"
+                [page]
+                [server]
+                [[channels]]
+                name = "silent"
+                type = "webhook"
+                url = "{silent_url}"
+                "#
+            ))
+            .unwrap(),
+        );
+        let client = crate::http::client(None).unwrap();
+        let notifier = crate::notifications::shared(&config, &client);
+        let mut lanes = Lanes::new(notifier, Store::in_memory().await);
+        lanes.depth = 1;
+        let named = |name: &str| {
+            Delivery::Down(Arc::new(DownAlert {
+                name: name.to_owned(),
+                ..down("api", &[])
+            }))
+        };
+        let recovered = |name: &str| Delivery::Recovered {
+            name: Arc::from(name),
+            local_only: false,
+        };
+        let key = |name: &str| ("silent".to_owned(), name.to_owned());
+
+        lanes.send(&named("First"), None);
+        // Let the worker take it, so the queue's one place is free again.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        lanes.send(&named("Second"), None);
+        assert!(lanes.dropped.is_empty());
+
+        lanes.send(&named("Third"), None);
+        assert!(lanes.dropped.contains(&key("Third")));
+        // Its recovery is not queued behind a down that never was.
+        lanes.send(&recovered("Third"), None);
+        assert!(lanes.dropped.is_empty());
+        // A monitor whose down got in keeps its recovery owed (here it
+        // finds the queue full, which is the channel's trouble, not a rule).
+        lanes.send(&recovered("Second"), None);
+        assert!(lanes.dropped.is_empty());
+        lanes.workers.abort_all();
     }
 }

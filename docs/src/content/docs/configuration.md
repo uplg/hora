@@ -140,7 +140,8 @@ pause, so there is no window where nothing is watching.
 
 A few `[server]` settings are read once at startup and need a restart:
 `bind`, `allowed_origins`, the rate limit (`rate_limit_burst`,
-`rate_limit_refill_secs`), `client_ip_header` and `max_connections`.
+`rate_limit_refill_secs`), `client_ip_header`, `max_connections` and
+`max_connections_per_ip`.
 
 ### Connections and memory
 
@@ -149,8 +150,16 @@ can never take the file descriptors its checks need:
 
 ```toml
 [server]
-max_connections = 1024   # the default
+max_connections = 1024         # the default
+max_connections_per_ip = 256   # the default: a quarter of the above
 ```
+
+One client address holds a quarter of the connections at most, so that a
+single machine cannot keep the heartbeats of your jobs and peers from
+getting in; its further connections are closed. An IPv6 client is counted
+by its /64. Loopback is never limited, and neither is anyone when
+`client_ip_header` is set: every connection then comes from your proxy.
+`max_connections_per_ip = 0` turns the limit off.
 
 Unset, the limit is 1024, fewer when the memory limit is small (a quarter
 of it at 128 KiB a connection: 128 connections in a 64 MiB container), and

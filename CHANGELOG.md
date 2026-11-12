@@ -59,7 +59,27 @@ database serve five times as many visitors.
 - **A whole fleet going down no longer overflows a channel's queue.** A
   channel held 256 waiting notifications and dropped the rest: one host
   with 280 monitors on it was enough on a channel that takes a second to
-  deliver. It holds 4096.
+  deliver. It holds 4096. And a down that no channel took - every one
+  failed, ran into its deadline, or was full - is no longer lost until the
+  next restart: while the outage lasts it is sent again every ten minutes,
+  on the same incident, until one channel takes it. A channel that never
+  got a down is not sent its recovery either.
+- **One machine cannot take every connection.** A client address may hold
+  a quarter of `server.max_connections` (`server.max_connections_per_ip`;
+  an IPv6 client is its /64, loopback is never counted, and there is no
+  limit when `client_ip_header` says a proxy fronts Hora). The heartbeats
+  of jobs and peers come in by the same door as the visitors: with every
+  slot held by one client they timed out, and Hora announced a peer or a
+  job as silent that was not.
+- **A trusted peer cannot mute itself for good.** `accept_maintenance_secs`
+  bounded one window, not how many: a script on the peer planning "now,
+  for ten minutes" every minute kept its host silent indefinitely. A peer
+  now has four accepted lengths in any 24 hours (an hour a day at 900 s),
+  counted on the time actually muted, overlaps once; past it a window is
+  cut, then refused, and the alerts come back. A window the peer withdraws
+  while it runs is kept on record up to that moment.
+- **`Authorization: bearer <token>` is accepted.** The scheme's name is
+  case-insensitive (RFC 9110); only `Bearer` was read.
 - **Concurrent readers of the database no longer queue behind one lock.**
   The bundled SQLite kept allocation statistics, which put a process-wide
   mutex around every allocation it made - and every column of every row

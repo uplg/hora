@@ -41,6 +41,13 @@ pub const MAX_ANNOUNCE_AHEAD_SECS: i64 = 7 * SECONDS_PER_DAY;
 /// attempt to fill the receiver's table.
 pub const MAX_ANNOUNCED_WINDOWS: usize = 32;
 
+/// How much a peer may mute in any 24 hours, in windows of its accepted
+/// length: with `accept_maintenance_secs = 900`, an hour a day. The length
+/// bounds one window; without this a peer that announces one after the
+/// other - a script that plans "now, for ten minutes" every minute is
+/// enough - would keep its host silent for good.
+pub const PEER_BUDGET_WINDOWS: i64 = 4;
+
 /// The origin of a window planned on this node, as stored.
 const ORIGIN_API: &str = "api";
 /// The prefix of the origin of a window a peer announced (`peer:<peer id>`).
@@ -700,21 +707,40 @@ pub async fn apply_announcement(
 
     let origin = peer_origin(peer);
     let wanted = wanted_windows(peer, accepted_secs, announced, now, &mut applied.refused);
+    // Everything this peer was granted that can still weigh on a window
+    // announced now: back to a day before the earliest.
+    let earliest = wanted.iter().map(|new| new.starts_at).min().unwrap_or(now);
+    let granted: Vec<MaintenanceWindow> =
+        db::maintenance_windows_between(store, earliest.min(now) - SECONDS_PER_DAY, i64::MAX)
+            .await?
+            .into_iter()
+            .filter(|row| row.origin == origin)
+            .collect();
+    let wanted = within_budget(
+        wanted,
+        &granted,
+        accepted_secs.saturating_mul(PEER_BUDGET_WINDOWS),
+        now,
+        &mut applied.refused,
+    );
 
-    let stored: Vec<MaintenanceWindow> = db::pending_maintenance_windows(store, now)
-        .await?
-        .into_iter()
-        .filter(|row| row.origin == origin)
-        .collect();
+    let stored: Vec<&MaintenanceWindow> = granted.iter().filter(|row| row.ends_at >= now).collect();
     for row in &stored {
         if !wanted.iter().any(|new| new.is(row)) {
-            db::delete_maintenance_window(store, row.id).await?;
+            // What it already muted stays on record, against the budget;
+            // it mutes nothing from this second on.
+            let last = now - 1;
+            if row.starts_at < last {
+                db::end_maintenance_window(store, row.id, last).await?;
+            } else {
+                db::delete_maintenance_window(store, row.id).await?;
+            }
             info!(
                 peer = %peer.id,
                 window = row.remote_id,
                 "maintenance window withdrawn by the peer"
             );
-            applied.withdrawn.push(row.clone());
+            applied.withdrawn.push((*row).clone());
         }
     }
     for new in &wanted {
@@ -797,6 +823,89 @@ fn wanted_windows(
         });
     }
     wanted
+}
+
+/// Cut `wanted` to what the peer's budget still allows: `budget` seconds of
+/// muted time in the 24 hours before each window starts, counting what it
+/// was `granted` before (as far as it ran: a window withdrawn or replaced
+/// counts until `now`) and the windows that start earlier in this same
+/// announcement. Time already muted is not counted twice, so windows that
+/// overlap cost what they add. A window left with nothing is refused.
+fn within_budget(
+    mut wanted: Vec<Wanted>,
+    granted: &[MaintenanceWindow],
+    budget: i64,
+    now: i64,
+    refused: &mut Vec<&'static str>,
+) -> Vec<Wanted> {
+    wanted.sort_by_key(|new| (new.starts_at, new.remote_id));
+    // A window announced again is weighed afresh, whole: its stored row
+    // would count its beginning twice.
+    let mut muted: Vec<(i64, i64)> = granted
+        .iter()
+        .filter(|row| {
+            !wanted
+                .iter()
+                .any(|new| row.remote_id == Some(new.remote_id) && row.starts_at == new.starts_at)
+        })
+        .map(|row| (row.starts_at, row.ends_at.min(now)))
+        .filter(|(start, end)| end > start)
+        .collect();
+    let mut kept = Vec::with_capacity(wanted.len());
+    for mut new in wanted {
+        let spent = measure(&muted, new.starts_at - SECONDS_PER_DAY, new.starts_at);
+        let ends_at = end_within(&muted, new.starts_at, new.ends_at, budget - spent);
+        if ends_at <= new.starts_at.max(now) {
+            refused.push("this peer has used its maintenance budget for 24 hours");
+            continue;
+        }
+        new.ends_at = ends_at;
+        muted.push((new.starts_at, new.ends_at));
+        kept.push(new);
+    }
+    kept
+}
+
+/// `spans` cut to `[from, to]`, sorted and merged.
+fn merged(spans: &[(i64, i64)], from: i64, to: i64) -> Vec<(i64, i64)> {
+    let mut cut: Vec<(i64, i64)> = spans
+        .iter()
+        .map(|&(start, end)| (start.max(from), end.min(to)))
+        .filter(|(start, end)| end > start)
+        .collect();
+    cut.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(cut.len());
+    for (start, end) in cut {
+        match out.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => out.push((start, end)),
+        }
+    }
+    out
+}
+
+/// How many seconds of `[from, to]` the `spans` cover.
+fn measure(spans: &[(i64, i64)], from: i64, to: i64) -> i64 {
+    merged(spans, from, to)
+        .iter()
+        .map(|(start, end)| end - start)
+        .sum()
+}
+
+/// Where a window from `start` to `end` must stop to add at most
+/// `allowance` seconds to what `spans` already cover.
+fn end_within(spans: &[(i64, i64)], start: i64, end: i64, allowance: i64) -> i64 {
+    let mut left = allowance.max(0);
+    let mut at = start;
+    for (covered_from, covered_to) in merged(spans, start, end) {
+        let gap = covered_from - at;
+        if gap > left {
+            return at + left;
+        }
+        left -= gap;
+        at = covered_to;
+    }
+    if end - at > left { at + left } else { end }
 }
 
 /// One announced window as this node would store it.

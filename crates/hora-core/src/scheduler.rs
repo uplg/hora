@@ -71,10 +71,21 @@ pub(crate) struct AlertState {
     /// degraded and not yet confirmed so. A later confirmed down is then a
     /// new outage and is announced, instead of passing for the old one.
     rearmed: bool,
+    /// The current down was handed to the channels at this time (unix
+    /// seconds) and has not been seen delivered since: its incident is
+    /// looked at again every [`REANNOUNCE_SECS`], and the down sent again
+    /// while no channel has taken it.
+    announce_checked: Option<i64>,
 }
 
 /// How often the peers are asked again about a local-only down.
 const LOCAL_ONLY_REASK_SECS: i64 = 300;
+
+/// How long a confirmed down may stay unannounced - every channel failed,
+/// ran into its deadline, or had its queue full - before it is sent again.
+/// Long next to any delivery, so a down still waiting its turn on a slow
+/// channel is not doubled.
+const REANNOUNCE_SECS: i64 = 600;
 
 impl AlertState {
     /// The state of a monitor found mid-outage at startup (an incident is
@@ -109,6 +120,7 @@ impl AlertState {
     fn outage_ended(&mut self) {
         self.consecutive_down = 0;
         self.local_only_asked = None;
+        self.announce_checked = None;
         self.rearmed = self.level == AlertLevel::Down;
     }
 
@@ -128,7 +140,16 @@ impl AlertState {
         self.consecutive_degraded = 0;
         self.local_only_asked = None;
         self.rearmed = false;
+        self.announce_checked = None;
         self.level != AlertLevel::Healthy
+    }
+
+    /// Whether the down's delivery is due another look.
+    fn reannounce_due(&self, now: i64) -> bool {
+        self.level == AlertLevel::Down
+            && self
+                .announce_checked
+                .is_some_and(|checked| now - checked >= REANNOUNCE_SECS)
     }
 
     /// Whether a local-only down is due for another round of peer questions.
@@ -415,7 +436,33 @@ async fn run(
                 )
                 .await;
                 state.level = AlertLevel::Down;
-                state.local_only_asked = local_only.then(|| chrono::Utc::now().timestamp());
+                let now = chrono::Utc::now().timestamp();
+                state.local_only_asked = local_only.then_some(now);
+                state.announce_checked = Some(now);
+            } else if state.reannounce_due(chrono::Utc::now().timestamp()) {
+                // Delivered since: nothing more to watch. Still not: every
+                // channel failed, or dropped it - said again, on the same
+                // incident, for as long as the outage lasts.
+                state.announce_checked = match open_incident {
+                    Some(incident) if !announced(&store, &monitor.id, incident).await => {
+                        warn!(monitor = %monitor.id, "down still unannounced: sending it again");
+                        let snapshot = config.borrow().clone();
+                        let local_only = confirm_down(
+                            &snapshot,
+                            &store,
+                            &confirm_client,
+                            &alerts,
+                            &monitor,
+                            &outcome,
+                            &mut open_incident,
+                        )
+                        .await;
+                        let now = chrono::Utc::now().timestamp();
+                        state.local_only_asked = local_only.then_some(now);
+                        Some(now)
+                    }
+                    _ => None,
+                };
             } else if state.reask_due(chrono::Utc::now().timestamp()) {
                 let snapshot = config.borrow().clone();
                 let still_local = reconfirm_local_down(
@@ -1002,6 +1049,28 @@ mod tests {
         assert_eq!(every("nightly"), std::time::Duration::from_mins(1));
         assert_eq!(every("fast"), std::time::Duration::from_secs(20));
         assert_eq!(every("web"), std::time::Duration::from_mins(10));
+    }
+
+    #[test]
+    fn an_unannounced_down_is_looked_at_again_until_the_outage_ends() {
+        let mut state = AlertState::default();
+        assert!(state.observe_down(1));
+        state.level = AlertLevel::Down;
+        state.announce_checked = Some(1_000);
+        assert!(!state.reannounce_due(1_000 + REANNOUNCE_SECS - 1));
+        assert!(state.reannounce_due(1_000 + REANNOUNCE_SECS));
+        // Seen delivered: nothing left to watch.
+        state.announce_checked = None;
+        assert!(!state.reannounce_due(i64::MAX));
+        // The outage over, whatever was owed is dropped with it.
+        state.announce_checked = Some(1_000);
+        state.outage_ended();
+        assert_eq!(state.announce_checked, None);
+        state.announce_checked = Some(1_000);
+        state.observe_up();
+        assert_eq!(state.announce_checked, None);
+        // A resumed outage was announced by the previous run.
+        assert_eq!(AlertState::resumed_down(2).announce_checked, None);
     }
 
     #[test]

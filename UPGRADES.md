@@ -189,6 +189,16 @@ roll out:
   reading, 3 minutes idle on keep-alive (above the usual reverse proxies'
   own idle timeout; if yours keeps upstream connections longer, it will
   simply reopen them).
+- **One client address holds a quarter of the connections at most.** New
+  optional key `server.max_connections_per_ip` (0 turns it off). It does
+  not apply to loopback, nor when `client_ip_header` is set. If a reverse
+  proxy on another machine fronts Hora and `client_ip_header` is not set,
+  set it (or the key): the proxy is otherwise held to a client's share,
+  and Hora closes the connections beyond it.
+- **A peer's maintenance has a daily budget**: four times its
+  `accept_maintenance_secs` of muted time in any 24 hours. Nothing to do
+  for a host that reboots a few times a day; a peer that announces windows
+  back to back is cut, with a warning in the log.
 - **Request bodies are limited to 64 KiB** on the JSON endpoints (it was
   2 MiB): a pushed alert with a larger body gets a 413.
 - **`/healthz` has a new field, `probes_ok`**, and a new reason to answer

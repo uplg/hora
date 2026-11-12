@@ -76,7 +76,8 @@ async fn status_response(
                     };
                     Ok::<_, AppError>(Some(Bytes::from(body)))
                 },
-            )?
+            )
+            .await?
             .ok_or(AppError::NotFound("unknown group"))?;
         return Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response());
     }
@@ -114,7 +115,8 @@ async fn status_response(
                 .render()?;
                 Ok::<_, AppError>(Some(html))
             },
-        )?
+        )
+        .await?
         .ok_or(AppError::NotFound("unknown group"))?;
     Ok(Html(page.serve(&req)).into_response())
 }

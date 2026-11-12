@@ -9,7 +9,10 @@
 //!
 //! - **The bound.** At most [`Guarded::limit`] connections are open; the
 //!   next one is left in the kernel's accept queue (where it costs this
-//!   process nothing) until a slot frees.
+//!   process nothing) until a slot frees. One client address may hold a
+//!   share of them only ([`per_address_limit`]): the heartbeats of jobs and
+//!   peers come in by this door too, and one machine must not be able to
+//!   shut it.
 //! - **The deadlines.** A connection is closed when it has sent nothing
 //!   [`FRESH`] after being accepted, when a request it started has no
 //!   answer under way [`REQUEST`] later (the handlers' own deadline is
@@ -18,10 +21,11 @@
 //!   stopped reading - and when nothing has moved for [`IDLE`] after an
 //!   answer: an idle keep-alive connection.
 
+use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -79,6 +83,31 @@ pub(crate) fn connection_limit(
     });
     let room = open_files.map_or(u32::MAX, |files| narrow(files / 2));
     wanted.min(room).max(MIN_LIMIT)
+}
+
+/// Never fewer than this for one address, whatever the limit: a browser
+/// opens six connections by itself.
+const MIN_PER_ADDRESS: u32 = 16;
+
+/// How many connections one client address may hold at once, `None` for no
+/// limit.
+///
+/// - Configured: that number (0 = none).
+/// - Unset: a quarter of `limit`, so that it takes several machines to fill
+///   the listener - unless a reverse proxy stands in front
+///   (`client_ip_header` is set): every connection then comes from the
+///   proxy's address, which is no client's.
+pub(crate) fn per_address_limit(
+    configured: Option<u32>,
+    limit: u32,
+    behind_proxy: bool,
+) -> Option<u32> {
+    match configured {
+        Some(0) => None,
+        Some(count) => Some(count),
+        None if behind_proxy => None,
+        None => Some((limit / 4).max(MIN_PER_ADDRESS).min(limit)),
+    }
 }
 
 /// The process's soft limit on open files, when it has one.
@@ -163,22 +192,96 @@ fn bind_one(address: SocketAddr) -> io::Result<TcpListener> {
     socket.listen(BACKLOG)
 }
 
-/// A [`TcpListener`] that serves at most `limit` connections at once.
+/// The connections open per client address (see [`hora_web::bucket`]).
+type Held = Arc<Mutex<HashMap<IpAddr, u32>>>;
+
+/// One connection counted against its address, until dropped.
+struct AddressSlot {
+    held: Held,
+    address: IpAddr,
+}
+
+impl AddressSlot {
+    /// Count one more connection for `address`, unless it already holds
+    /// `limit`.
+    fn take(held: &Held, address: IpAddr, limit: u32) -> Option<Self> {
+        let mut counts = held.lock().unwrap_or_else(PoisonError::into_inner);
+        let count = counts.entry(address).or_insert(0);
+        if *count >= limit {
+            return None;
+        }
+        *count += 1;
+        Some(Self {
+            held: Arc::clone(held),
+            address,
+        })
+    }
+}
+
+impl Drop for AddressSlot {
+    fn drop(&mut self) {
+        let mut counts = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(count) = counts.get_mut(&self.address) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                counts.remove(&self.address);
+            }
+        }
+    }
+}
+
+/// A [`TcpListener`] that serves at most `limit` connections at once, and at
+/// most `per_address` of them for one client.
 pub(crate) struct Guarded {
     inner: TcpListener,
     slots: Arc<Semaphore>,
     limit: u32,
+    per_address: Option<u32>,
+    held: Held,
     full_logged: Option<Instant>,
+    refused_logged: Option<Instant>,
 }
 
 impl Guarded {
-    pub(crate) fn new(inner: TcpListener, limit: u32) -> Self {
+    pub(crate) fn new(inner: TcpListener, limit: u32, per_address: Option<u32>) -> Self {
         Self {
             inner,
             slots: Arc::new(Semaphore::new(limit as usize)),
             limit,
+            per_address,
+            held: Held::default(),
             full_logged: None,
+            refused_logged: None,
         }
+    }
+
+    /// The count of `peer`'s address, one higher - or `Err` when it already
+    /// holds its share. Loopback is this machine (a proxy beside Hora, the
+    /// container's own health check): never limited.
+    fn address_slot(&mut self, peer: SocketAddr) -> Result<Option<AddressSlot>, ()> {
+        let Some(limit) = self.per_address else {
+            return Ok(None);
+        };
+        let address = hora_web::bucket(peer.ip());
+        if address.is_loopback() {
+            return Ok(None);
+        }
+        if let Some(slot) = AddressSlot::take(&self.held, address, limit) {
+            return Ok(Some(slot));
+        }
+        let now = Instant::now();
+        if self
+            .refused_logged
+            .is_none_or(|at| now.duration_since(at) >= FULL_LOG_EVERY)
+        {
+            self.refused_logged = Some(now);
+            tracing::warn!(
+                client = %address,
+                limit,
+                "a client holds its share of the HTTP connections: its next ones are                  closed (server.max_connections_per_ip; behind a reverse proxy, set                  server.client_ip_header)"
+            );
+        }
+        Err(())
     }
 
     async fn slot(&mut self) -> OwnedSemaphorePermit {
@@ -214,11 +317,20 @@ impl Listener for Guarded {
         // The slot first: a connection that would have none stays in the
         // kernel's queue, where it holds no descriptor of ours.
         let slot = self.slot().await;
-        let (stream, peer) = Listener::accept(&mut self.inner).await;
-        // Answers are written whole; waiting to coalesce them only delays
-        // the last segment.
-        let _ = stream.set_nodelay(true);
-        (Connection::new(stream, Some(slot)), peer)
+        loop {
+            let (stream, peer) = Listener::accept(&mut self.inner).await;
+            // One address past its share: closed here, and the slot goes
+            // to whoever is next in the queue.
+            let Ok(address) = self.address_slot(peer) else {
+                continue;
+            };
+            // Answers are written whole; waiting to coalesce them only
+            // delays the last segment.
+            let _ = stream.set_nodelay(true);
+            let mut connection = Connection::new(stream, Some(slot));
+            connection.address = address;
+            return (connection, peer);
+        }
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {
@@ -232,6 +344,8 @@ pub(crate) struct Connection<S> {
     stream: S,
     /// `None` only in the tests, which need no listener.
     _slot: Option<OwnedSemaphorePermit>,
+    /// Its place in its address's count, when addresses are counted.
+    address: Option<AddressSlot>,
     /// When the connection is given up on, unless it moves first.
     deadline: Instant,
     /// The timer behind `deadline`, re-armed only when a read or a write
@@ -249,6 +363,7 @@ impl<S> Connection<S> {
         Self {
             stream,
             _slot: slot,
+            address: None,
             deadline,
             timer: Box::pin(tokio::time::sleep_until(deadline)),
             receiving: false,
@@ -432,7 +547,7 @@ mod tests {
     async fn pair(limit: u32) -> (Guarded, SocketAddr) {
         let inner = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let address = inner.local_addr().expect("address");
-        (Guarded::new(inner, limit), address)
+        (Guarded::new(inner, limit, None), address)
     }
 
     #[tokio::test]
@@ -445,7 +560,7 @@ mod tests {
 
         let listener = bind("127.0.0.1:0").await.expect("bind");
         let address = listener.local_addr().expect("address");
-        let mut guarded = Guarded::new(listener, 4);
+        let mut guarded = Guarded::new(listener, 4, None);
         let _client = TcpStream::connect(address).await.expect("connect");
         let (connection, _) = guarded.accept().await;
         // What the accepted socket got is the listener's, not the megabytes
@@ -455,6 +570,46 @@ mod tests {
             (SEND_BUFFER_BYTES..=4 * SEND_BUFFER_BYTES).contains(&size),
             "send buffer of {size} bytes"
         );
+    }
+
+    #[test]
+    fn one_address_gets_a_share_unless_a_proxy_fronts_the_listener() {
+        assert_eq!(per_address_limit(None, 1024, false), Some(256));
+        assert_eq!(per_address_limit(None, 128, false), Some(32));
+        assert_eq!(per_address_limit(None, 32, false), Some(MIN_PER_ADDRESS));
+        assert_eq!(per_address_limit(None, 8, false), Some(8));
+        assert_eq!(per_address_limit(None, 1024, true), None);
+        // The operator's word, proxy or not.
+        assert_eq!(per_address_limit(Some(50), 1024, true), Some(50));
+        assert_eq!(per_address_limit(Some(0), 1024, false), None);
+    }
+
+    #[test]
+    fn an_address_is_counted_until_its_connections_close() {
+        let held = Held::default();
+        let client: IpAddr = "203.0.113.7".parse().expect("address");
+        let other: IpAddr = "203.0.113.8".parse().expect("address");
+        let first = AddressSlot::take(&held, client, 2).expect("first");
+        let _second = AddressSlot::take(&held, client, 2).expect("second");
+        assert!(AddressSlot::take(&held, client, 2).is_none(), "a third");
+        // Another client is not its neighbour's keeper.
+        assert!(AddressSlot::take(&held, other, 2).is_some());
+        drop(first);
+        assert!(AddressSlot::take(&held, client, 2).is_some());
+        // Nothing is kept for an address with no connection left.
+        assert_eq!(held.lock().expect("lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn loopback_is_never_counted() {
+        let inner = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = inner.local_addr().expect("address");
+        let mut listener = Guarded::new(inner, 8, Some(1));
+        let _one = TcpStream::connect(address).await.expect("connect");
+        let _two = TcpStream::connect(address).await.expect("connect");
+        let _first = listener.accept().await;
+        let second = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+        assert!(second.is_ok(), "this machine was held to a client's share");
     }
 
     #[tokio::test]

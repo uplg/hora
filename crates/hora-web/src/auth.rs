@@ -27,7 +27,18 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(bearer_token)
+}
+
+/// The token of an `Authorization` value with the `Bearer` scheme. The
+/// scheme's name is case-insensitive (RFC 9110): `bearer` and `BEARER`
+/// name it too. The token itself is compared as sent.
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim_start_matches(' '))
+        .filter(|token| !token.is_empty())
 }
 
 /// The `X-Push-Token` credential, if any.
@@ -259,6 +270,30 @@ pub(crate) fn authorize_peer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bearer_scheme_is_read_whatever_its_case() {
+        for value in [
+            "Bearer s3cret",
+            "bearer s3cret",
+            "BEARER s3cret",
+            "Bearer  s3cret",
+        ] {
+            assert_eq!(bearer_token(value), Some("s3cret"), "{value}");
+        }
+        // Another scheme, no token, or the scheme glued to the token.
+        for value in [
+            "Basic s3cret",
+            "Bearer",
+            "Bearer ",
+            "Bearers3cret",
+            "s3cret",
+        ] {
+            assert_eq!(bearer_token(value), None, "{value}");
+        }
+        // The token is the secret: its case is its own.
+        assert_eq!(bearer_token("bearer S3cret"), Some("S3cret"));
+    }
 
     #[test]
     fn a_query_token_is_found_wherever_it_sits() {

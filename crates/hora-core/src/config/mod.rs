@@ -382,6 +382,15 @@ pub struct Server {
     /// sockets and the database. Read at startup.
     #[serde(default)]
     pub max_connections: Option<u32>,
+    /// How many of those connections one client address may hold (an IPv6
+    /// client is its /64): the next one is closed at once. Without it, a
+    /// single machine can take every connection and keep the heartbeats of
+    /// jobs and peers from getting in. Unset: a quarter of
+    /// `max_connections` - and no limit when `client_ip_header` is set,
+    /// since every connection then comes from your proxy. Loopback is
+    /// never limited. 0 turns it off. Read at startup.
+    #[serde(default)]
+    pub max_connections_per_ip: Option<u32>,
     /// The operator token: views private monitors (those with
     /// `public = false`) and authorizes the write endpoints (silence,
     /// maintenance, announce, event, alert). Sent as `Authorization: Bearer <token>`; the

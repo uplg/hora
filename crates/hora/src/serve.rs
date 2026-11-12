@@ -102,7 +102,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     let prune_task =
         hora_core::maintenance::spawn_pruner(&store, handle.config.clone(), shutdown_rx);
 
-    let (listener, connections) = listen(&handle.config.borrow().server).await?;
+    let (listener, connections, per_address) = listen(&handle.config.borrow().server).await?;
 
     let state = hora_web::AppState::new(
         store,
@@ -133,7 +133,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     );
     serve_until_stopped(
         listener,
-        connections,
+        (connections, per_address),
         app,
         &shutdown_tx,
         shutdown_signal(),
@@ -190,7 +190,7 @@ const SUPERVISOR_STOP: Duration = Duration::from_mins(1);
 /// once (see [`crate::listener`]).
 async fn listen(
     server: &hora_core::config::Server,
-) -> anyhow::Result<(tokio::net::TcpListener, u32)> {
+) -> anyhow::Result<(tokio::net::TcpListener, u32, Option<u32>)> {
     let bind = &server.bind;
     let listener = crate::listener::bind(bind)
         .await
@@ -200,11 +200,19 @@ async fn listen(
         crate::listener::open_files_limit(),
         crate::listener::memory_limit(),
     );
+    let per_address = crate::listener::per_address_limit(
+        server.max_connections_per_ip,
+        connections,
+        server.client_ip_header.is_some(),
+    );
+    let share = per_address.map_or_else(String::new, |share| {
+        format!(", {share} for one client address")
+    });
     tracing::info!(
-        "hora {} listening on http://{bind} (up to {connections} connections at once)",
+        "hora {} listening on http://{bind} (up to {connections} connections at once{share})",
         env!("CARGO_PKG_VERSION")
     );
-    Ok((listener, connections))
+    Ok((listener, connections, per_address))
 }
 
 /// Serve `app` until `signal`, then stop within bounds: everything is told to
@@ -218,7 +226,7 @@ async fn listen(
 /// anything.
 async fn serve_until_stopped(
     listener: tokio::net::TcpListener,
-    connections: u32,
+    (connections, per_address): (u32, Option<u32>),
     app: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
         axum::Router,
         std::net::SocketAddr,
@@ -231,7 +239,7 @@ async fn serve_until_stopped(
     let mut stop = shutdown.subscribe();
     // `tap_io` changes nothing on the connection: it is the wrapper axum
     // knows how to read the peer address through.
-    let listener = crate::listener::Guarded::new(listener, connections).tap_io(|_| {});
+    let listener = crate::listener::Guarded::new(listener, connections, per_address).tap_io(|_| {});
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             // A dropped sender is a stop too.
@@ -389,7 +397,7 @@ mod tests {
         let server = tokio::spawn(async move {
             serve_until_stopped(
                 listener,
-                64,
+                (64, None),
                 app,
                 &shutdown,
                 async {

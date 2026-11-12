@@ -72,7 +72,8 @@ async fn cached_body(
     let body = snapshot.body(&viewer.config, key, || {
         let summary = snapshot.summary(&viewer.config, &viewer.audience);
         render(&summary).map(|bytes| Some(Bytes::from(bytes)))
-    })?;
+    });
+    let body = body.await?;
     Ok(body.unwrap_or_default())
 }
 

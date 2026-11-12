@@ -241,7 +241,11 @@ fn client_entry(raw: &str, trusted_proxies: usize) -> Option<&str> {
 /// (2^64 addresses), so keying on the full address would hand a client a
 /// fresh bucket per request - no limit at all, and one map entry per request
 /// until the next `retain_recent`. An IPv4-mapped address counts as IPv4.
-fn bucket(ip: IpAddr) -> IpAddr {
+///
+/// Public for the listener, which counts connections per client the same
+/// way.
+#[must_use]
+pub fn bucket(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {

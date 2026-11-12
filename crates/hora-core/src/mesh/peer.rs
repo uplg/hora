@@ -196,8 +196,14 @@ pub fn spawn_heartbeat(
             let now = chrono::Utc::now().timestamp();
             let (scheduler_ok, age) = scheduler_liveness(&snapshot, &last_tick, now);
             let db_ok = db_ok(&store).await;
-            if !(scheduler_ok && db_ok) {
-                warn!(scheduler_ok, db_ok, "heartbeat skipped: node unhealthy");
+            // Checks skipped for lack of descriptors or memory: this node
+            // watches nothing for now, and must not say it is fine.
+            let probes_ok = !crate::probe::local::recent(now);
+            if !(scheduler_ok && db_ok && probes_ok) {
+                warn!(
+                    scheduler_ok,
+                    db_ok, probes_ok, "heartbeat skipped: node unhealthy"
+                );
                 continue;
             }
             let channels = notifier.load().health_snapshot();

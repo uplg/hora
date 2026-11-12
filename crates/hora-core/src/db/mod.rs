@@ -86,9 +86,9 @@ pub use incidents::{
     update_incident_vantage,
 };
 pub use maintenance::{
-    MaintenanceWindow, NewMaintenanceWindow, delete_maintenance_window, insert_maintenance_window,
-    maintenance_window, maintenance_windows_between, maintenance_windows_since,
-    pending_maintenance_windows,
+    MaintenanceWindow, NewMaintenanceWindow, delete_maintenance_window, end_maintenance_window,
+    insert_maintenance_window, maintenance_window, maintenance_windows_between,
+    maintenance_windows_since, pending_maintenance_windows,
 };
 pub use release::{StoredRelease, mark_release_notified, release_watch, upsert_release_watch};
 pub(crate) use retention::prune;
