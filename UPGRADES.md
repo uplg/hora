@@ -4,6 +4,17 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.11.4 → 0.11.5
+
+No migration, no new key. Pull the new image and recreate the container.
+
+HTTP probes no longer reuse a connection: each check opens its own, so the
+latency of an HTTPS monitor now includes the TCP and TLS handshakes every
+time (it used to on the first check only). Figures go up by a handshake -
+tens of milliseconds, more for a distant target - without the target having
+slowed down. Raise a `degraded_over_ms` that sat just above the old figures,
+and expect a step in the latency history at the upgrade.
+
 ## 0.11.3 → 0.11.4
 
 No migration, no new key: a dependency update (tokio 1.54.1, ctutils 0.4.6)

@@ -32,7 +32,12 @@ const OUTER_DEADLINE_SLACK: Duration = Duration::from_secs(2);
 ///
 /// Returns an error if the proxy URL is invalid or the client cannot be built.
 pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
-    build(proxy, Policy::custom(same_origin_redirect), None)
+    build(
+        proxy,
+        Policy::custom(same_origin_redirect),
+        None,
+        Reuse::Pooled,
+    )
 }
 
 /// Like [`client`], but never auto-follows redirects: probes follow them
@@ -41,11 +46,18 @@ pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
 /// across hosts, so without this an arbitrary `X-Api-Key` would be re-sent to
 /// whatever host a malicious target redirects to.
 ///
+/// A probe client keeps no connection between requests: every probe opens its
+/// own (TCP, TLS, then the request), as a new visitor would. A pooled
+/// connection that stops answering without closing - seen in production on an
+/// HTTP/2 connection kept alive by a 60s probe - would otherwise fail every
+/// later probe and its retry until the process restarts, on a target that
+/// answers anyone else.
+///
 /// # Errors
 ///
 /// Returns an error if the proxy URL is invalid or the client cannot be built.
 pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
-    build(proxy, Policy::none(), None)
+    build(proxy, Policy::none(), None, Reuse::Fresh)
 }
 
 /// Like [`probe_client`], but restricted to one address family by binding the
@@ -58,13 +70,23 @@ pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
 ///
 /// Returns an error if the client cannot be built.
 pub fn probe_client_family(local: std::net::IpAddr) -> reqwest::Result<Client> {
-    build(None, Policy::none(), Some(local))
+    build(None, Policy::none(), Some(local), Reuse::Fresh)
+}
+
+/// Whether a client keeps idle connections for its next request.
+#[derive(Clone, Copy)]
+enum Reuse {
+    /// Notifiers and the peer mesh: many requests to few hosts.
+    Pooled,
+    /// Probes: one connection per request (see [`probe_client`]).
+    Fresh,
 }
 
 fn build(
     proxy: Option<&str>,
     redirect: Policy,
     local: Option<std::net::IpAddr>,
+    reuse: Reuse,
 ) -> reqwest::Result<Client> {
     let mut builder = Client::builder()
         .user_agent(concat!("hora/", env!("CARGO_PKG_VERSION")))
@@ -74,6 +96,9 @@ fn build(
         // override this with the monitor's own timeout.
         .timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(10));
+    if matches!(reuse, Reuse::Fresh) {
+        builder = builder.pool_max_idle_per_host(0);
+    }
     if let Some(proxy) = proxy {
         builder = builder.proxy(reqwest::Proxy::all(proxy)?);
     }

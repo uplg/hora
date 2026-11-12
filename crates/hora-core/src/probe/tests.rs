@@ -291,6 +291,50 @@ async fn serve(response: &'static str) -> (String, std::sync::Arc<std::sync::ato
     (format!("http://{addr}"), hits)
 }
 
+/// A keep-alive HTTP server whose connections go mute after one answer: the
+/// first request on a connection gets a 200, any later one on the same
+/// connection is read and never answered. Returns its base URL and the number
+/// of connections accepted so far.
+async fn serve_once_per_connection() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = connections.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                if !matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {
+                    return;
+                }
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+                // Stay open and swallow whatever comes next, answering nothing.
+                while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+            });
+        }
+    });
+    (format!("http://{addr}"), connections)
+}
+
+#[tokio::test]
+async fn a_probe_never_reuses_a_connection() {
+    // A connection that stops answering without closing must not poison the
+    // probes that follow: each one opens its own.
+    let (url, connections) = serve_once_per_connection().await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    monitor.timeout_secs = 2;
+    for round in 1..=3 {
+        let outcome = http(&client, &monitor, spec(&monitor)).await;
+        assert!(outcome.is_up(), "probe {round}: {:?}", outcome.error);
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), round);
+    }
+}
+
 #[tokio::test]
 async fn expected_redirect_is_not_followed() {
     let (url, hits) = serve(

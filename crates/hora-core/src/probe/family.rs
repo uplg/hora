@@ -104,8 +104,9 @@ async fn probe_family(monitor: &Monitor, probe: DualStack<'_>, family: Family) -
 /// The process-wide probe client bound to `family`, built on first use. Every
 /// dual-stack monitor shares it: the client carries no per-monitor setting
 /// (headers go per request, dual-stack excludes proxies), and sharing keeps
-/// connection and TLS-session reuse - like the per-monitor client of a
-/// single-stack probe - instead of two fresh clients on every probe.
+/// one TLS setup per family - like the shared client of single-stack probes -
+/// instead of two fresh clients on every probe. Connections are not reused
+/// (see [`probe_client`](crate::http::probe_client)).
 fn family_client(family: Family) -> reqwest::Result<Client> {
     static V4: OnceLock<Client> = OnceLock::new();
     static V6: OnceLock<Client> = OnceLock::new();

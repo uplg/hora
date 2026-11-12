@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-11-12
+
+One fix: an HTTP monitor could stay down on a target that answered, until
+Hora restarted. Plus the compatible dependency updates.
+
+### Fixed
+
+- **An HTTP probe no longer reuses a connection.** Probes shared one pooled
+  client, and a probe every 60 seconds kept its connection alive for good. A
+  connection that stopped answering without closing then failed every later
+  probe and its retry with "request timed out" until Hora restarted, on a
+  target that answered anyone else (seen on an HTTP/2 connection). Each probe
+  now opens its own connection, as a new visitor would. The measured latency
+  of an HTTPS monitor therefore includes the TCP and TLS handshakes on every
+  check, not only on the first: expect higher figures, and review
+  `degraded_over_ms` values set close to the old ones. Notifiers and the
+  peer mesh keep their pooled connections.
+
+### Changed
+
+- **Dependencies at their latest compatible releases** (`cargo update`):
+  aws-lc-rs 1.19.0, rustls-pki-types 1.16.0, webpki-roots 1.0.12, toml 1.2.1,
+  ctutils 0.4.8, notify 8.2.2 and croner 4.0.3, among others. No advisory
+  behind them.
+
 ## [0.11.4] - 2026-10-27
 
 A security release for two advisories published on 2026-10-21 and
@@ -1381,7 +1406,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.11.4...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.11.5...HEAD
+[0.11.5]: https://github.com/uplg/hora/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/uplg/hora/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/uplg/hora/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/uplg/hora/compare/v0.11.1...v0.11.2
