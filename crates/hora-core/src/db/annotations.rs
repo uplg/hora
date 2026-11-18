@@ -93,7 +93,7 @@ pub async fn insert_announcement(
     .bind(body)
     .bind(severity.as_str())
     .bind(until)
-    .bind(chrono::Utc::now().timestamp())
+    .bind(jiff::Timestamp::now().as_second())
     .execute(store.sqlx())
     .await?;
     Ok(result.last_insert_rowid())
@@ -154,7 +154,7 @@ pub struct EventMarker {
 pub async fn insert_event(store: &Store, title: &str) -> sqlx::Result<i64> {
     let result = sqlx::query("INSERT INTO events (title, created_at) VALUES (?, ?)")
         .bind(title)
-        .bind(chrono::Utc::now().timestamp())
+        .bind(jiff::Timestamp::now().as_second())
         .execute(store.sqlx())
         .await?;
     Ok(result.last_insert_rowid())
@@ -286,7 +286,7 @@ pub async fn insert_pushed_alert(
     .bind(title)
     .bind(message)
     .bind(dedup_key)
-    .bind(chrono::Utc::now().timestamp())
+    .bind(jiff::Timestamp::now().as_second())
     .execute(store.sqlx())
     .await?;
     Ok(result.last_insert_rowid())
@@ -334,7 +334,7 @@ pub async fn insert_silence(
         .bind(monitor_id)
         .bind(until)
         .bind(reason)
-        .bind(chrono::Utc::now().timestamp())
+        .bind(jiff::Timestamp::now().as_second())
         .execute(store.sqlx())
         .await?;
     Ok(())
@@ -352,7 +352,7 @@ pub async fn insert_silences(
     until: i64,
     reason: Option<&str>,
 ) -> sqlx::Result<()> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut tx = store.sqlx().begin().await?;
     for id in monitor_ids {
         sqlx::query(

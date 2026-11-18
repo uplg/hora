@@ -5,8 +5,6 @@ use std::fmt::Write as _;
 
 use axum::http::header;
 use axum::response::IntoResponse;
-use badgelib::{Badge, Color, Style};
-use chrono::DateTime;
 
 use hora_core::db::{EventMarker, Point};
 use maud::{Markup, PreEscaped, html};
@@ -411,7 +409,7 @@ fn chart_svg(status: &str, line: &str, area: &str, over: &[Overlay]) -> Markup {
 fn chart_labels(svg: &Markup, top: i64, first: i64, last: i64) -> Markup {
     let ticks = if last > first { 4 } else { 1 };
     let times = (0..ticks).filter_map(|third| {
-        DateTime::from_timestamp(first + (last - first) * third / 3, 0).map(|at| (third, at))
+        hora_core::clock::at(first + (last - first) * third / 3).map(|at| (third, at))
     });
     html! {
         div.chart {
@@ -420,7 +418,7 @@ fn chart_labels(svg: &Markup, top: i64, first: i64, last: i64) -> Markup {
             }
             (svg)
             div.chart-x {
-                @for (third, at) in times { span class={ "x" (third) } { (at.format("%H:%M")) } }
+                @for (third, at) in times { span class={ "x" (third) } { (at.strftime("%H:%M")) } }
             }
         }
     }
@@ -499,10 +497,10 @@ pub(crate) fn sparkline(
             y: ("0".to_owned(), format!("{CHART_H:.0}")),
             title: Some(event.title.clone()),
         });
-        if let Some(at) = DateTime::from_timestamp(event.created_at, 0) {
+        if let Some(at) = hora_core::clock::at(event.created_at) {
             listed.push(ChartEvent {
-                at: at.format("%a %H:%M UTC").to_string(),
-                iso: at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                at: at.strftime("%a %H:%M UTC").to_string(),
+                iso: hora_core::clock::rfc3339(at),
                 title: event.title.clone(),
             });
         }
@@ -572,17 +570,6 @@ pub(crate) fn svg_response(svg: String) -> impl IntoResponse {
         ],
         svg,
     )
-}
-
-/// Render a shields-style badge: a grey label and a coloured message.
-pub(crate) fn badge(label: &str, message: &str, color: &str, style: Style) -> String {
-    Badge::new()
-        .label(label)
-        .label_color(Color::Hex("1b222c".into()))
-        .value(message)
-        .value_color(Color::Hex(color.trim_start_matches('#').into()))
-        .style(style)
-        .to_svg()
 }
 
 #[cfg(test)]
@@ -731,24 +718,6 @@ mod tests {
         assert_eq!(chart.events[0].iso, "1970-01-01T00:02:30Z");
     }
 
-    #[test]
-    fn badge_has_label_message_and_color() {
-        let svg = badge("status", "up", status_color("up"), Style::Flat);
-        assert!(svg.starts_with("<svg"));
-        assert!(svg.contains(">status<") && svg.contains(">up<"));
-        assert!(svg.contains(&Color::Hex(status_color("up").into()).to_css()));
-    }
-
-    #[test]
-    fn badge_supports_styles() {
-        let flat = badge("status", "up", status_color("up"), Style::Flat);
-        let flat_square = badge("status", "up", status_color("up"), Style::FlatSquare);
-        let for_the_badge = badge("status", "up", status_color("up"), Style::ForTheBadge);
-
-        assert!(flat.contains(r#"id="s""#));
-        assert!(!flat_square.contains(r#"id="s""#));
-        assert!(for_the_badge.contains(r#"height="28""#));
-    }
     #[test]
     fn uptime_color_tiers() {
         assert_eq!(uptime_color(1000), BADGE_UP);

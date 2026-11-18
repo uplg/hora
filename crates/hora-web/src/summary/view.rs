@@ -1,11 +1,9 @@
 //! The view model the page template and the JSON API render.
 
-use std::sync::Arc;
-
-use chrono::{DateTime, Utc};
 use hora_core::probe::FailureKind;
 use hora_core::status::MonitorState;
 use serde::Serialize;
+use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::display::DisplayState;
@@ -113,9 +111,9 @@ pub(crate) struct MaintenanceView {
     /// up by title, two windows with the same (or no) title were one, and a
     /// group's page showed another group's hours.
     #[serde(skip)]
-    pub(crate) start: DateTime<Utc>,
+    pub(crate) start: jiff::Timestamp,
     #[serde(skip)]
-    pub(crate) end: DateTime<Utc>,
+    pub(crate) end: jiff::Timestamp,
     /// The window covers everything.
     #[serde(skip)]
     pub(crate) all: bool,
@@ -338,13 +336,9 @@ impl Summary {
     /// When the summary was built, as the page's eyebrow says the hour:
     /// "Saturday 3 October, 14:32 UTC".
     pub(crate) fn when(&self) -> String {
-        DateTime::parse_from_rfc3339(&self.generated_at).map_or_else(
+        self.generated_at.parse::<jiff::Timestamp>().map_or_else(
             |_| self.updated_utc.clone(),
-            |at| {
-                at.with_timezone(&Utc)
-                    .format("%A %-d %B, %H:%M UTC")
-                    .to_string()
-            },
+            |at| at.strftime("%A %-d %B, %H:%M UTC").to_string(),
         )
     }
 

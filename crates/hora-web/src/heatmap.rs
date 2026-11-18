@@ -6,8 +6,6 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use chrono::DateTime;
-
 use maud::{Markup, PreEscaped, html};
 
 /// The window rendered: four full weeks, so each weekday appears four times
@@ -161,7 +159,7 @@ fn slowest(cells: &[(i64, i64)], now: i64) -> Markup {
     let hours = inside.into_iter().filter_map(|(hour, latency)| {
         // One decimal, in integers: 3.3 times the usual.
         let tenths = (latency * 10 + median / 2) / median;
-        DateTime::from_timestamp(hour, 0).map(|at| (at, latency, tenths))
+        hora_core::clock::at(hour).map(|at| (at, latency, tenths))
     });
     html! {
         h3.slowest-h { "Slowest hours" }
@@ -169,7 +167,7 @@ fn slowest(cells: &[(i64, i64)], now: i64) -> Markup {
         ol.slowest {
             @for (at, latency, tenths) in hours {
                 li {
-                    time datetime=(at.format("%Y-%m-%dT%H:%MZ")) { (at.format("%a %-d %b, %H:%M")) }
+                    time datetime=(at.strftime("%Y-%m-%dT%H:%MZ")) { (at.strftime("%a %-d %b, %H:%M")) }
                     b { (crate::layout::ms(latency)) }
                     span { (tenths / 10) "." (tenths % 10) "× the usual" }
                 }
@@ -204,11 +202,11 @@ fn image(cells: &[(i64, i64)], now: i64, monitor_name: &str, standalone: bool) -
             }
             @for (day, day_ts) in days {
                 @let x = tenth(LEFT + coordf(day) * CELL_W);
-                @let date = DateTime::from_timestamp(day_ts, 0);
+                @let date = hora_core::clock::at(day_ts);
                 // Day labels weekly, anchored on the column's weekday
                 // ("Mon 08"): the weekday is the whole point of a 4-week window.
                 @if let (0, Some(date)) = (day % 7, date) {
-                    text x=(x) y=(whole(TOP - 7.0)) fill=(INK_MUTED_LIGHT) { (date.format("%a %d")) }
+                    text x=(x) y=(whole(TOP - 7.0)) fill=(INK_MUTED_LIGHT) { (date.strftime("%a %d")) }
                 }
                 @for hour in 0..24_i64 {
                     // No data: the background shows through.
@@ -219,7 +217,7 @@ fn image(cells: &[(i64, i64)], now: i64, monitor_name: &str, standalone: bool) -
                             fill=(TIER_LIGHT[tier]) {
                             title {
                                 @if let Some(date) = date {
-                                    (date.format("%a %Y-%m-%d")) " " (format!("{hour:02}")) ":00 UTC - " (latency) " ms"
+                                    (date.strftime("%a %Y-%m-%d")) " " (format!("{hour:02}")) ":00 UTC - " (latency) " ms"
                                 }
                             }
                         }

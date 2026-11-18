@@ -54,8 +54,8 @@ fn trusting() -> Config {
     config_with("host = \"frank\"\naccept_maintenance_secs = 900", "")
 }
 
-fn at(timestamp: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp(timestamp, 0).expect("time")
+fn at(timestamp: i64) -> Timestamp {
+    crate::clock::at(timestamp).expect("time")
 }
 
 fn announced(id: i64, starts_at: i64, ends_at: i64, host: Option<&str>) -> AnnouncedWindow {
@@ -84,8 +84,8 @@ fn host_plan<'a>(host: &'a str, starts_at: &'a str) -> Plan<'a> {
 #[tokio::test]
 async fn one_schedule_answers_for_config_api_and_peer_windows() {
     let store = Store::in_memory().await;
-    let start = at(NOW).format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let end = at(NOW + 600).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let start = crate::clock::rfc3339(at(NOW));
+    let end = crate::clock::rfc3339(at(NOW + 600));
     let config = config_with(
         "host = \"frank\"\naccept_maintenance_secs = 900",
         &format!(
@@ -160,7 +160,7 @@ async fn planning_twice_returns_the_same_window() {
     assert!(!again.created);
     assert_eq!(again.window.id, first.window.id);
     // The same start as RFC 3339 is the same window.
-    let rfc = at(NOW + 3600).to_rfc3339();
+    let rfc = crate::clock::rfc3339(at(NOW + 3600));
     let again = plan(&store, &config, host_plan("frank", &rfc), NOW)
         .await
         .expect("planned");

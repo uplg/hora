@@ -234,7 +234,7 @@ pub(crate) async fn backup(dest: &str) -> Result<(), CliError> {
 /// to check the wording (and the data) without notifying anyone.
 pub(crate) async fn digest_preview() -> Result<(), CliError> {
     let (config, store) = open_database().await?;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let (period, summary) = hora_core::digest::build_summary(&store, &config, now).await?;
     println!("Hora digest ({period})");
     println!("{summary}");

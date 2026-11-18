@@ -85,7 +85,7 @@ async fn test_app_with_vantage(
 
 /// A scheduler beacon that just ticked, so `/healthz` reports ok.
 fn fresh_tick() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp()).expect("positive")
+    u64::try_from(jiff::Timestamp::now().as_second()).expect("positive")
 }
 
 /// The rate limiter keys on the peer address; oneshot has no real
@@ -352,7 +352,7 @@ async fn metrics_skip_up_for_unknown_monitors() {
     sqlx::query(
         "INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, 'web', 1, 12)",
     )
-    .bind(chrono::Utc::now().timestamp())
+    .bind(jiff::Timestamp::now().as_second())
     .execute(store.fixture_pool())
     .await
     .unwrap();

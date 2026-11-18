@@ -69,7 +69,7 @@ fn a_certificate_in_its_last_day_is_not_expired() {
 
 #[test]
 fn build_bar_zero_fills_to_requested_days() {
-    let now = DateTime::from_timestamp(1_609_459_200, 0).unwrap();
+    let now = hora_core::clock::at(1_609_459_200).unwrap();
     let rows = vec![DayRow {
         day: "2021-01-01".to_owned(),
         up: 10,
@@ -203,7 +203,7 @@ async fn three_monitors() -> (hora_core::db::Store, hora_core::config::Config, i
         "#,
     )
     .unwrap();
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for (id, status, error) in [
         ("ok", 1, None),
         ("bad", 2, Some("HTTP 500: stack trace")),
@@ -412,7 +412,7 @@ async fn planned_fixture() -> (Store, Config, i64) {
     )
     .expect("config");
     let store = Store::in_memory().await;
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     // Under way: the peer announced the reboot of its host.
     hora_core::planned::apply_announcement(
         &store,
@@ -499,7 +499,7 @@ async fn planned_windows_reach_each_audience_without_naming_what_it_may_not_see(
     assert_eq!(public.maintenances[0].monitors, "Site");
     assert_eq!(public.maintenances[0].ids, ["site"]);
     assert_eq!(public.maintenances[0].note, None);
-    assert_eq!(public.maintenances[0].end.timestamp(), now + 540);
+    assert_eq!(public.maintenances[0].end.as_second(), now + 540);
     let json = serde_json::to_string(&public.maintenances).unwrap();
     assert!(!json.contains("Vault") && !json.contains("frank"), "{json}");
     assert_eq!(card(&public, "site").as_deref(), Some("kernel reboot"));

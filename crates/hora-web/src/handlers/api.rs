@@ -5,7 +5,6 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use chrono::Utc;
 use serde::Deserialize;
 
 use hora_core::db::{self, Point};
@@ -110,7 +109,7 @@ pub(crate) async fn latency_json(
     let visibility = Visibility::new(&viewer.config, &audience);
     visible_monitor(&viewer.config, &visibility, &id)?;
     let window = query.hours.clamp(1, MAX_LATENCY_HOURS) * SECONDS_PER_HOUR;
-    let since = Utc::now().timestamp() - window;
+    let since = jiff::Timestamp::now().as_second() - window;
     // Average into at most MAX_LATENCY_POINTS buckets in SQL, so a 10s-interval
     // monitor over 720h (~260k raw rows) never materializes more than the cap.
     // Ceiling division keeps the bucket count under the cap even for short

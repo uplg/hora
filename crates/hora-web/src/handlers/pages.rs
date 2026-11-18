@@ -9,7 +9,6 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, header};
 use axum::response::{Html, IntoResponse, Response};
-use chrono::Utc;
 use serde::Deserialize;
 
 use hora_core::config::{Config, Kind};
@@ -197,8 +196,8 @@ pub(crate) async fn monitor_page(
 
     // Its own incidents over the bar's days (the figures and the days
     // read them), from its index - not the newest of every monitor.
-    let since =
-        Utc::now().timestamp() - i64::from(config.page.history_days) * hora_core::SECONDS_PER_DAY;
+    let since = jiff::Timestamp::now().as_second()
+        - i64::from(config.page.history_days) * hora_core::SECONDS_PER_DAY;
     let mut incidents = db::monitor_incidents(&state.store, &id, since, 500).await?;
     for incident in &mut incidents {
         visibility.sanitize_incident(incident);
@@ -212,7 +211,7 @@ pub(crate) async fn monitor_page(
         let svg = state
             .heatmaps
             .get_or_build(&key, config, async {
-                let now = Utc::now().timestamp();
+                let now = jiff::Timestamp::now().as_second();
                 let since = crate::heatmap::since(now);
                 let cells = db::latency_hourly(&state.store, &id, since).await?;
                 Ok::<_, hora_core::db::Error>(crate::heatmap::render(
@@ -301,7 +300,10 @@ pub(crate) async fn report_page(
     // How far back a monthly report may reach: the daily aggregates it reads
     // live that long; an older month would only be an empty - and needlessly
     // expensive - report.
-    if end <= Utc::now().timestamp() - db::AGGREGATE_RETENTION_DAYS * hora_core::SECONDS_PER_DAY {
+    if end
+        <= jiff::Timestamp::now().as_second()
+            - db::AGGREGATE_RETENTION_DAYS * hora_core::SECONDS_PER_DAY
+    {
         return Err(AppError::BadRequest(
             "month is older than the retained history (12 months)",
         ));
@@ -419,7 +421,9 @@ fn render_report(
         title,
         label: report.label.clone(),
         lede,
-        generated: Utc::now().format("%-d %B %Y, %H:%M UTC").to_string(),
+        generated: jiff::Timestamp::now()
+            .strftime("%-d %B %Y, %H:%M UTC")
+            .to_string(),
         kpis,
         groups,
         prev,
@@ -590,7 +594,7 @@ pub(crate) async fn timeline_page(
 ) -> Result<Html<String>, AppError> {
     let config = &viewer.config;
     let visibility = Visibility::new(config, &viewer.audience);
-    let since = Utc::now().timestamp() - TIMELINE_DAYS * hora_core::SECONDS_PER_DAY;
+    let since = jiff::Timestamp::now().as_second() - TIMELINE_DAYS * hora_core::SECONDS_PER_DAY;
 
     let sources = if visibility.sees_operator_streams() {
         hora_core::timeline::fetch(&state.store, since, 500).await?

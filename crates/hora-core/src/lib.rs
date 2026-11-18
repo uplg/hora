@@ -3,6 +3,7 @@
 mod alert_once;
 pub mod announce;
 pub mod cert;
+pub mod clock;
 pub mod coalesce;
 pub mod config;
 pub mod config_watch;

@@ -22,11 +22,9 @@ pub(crate) use status::Overall;
 use status::iso;
 pub(crate) use status::{BudgetState, CertState, bar_class, day_state};
 
+use hora_core::db::Store;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use chrono::{DateTime, Utc};
-use hora_core::db::Store;
 
 use hora_core::SECONDS_PER_DAY;
 use hora_core::config::{Alerts, Config, Monitor};
@@ -39,7 +37,7 @@ use crate::visibility::{Audience, Visibility};
 
 /// Shared, read-only inputs for building each monitor's view.
 pub(crate) struct SummaryCtx {
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
     timestamp: i64,
     /// The global failure threshold, which the watched peers keep; a monitor
     /// may have its own ([`Monitor::fail_threshold`]).
@@ -103,8 +101,8 @@ pub(crate) async fn build_summary(
     channel_health: &[ChannelHealthEntry],
     vantage: &HashMap<String, Vec<hora_core::mesh::vantage::PeerVantage>>,
 ) -> Built {
-    let now = Utc::now();
-    let timestamp = now.timestamp();
+    let now = jiff::Timestamp::now();
+    let timestamp = now.as_second();
     // The daily fetch also feeds the error-budget arithmetic, so it must cover
     // the largest configured SLO window, not just the displayed history.
     let slo_days = config
@@ -201,8 +199,8 @@ pub(crate) async fn build_summary(
         title: config.page.title.clone(),
         overall,
         overall_label: overall.label(),
-        generated_at: now.to_rfc3339(),
-        updated_utc: now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        generated_at: hora_core::clock::rfc3339_offset(now),
+        updated_utc: now.strftime("%Y-%m-%d %H:%M:%S UTC").to_string(),
         incidents,
         maintenances,
         upcoming,
@@ -261,9 +259,9 @@ fn with_incidents(
     incidents: &[db::Incident],
     config: &Config,
     visibility: &Visibility<'_>,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Summary {
-    let since = now.timestamp() - i64::from(config.page.history_days) * SECONDS_PER_DAY;
+    let since = now.as_second() - i64::from(config.page.history_days) * SECONDS_PER_DAY;
     summary.recent_pool = incidents
         .iter()
         .filter(|incident| incident.ended_at.is_none_or(|ended| ended >= since))
@@ -283,14 +281,14 @@ fn with_incidents(
         .take(RECENT_SHOWN)
         .cloned()
         .collect();
-    summary.quiet_days = quiet_days(&summary.monitors, now.timestamp());
+    summary.quiet_days = quiet_days(&summary.monitors, now.as_second());
     summary
 }
 
 /// One incident as the status page lists it.
 fn recent_view(incident: &db::Incident, config: &Config) -> RecentIncident {
     let name = config.monitor_name(&incident.monitor_id);
-    let started = DateTime::from_timestamp(incident.started_at, 0);
+    let started = hora_core::clock::at(incident.started_at);
     let title = match (incident.ended_at, incident.duration_s) {
         (Some(_), Some(secs)) => format!(
             "{name} was down for {}",
@@ -317,8 +315,8 @@ fn recent_view(incident: &db::Incident, config: &Config) -> RecentIncident {
     RecentIncident {
         id: incident.id,
         monitor_id: incident.monitor_id.clone(),
-        date: started.map_or_default(|at| at.format("%Y-%m-%d").to_string()),
-        day: started.map_or_default(|at| at.format("%-d %b").to_string()),
+        date: started.map_or_default(|at| at.strftime("%Y-%m-%d").to_string()),
+        day: started.map_or_default(|at| at.strftime("%-d %b").to_string()),
         title,
         note,
         resolved: incident.ended_at.is_some(),
@@ -387,7 +385,7 @@ pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>
     let overall = Overall::of(monitors.iter().map(AsRef::as_ref));
     let groups = build_groups(&monitors, &config.monitors);
     let (maintenances, upcoming) =
-        build_maintenances(&built.schedule, config, Utc::now(), visibility);
+        build_maintenances(&built.schedule, config, jiff::Timestamp::now(), visibility);
     let summary = Summary {
         title: operator.title.clone(),
         overall,
@@ -407,8 +405,10 @@ pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>
         recent_pool: Vec::new(),
         quiet_days: None,
     };
-    let now = DateTime::parse_from_rfc3339(&operator.generated_at)
-        .map_or_else(|_| Utc::now(), |at| at.with_timezone(&Utc));
+    let now = operator
+        .generated_at
+        .parse()
+        .unwrap_or_else(|_| jiff::Timestamp::now());
     with_incidents(summary, &built.incidents, config, visibility, now)
 }
 
@@ -481,10 +481,10 @@ async fn page_schedule(
 fn build_maintenances(
     schedule: &hora_core::planned::Schedule,
     config: &Config,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
     visibility: &Visibility<'_>,
 ) -> (Vec<MaintenanceView>, Vec<MaintenanceView>) {
-    let horizon = now + chrono::TimeDelta::days(UPCOMING_DAYS);
+    let horizon = hora_core::clock::shift_days(now, UPCOMING_DAYS);
     let mut active = Vec::new();
     let mut upcoming = Vec::new();
     for window in schedule.windows() {
@@ -676,7 +676,7 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
             .cloned()
             .collect(),
         recent_pool: Vec::new(),
-        quiet_days: quiet_days(&monitors, Utc::now().timestamp()),
+        quiet_days: quiet_days(&monitors, jiff::Timestamp::now().as_second()),
         monitors,
     })
 }
@@ -690,8 +690,8 @@ async fn announcement_banners(store: &Store, now: i64) -> Vec<IncidentView> {
             title: announcement.title,
             body: announcement.body,
             severity: announcement.severity.as_str(),
-            at: chrono::DateTime::from_timestamp(announcement.created_at, 0)
-                .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()),
+            at: hora_core::clock::at(announcement.created_at)
+                .map(|at| at.strftime("%Y-%m-%d %H:%M UTC").to_string()),
         })
         .collect()
 }
@@ -709,7 +709,7 @@ fn build_incident_banners(config: &Config) -> Vec<IncidentView> {
             severity: incident.severity.as_str(),
             at: incident
                 .at
-                .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                .map(|at| at.strftime("%Y-%m-%d %H:%M UTC").to_string()),
         })
         .collect()
 }

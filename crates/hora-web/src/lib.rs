@@ -1,6 +1,7 @@
 //! Web layer: the server-rendered status page and the JSON API.
 
 mod auth;
+mod badge;
 mod cache;
 mod display;
 mod error;

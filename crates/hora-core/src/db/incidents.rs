@@ -52,7 +52,7 @@ pub async fn insert_incident_start(
     snapshot: Option<&str>,
     event: Option<&str>,
 ) -> sqlx::Result<i64> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let impacted_json = serde_json::to_string(impacted).unwrap_or_else(|_| "[]".to_owned());
     let result = sqlx::query(
         "INSERT INTO incidents \
@@ -166,7 +166,7 @@ pub async fn update_incident_vantage(
 ///
 /// Returns an error if the update fails.
 pub async fn update_incident_end(store: &Store, incident_id: i64) -> sqlx::Result<()> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     sqlx::query("UPDATE incidents SET ended_at = ?, duration_s = (? - started_at) WHERE id = ?")
         .bind(now)
         .bind(now)
@@ -186,7 +186,7 @@ pub async fn update_incident_end(store: &Store, incident_id: i64) -> sqlx::Resul
 ///
 /// Returns an error if the update fails.
 pub async fn end_open_incidents(store: &Store, monitor_id: &str) -> sqlx::Result<()> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     sqlx::query(
         "UPDATE incidents SET ended_at = ?, duration_s = (? - started_at) \
          WHERE monitor_id = ? AND ended_at IS NULL",

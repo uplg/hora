@@ -52,7 +52,7 @@ const MAX_REPORT_BYTES: usize = 64 * 1024;
 
 /// Build the `/healthz` report for the current configuration and scheduler state.
 pub async fn report(store: &Store, config: &Config, last_tick: &AtomicU64) -> HealthReport {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let (scheduler_ok, last_tick_age) = scheduler_liveness(config, last_tick, now);
     let db_ok = db_ok(store).await;
 
@@ -194,7 +194,7 @@ pub fn spawn_heartbeat(
                 continue;
             };
 
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             let (scheduler_ok, age) = scheduler_liveness(&snapshot, &last_tick, now);
             let db_ok = db_ok(&store).await;
             // Checks skipped for lack of descriptors or memory: this node
@@ -325,7 +325,7 @@ pub(crate) fn spawn_watch(
         // When this watch started: heartbeats within `grace_secs` of it are not
         // alerted, so a node whose persisted history looks instantly stale after a
         // restart (e.g. both peers rebooting together) doesn't fire a false down.
-        let started = chrono::Utc::now().timestamp();
+        let started = jiff::Timestamp::now().as_second();
         // A peer that never pinged at all is judged from when its first
         // heartbeat was expected (persisted across restarts), not left unknown.
         let expected_since = heartbeat_expected_since(&store, peer.listen_id(), started).await;
@@ -338,7 +338,7 @@ pub(crate) fn spawn_watch(
                 _ = ticker.tick() => {}
                 _ = shutdown.changed() => break,
             }
-            let now = chrono::Utc::now();
+            let now = jiff::Timestamp::now();
             // `None` = never pinged and not yet late (or a read error): nothing
             // to react to.
             let Some(outcome) = heartbeat_outcome_for(
@@ -348,7 +348,7 @@ pub(crate) fn spawn_watch(
                 expected_since,
                 // A peer's watch ticks at its own heartbeat cadence already.
                 0,
-                now.timestamp(),
+                now.as_second(),
             )
             .await
             else {
@@ -399,7 +399,7 @@ pub(crate) fn spawn_watch(
                     .map_or(0, |health| health.grace_secs),
             )
             .unwrap_or(0);
-            let in_grace = now.timestamp() - started < grace;
+            let in_grace = now.as_second() - started < grace;
             if !confirmed || in_grace {
                 continue;
             }
@@ -686,7 +686,7 @@ mod tests {
         config: &Config,
         secs: i64,
     ) -> (JoinHandle<()>, watch::Sender<bool>) {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         db::insert_push(
             store,
             "frank-in",
@@ -839,7 +839,7 @@ mod tests {
         send_heartbeat(&client, &peer_hook, Some("token"), "ok", None).await;
         assert!(peer_posts.lock().unwrap().is_empty());
 
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let planned = crate::planned::plan(
             &store,
             &config,

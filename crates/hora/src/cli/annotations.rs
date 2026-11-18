@@ -17,7 +17,7 @@ pub(crate) async fn announce(args: &[String]) -> Result<(), CliError> {
         Some("--") if args.len() > 1 => pin_announcement(&args[1..]).await?,
         Some("list") => {
             let (_, store) = open_database().await?;
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             let pinned = hora_core::db::active_announcements(&store, now).await?;
             if pinned.is_empty() {
                 println!("No announcements pinned.");
@@ -36,7 +36,8 @@ pub(crate) async fn announce(args: &[String]) -> Result<(), CliError> {
         Some("clear") => {
             let (_, store) = open_database().await?;
             let cleared =
-                hora_core::db::clear_announcements(&store, chrono::Utc::now().timestamp()).await?;
+                hora_core::db::clear_announcements(&store, jiff::Timestamp::now().as_second())
+                    .await?;
             println!("Cleared {cleared} announcement(s).");
         }
         Some(first) if first != "--" => pin_announcement(args).await?,
@@ -52,7 +53,7 @@ pub(crate) async fn announce(args: &[String]) -> Result<(), CliError> {
 }
 
 async fn pin_announcement(args: &[String]) -> anyhow::Result<()> {
-    let announcement = parse_announce_args(args, chrono::Utc::now().timestamp())?;
+    let announcement = parse_announce_args(args, jiff::Timestamp::now().as_second())?;
     let (_, store) = open_database().await?;
     announcement.pin(&store).await?;
     let expiry = announcement.until.map_or_else(
@@ -157,7 +158,7 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
         Some("list") => {
             let (_, store) = open_database().await?;
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             let silences = hora_core::db::active_silences(&store, now).await?;
             if silences.is_empty() {
                 println!("No active silences.");
@@ -181,7 +182,7 @@ pub(crate) async fn silence(args: &[String]) -> Result<(), CliError> {
         Some("clear") => {
             let (_, store) = open_database().await?;
             let cleared =
-                hora_core::db::clear_silences(&store, chrono::Utc::now().timestamp()).await?;
+                hora_core::db::clear_silences(&store, jiff::Timestamp::now().as_second()).await?;
             println!("Cleared {cleared} active silence(s).");
         }
         Some(ids) if args.len() >= 2 => {
@@ -319,7 +320,7 @@ pub(super) fn parse_plan_args(args: &[String], now: i64) -> Result<PlanArgs, Cli
 async fn plan_maintenance(args: &[String]) -> Result<(), CliError> {
     use hora_core::planned::{Plan, PlanError};
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let args = parse_plan_args(args, now)?;
     let (config, store) = open_database().await?;
     let starts_at = args.starts_at.map(|at| at.to_string());
@@ -364,7 +365,7 @@ async fn plan_maintenance(args: &[String]) -> Result<(), CliError> {
 
 async fn list_maintenance() -> Result<(), CliError> {
     let (config, store) = open_database().await?;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let windows = hora_core::db::pending_maintenance_windows(&store, now).await?;
     if windows.is_empty() {
         println!("No maintenance window planned.");

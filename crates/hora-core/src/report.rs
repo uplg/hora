@@ -9,7 +9,7 @@
 //! for operators hosting other people's services.
 
 use crate::db::Store;
-use chrono::Datelike as _;
+use jiff::ToSpan as _;
 
 use crate::SECONDS_PER_DAY;
 use crate::config::{Config, Monitor};
@@ -85,25 +85,23 @@ pub fn month_bounds(month: &str) -> Option<(i64, i64)> {
     if !digits(year, 4) || !digits(month_no, 2) {
         return None;
     }
-    let year: i32 = year.parse().ok()?;
-    let month_no: u32 = month_no.parse().ok()?;
-    let start = chrono::NaiveDate::from_ymd_opt(year, month_no, 1)?;
-    let end = start.checked_add_months(chrono::Months::new(1))?;
-    let start = start.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
-    (start <= chrono::Utc::now().timestamp())
-        .then_some((start, end.and_hms_opt(0, 0, 0)?.and_utc().timestamp()))
+    let year: i16 = year.parse().ok()?;
+    let month_no: i8 = month_no.parse().ok()?;
+    let start = jiff::civil::Date::new(year, month_no, 1).ok()?;
+    let end = start.checked_add(1.month()).ok()?;
+    let start = crate::clock::unix(start.at(0, 0, 0, 0))?;
+    (start <= jiff::Timestamp::now().as_second())
+        .then_some((start, crate::clock::unix(end.at(0, 0, 0, 0))?))
 }
 
 /// The previous calendar month as `"YYYY-MM"` - `hora report`'s default:
 /// "here is your report for last month".
 #[must_use]
 pub fn previous_month(now: i64) -> String {
-    let today = chrono::DateTime::from_timestamp(now, 0).map_or_default(|dt| dt.date_naive());
-    let first = today.with_day(1).unwrap_or(today);
-    let previous = first
-        .checked_sub_months(chrono::Months::new(1))
-        .unwrap_or(first);
-    previous.format("%Y-%m").to_string()
+    let today = crate::clock::at(now).map_or_default(crate::clock::date);
+    let first = today.first_of_month();
+    let previous = first.checked_sub(1.month()).unwrap_or(first);
+    previous.strftime("%Y-%m").to_string()
 }
 
 /// Build the report for `month` (`"YYYY-MM"`).
@@ -114,7 +112,7 @@ pub fn previous_month(now: i64) -> String {
 pub async fn build(store: &Store, config: &Config, month: &str) -> anyhow::Result<MonthReport> {
     let (start, end) = month_bounds(month)
         .ok_or_else(|| anyhow::anyhow!("month must be YYYY-MM and not in the future"))?;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     // For the running month, judge against what has elapsed, not the future.
     let covered_end = end.min(now);
 
@@ -242,8 +240,7 @@ fn slo_columns(
 
 /// `"May 2026"` from the month's start timestamp.
 fn month_label(start: i64) -> String {
-    chrono::DateTime::from_timestamp(start, 0)
-        .map_or_else(String::new, |dt| dt.format("%B %Y").to_string())
+    crate::clock::at(start).map_or_else(String::new, |at| at.strftime("%B %Y").to_string())
 }
 
 #[cfg(test)]
@@ -273,13 +270,9 @@ mod tests {
 
     #[test]
     fn previous_month_wraps_the_year() {
-        let mid_january = chrono::DateTime::parse_from_rfc3339("2026-01-15T10:00:00Z")
-            .unwrap()
-            .timestamp();
+        let mid_january = crate::clock::parse_rfc3339("2026-01-15T10:00:00Z").unwrap();
         assert_eq!(previous_month(mid_january), "2025-12");
-        let mid_june = chrono::DateTime::parse_from_rfc3339("2026-06-12T10:00:00Z")
-            .unwrap()
-            .timestamp();
+        let mid_june = crate::clock::parse_rfc3339("2026-06-12T10:00:00Z").unwrap();
         assert_eq!(previous_month(mid_june), "2026-05");
     }
 

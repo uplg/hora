@@ -3,10 +3,11 @@
 //! target and whether it was met, incidents, downtime, time to recover and
 //! the allowed downtime left. Pre-formatted here; maud does the escaping.
 
-use chrono::{Datelike, NaiveDate, Utc};
 use hora_core::fmt;
 use hora_core::planned::Window;
 use hora_core::report::{DayTally, MonitorMonth, MonthReport};
+use jiff::ToSpan as _;
+use jiff::civil::Date;
 
 use crate::layout::{Chrome, join_and, minutes};
 use crate::page::{Document, icon, raw, state};
@@ -394,37 +395,40 @@ pub(crate) type MonthLink = Option<(String, String)>;
 /// The month before and after `month` (`YYYY-MM`); the next one only once it
 /// has started.
 pub(crate) fn neighbours(month: &str) -> (MonthLink, MonthLink) {
-    let Ok(first) = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d") else {
+    let Some(first) = first_day(month) else {
         return (None, None);
     };
-    let prev = first.pred_opt().map(|day| {
+    let prev = first.yesterday().ok().map(|day| {
         (
-            day.format("%Y-%m").to_string(),
-            day.format("%B").to_string(),
+            day.strftime("%Y-%m").to_string(),
+            day.strftime("%B").to_string(),
         )
     });
     let next = first
-        .checked_add_months(chrono::Months::new(1))
-        .filter(|day| *day <= Utc::now().date_naive())
+        .checked_add(1.month())
+        .ok()
+        .filter(|day| *day <= hora_core::clock::date(jiff::Timestamp::now()))
         .map(|day| {
             (
-                day.format("%Y-%m").to_string(),
-                day.format("%B").to_string(),
+                day.strftime("%Y-%m").to_string(),
+                day.strftime("%B").to_string(),
             )
         });
     (prev, next)
 }
 
+/// The first day of `month` (`2026-05`).
+fn first_day(month: &str) -> Option<Date> {
+    format!("{month}-01").parse().ok()
+}
+
 /// "1 to 31 May 2026".
 pub(crate) fn span(month: &str) -> String {
-    let Ok(first) = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d") else {
+    let Some(first) = first_day(month) else {
         return month.to_owned();
     };
-    let last = first
-        .checked_add_months(chrono::Months::new(1))
-        .and_then(|next| next.pred_opt())
-        .map_or(28, |day| day.day());
-    format!("1 to {last} {}", first.format("%B %Y"))
+    let last = first.days_in_month();
+    format!("1 to {last} {}", first.strftime("%B %Y"))
 }
 
 /// A report day's class in the strip, by the status bar's rule
@@ -442,28 +446,27 @@ fn day_class(day: DayTally, maintenance: bool) -> u8 {
 
 /// How many days `month` (`2026-05`) has; 31 when it does not parse.
 fn month_length(month: &str) -> usize {
-    NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
-        .ok()
-        .and_then(|first| first.checked_add_months(chrono::Months::new(1)))
-        .and_then(|next| next.pred_opt())
-        .map_or(31, |last| last.day() as usize)
+    first_day(month).map_or(31, |first| {
+        usize::from(first.days_in_month().unsigned_abs())
+    })
 }
 
 /// The days of `month` (`2026-05`) a planned window covering `id` touched,
 /// as 1-based day numbers. The windows are the config's and the ones planned
 /// at runtime alike (see `hora_core::planned`).
 fn maintenance_days(month: &str, id: &str, windows: &[Window]) -> Vec<u32> {
-    let Some(first) = NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d").ok() else {
+    let Some(first) = first_day(month) else {
         return Vec::new();
     };
     let mut days = Vec::new();
     for window in windows.iter().filter(|window| window.covers(id)) {
-        let mut day = window.start.date_naive();
-        while day <= window.end.date_naive() {
-            if day.year() == first.year() && day.month() == first.month() {
-                days.push(day.day());
-            }
-            let Some(next) = day.succ_opt() else { break };
+        // Only the month's own days can count: a window years long does
+        // not walk every day of them.
+        let mut day = hora_core::clock::date(window.start).max(first);
+        let end = hora_core::clock::date(window.end).min(first.last_of_month());
+        while day <= end {
+            days.push(u32::from(day.day().unsigned_abs()));
+            let Ok(next) = day.tomorrow() else { break };
             day = next;
         }
     }
@@ -605,11 +608,7 @@ mod tests {
              target = \"https://example.com\"\ninterval_secs = 60\n",
         )
         .expect("config");
-        let at = |text: &str| {
-            text.parse::<chrono::DateTime<chrono::Utc>>()
-                .expect("time")
-                .timestamp()
-        };
+        let at = |text: &str| text.parse::<jiff::Timestamp>().expect("time").as_second();
         let stored = hora_core::db::MaintenanceWindow {
             id: 1,
             starts_at: at("2026-04-29T22:00:00Z"),

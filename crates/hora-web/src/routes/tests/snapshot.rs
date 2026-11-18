@@ -21,7 +21,7 @@ const TWO: &str = r#"
 
 async fn insert_up(store: &hora_core::db::Store, id: &str, latency: i64) {
     sqlx::query("INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, ?, 1, ?)")
-        .bind(chrono::Utc::now().timestamp())
+        .bind(jiff::Timestamp::now().as_second())
         .bind(id)
         .bind(latency)
         .execute(store.fixture_pool())

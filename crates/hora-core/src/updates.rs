@@ -80,7 +80,7 @@ pub fn spawn(
     tokio::spawn(async move {
         loop {
             let snapshot = config.borrow().clone();
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             tokio::select! {
                 () = check(&store, &snapshot, &notifier, &client, &slot, now) => {}
                 _ = shutdown.changed() => break,

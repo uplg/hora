@@ -400,7 +400,7 @@ async fn batch_reads_group_by_monitor() {
 #[tokio::test]
 async fn prune_removes_orphans_and_expired_rows() {
     let store = Store::in_memory().await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     insert(&store, "keep", now - 10, 1, Some(5)).await; // recent, retained
     insert(&store, "keep", now - 200 * SECONDS_PER_DAY, 1, Some(5)).await; // beyond retention
@@ -982,7 +982,7 @@ async fn incidents_open_close_and_prune() {
     let open = insert_incident_start(&store, "m", None, None, None, &[], None, None)
         .await
         .unwrap();
-    prune_incidents(&store, chrono::Utc::now().timestamp() + 1000)
+    prune_incidents(&store, jiff::Timestamp::now().as_second() + 1000)
         .await
         .unwrap();
     let incidents = recent_incidents(&store, 10).await.unwrap();
@@ -1018,7 +1018,7 @@ async fn incident_notes_set_clear_and_resolve_last() {
 #[tokio::test]
 async fn events_record_list_correlate_and_prune() {
     let store = Store::in_memory().await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     let first = insert_event(&store, "deploy api v2.3").await.unwrap();
     let second = insert_event(&store, "config rollout").await.unwrap();
@@ -1420,7 +1420,7 @@ async fn window_cache_equals_the_one_shot_read_as_time_moves() {
 async fn purge_removed_deletes_a_removed_monitor_at_once() {
     let store = Store::in_memory().await;
     // Recent rows: the retention window must not be what deletes them.
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     insert(&store, "gone", now - 60, 1, Some(10)).await;
     insert(&store, "kept", now - 60, 1, Some(10)).await;
     let config = crate::config::parse(
@@ -1664,7 +1664,7 @@ async fn planned_windows_are_stored_once_and_read_by_overlap() {
 #[tokio::test]
 async fn the_retention_sweep_prunes_old_windows_and_the_ones_left_without_a_monitor() {
     let store = Store::in_memory().await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let day = SECONDS_PER_DAY;
     // Ended more than a year ago, last month, and still to come.
     let ancient = window(&store, "*", now - 400 * day, now - 399 * day).await;

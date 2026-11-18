@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 croner.workspace = true
 futures-util.workspace = true
 hickory-resolver = { workspace = true }

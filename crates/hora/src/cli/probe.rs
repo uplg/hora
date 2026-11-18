@@ -243,7 +243,7 @@ async fn print_probe_report(
         match hora_core::cert::inspect_monitor(monitor).await {
             Ok(cert) => println!(
                 "  cert      {} (expires {})",
-                cert_left_phrase(cert.not_after - chrono::Utc::now().timestamp()),
+                cert_left_phrase(cert.not_after - jiff::Timestamp::now().as_second()),
                 format_date(cert.not_after)
             ),
             Err(err) => println!("  cert      could not read certificate: {err}"),
@@ -300,9 +300,9 @@ fn cert_left_phrase(secs_left: i64) -> String {
 
 /// Format a unix timestamp as a `YYYY-MM-DD` date (UTC).
 fn format_date(timestamp: i64) -> String {
-    chrono::DateTime::from_timestamp(timestamp, 0).map_or_else(
+    hora_core::clock::at(timestamp).map_or_else(
         || timestamp.to_string(),
-        |dt| dt.format("%Y-%m-%d").to_string(),
+        |dt| dt.strftime("%Y-%m-%d").to_string(),
     )
 }
 

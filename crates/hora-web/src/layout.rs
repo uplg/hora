@@ -22,7 +22,6 @@ use std::sync::LazyLock;
 use axum::body::Bytes;
 use axum::extract::{FromRequestParts, Query};
 use axum::http::request::Parts;
-use chrono::Utc;
 
 use crate::AppState;
 use crate::handlers::assets::ASSET_VERSION;
@@ -297,7 +296,7 @@ impl Chrome {
             current: "",
             operator: false,
             v: ASSET_VERSION.as_str(),
-            month: Utc::now().format("%Y-%m").to_string(),
+            month: jiff::Timestamp::now().strftime("%Y-%m").to_string(),
             req: PerRequest::from_uri(uri),
             holes: false,
         }

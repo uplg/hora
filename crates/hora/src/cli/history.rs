@@ -14,7 +14,7 @@ use super::{
 pub(crate) async fn report(month: Option<&str>) -> Result<(), CliError> {
     let (config, store) = open_database().await?;
     let month = month.map_or_else(
-        || hora_core::report::previous_month(chrono::Utc::now().timestamp()),
+        || hora_core::report::previous_month(jiff::Timestamp::now().as_second()),
         str::to_owned,
     );
     let report = hora_core::report::build(&store, &config, &month)
@@ -85,7 +85,7 @@ pub(crate) async fn timeline(args: &[String]) -> Result<(), CliError> {
     }
 
     let (config, store) = open_database().await?;
-    let since = chrono::Utc::now().timestamp() - days * hora_core::SECONDS_PER_DAY;
+    let since = jiff::Timestamp::now().as_second() - days * hora_core::SECONDS_PER_DAY;
     let sources = hora_core::timeline::fetch(&store, since, 500).await?;
     // Peers by id (a planned window names the one that announced it), the
     // monitors on top.

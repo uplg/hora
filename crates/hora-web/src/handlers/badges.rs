@@ -1,9 +1,8 @@
 //! SVG images: status and uptime badges, and the latency heatmap.
 
+use crate::badge::{Style, badge};
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
-use badgelib::Style;
-use chrono::Utc;
 use serde::Deserialize;
 
 use hora_core::config::{Config, Monitor};
@@ -13,7 +12,7 @@ use super::visible_monitor;
 use crate::AppState;
 use crate::auth::Viewer;
 use crate::error::AppError;
-use crate::render::{badge, status_color, svg_response, uptime_color};
+use crate::render::{status_color, svg_response, uptime_color};
 use crate::visibility::{Audience, Visibility};
 
 #[utoipa::path(
@@ -42,7 +41,7 @@ pub(crate) async fn heatmap_svg(
     let svg = state
         .heatmaps
         .get_or_build(&id, config, async {
-            let now = Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             let since = crate::heatmap::since(now);
             let cells = db::latency_hourly(&state.store, &id, since).await?;
             Ok::<_, hora_core::db::Error>(crate::heatmap::render(&cells, now, &monitor.name, true))
@@ -117,7 +116,7 @@ pub(crate) async fn uptime_badge(
     // mirrors the summary's card so both always show the same figure.
     let config = state.config.borrow().clone();
     badge_monitor(&config, &id)?;
-    let since = Utc::now().timestamp() - hora_core::SECONDS_PER_DAY;
+    let since = jiff::Timestamp::now().as_second() - hora_core::SECONDS_PER_DAY;
     let (available, total) = db::availability(&state.store, &id, since).await?;
     let permille = hora_core::fmt::permille_of(available, total);
     let (message, color) = match permille {

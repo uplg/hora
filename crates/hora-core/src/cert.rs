@@ -327,7 +327,7 @@ pub async fn inspect_monitor(monitor: &crate::config::Monitor) -> anyhow::Result
         CertSource::of(monitor).ok_or_else(|| anyhow::anyhow!("cannot determine host:port"))?;
     let tls = client_config()?;
     let (not_after, fingerprint) = source.read(&tls, monitor.timeout()).await?;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     Ok(CertInfo {
         not_after,
         days_left: (not_after - now) / SECONDS_PER_DAY,
@@ -408,7 +408,7 @@ pub fn spawn_watcher(
                 _ = shutdown.changed() => break,
             }
             let snapshot = config.borrow().clone();
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
 
             // A shutdown mid-sweep stops it rather than waiting out every
             // remaining lookup and handshake.

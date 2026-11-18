@@ -39,8 +39,10 @@ impl Cadence {
             Self::Cron { cron, grace_secs } => {
                 let early_ok = seen.then_some(*grace_secs);
                 let due = cron_missed(cron, since, *grace_secs, early_ok, now)?;
-                let due_label = chrono::DateTime::from_timestamp(due, 0)
-                    .map_or_else(|| due.to_string(), |dt| dt.format("%H:%M UTC").to_string());
+                let due_label = crate::clock::at(due).map_or_else(
+                    || due.to_string(),
+                    |at| at.strftime("%H:%M UTC").to_string(),
+                );
                 Some((
                     FailureKind::MissedSchedule,
                     format!(
@@ -72,7 +74,7 @@ impl HeartbeatWatch {
                 grace_secs: schedule.grace_secs,
             },
         };
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         Self {
             cadence,
             expected_since: heartbeat_expected_since(store, &monitor.id, now).await,
@@ -131,15 +133,14 @@ fn cron_missed(
 /// the grace (`early_secs`), capped at half the gap between runs so a frequent
 /// schedule can never skip a real run this way.
 fn cron_due(cron: &croner::Cron, last: i64, early_secs: Option<u64>) -> Option<i64> {
-    let last_at = chrono::DateTime::from_timestamp(last, 0)?;
-    let next = cron.find_next_occurrence(&last_at, false).ok()?;
+    use crate::clock::CronTime;
+    let next = cron.find_next_occurrence(&CronTime(last), false).ok()?.0;
     let Some(early_secs) = early_secs else {
-        return Some(next.timestamp());
+        return Some(next);
     };
-    let Ok(after) = cron.find_next_occurrence(&next, false) else {
-        return Some(next.timestamp());
+    let Ok(CronTime(after)) = cron.find_next_occurrence(&CronTime(next), false) else {
+        return Some(next);
     };
-    let (next, after) = (next.timestamp(), after.timestamp());
     let early = i64::try_from(early_secs)
         .unwrap_or(i64::MAX)
         .min((after - next) / 2);
@@ -479,7 +480,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_down_push_is_evaluated_and_never_recorded_as_a_miss() {
         let store = Store::in_memory().await;
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         db::insert_push(
             &store,
             "job",
@@ -516,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn an_overdue_heartbeat_is_recorded_once_per_interval() {
         let store = Store::in_memory().await;
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let rows = || async {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM checks WHERE monitor_id = 'nightly'")
                 .fetch_one(store.sqlx())

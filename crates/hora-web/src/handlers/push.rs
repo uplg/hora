@@ -3,7 +3,6 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use chrono::Utc;
 use serde::Deserialize;
 
 use hora_core::config::{Kind, Monitor};
@@ -148,7 +147,7 @@ async fn apply_announcement(
     authenticated: bool,
     body: axum::body::Body,
 ) {
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let Ok(body) = axum::body::to_bytes(body, MAX_ANNOUNCEMENT_BYTES).await else {
         hora_core::planned::refuse_unreadable(peer, now);
         return;
@@ -286,7 +285,7 @@ pub(crate) async fn post_alert(
     // Anti-flood: a dedup_key that recurs inside the window is coalesced here,
     // so the rate-limiting lives in Hora and every producer benefits.
     let window = i64::try_from(config.alerts.push_alert_window_secs).unwrap_or(i64::MAX);
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     if let flood::Admission::Coalesce {
         suppressed,
         retry_after,

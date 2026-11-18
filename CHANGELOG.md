@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dates are computed with [`jiff`](https://crates.io/crates/jiff) instead
+  of `chrono`**, which its maintainers have declared unmaintained
+  (chronotope/chrono#1768). Nothing a page, the API, the feed or the CLI
+  prints changes, and config files load as before, including the looser date
+  spellings (`2026-06-08 00:00:00 UTC`); only a date written without its
+  leading zeros (`2026-6-8T1:00:00Z`), which RFC 3339 never allowed, is now
+  refused. Dates given to the API and the CLI
+  (`starts_at`) are read a little more widely: any ISO 8601 date-time with
+  its offset, seconds optional.
+- **The badges are drawn by Hora again**, without the `badgelib` crate (it
+  was the last thing keeping `chrono` in the build). Same routes, same
+  colours, same three styles (`flat`, `flat-square`, `for-the-badge`); the
+  widths differ by a pixel or two. The text is measured from Verdana's own
+  metrics and each word carries its width, so a viewer without Verdana fits
+  its fallback font into the same box.
+
 ## [0.12.0] - 2026-11-12
 
 A hardening pass on who may do what with which token. Several configs that

@@ -84,7 +84,7 @@ async fn timeline_merges_and_keeps_operator_streams_private() {
     hora_core::db::insert_silence(
         &store,
         "web",
-        chrono::Utc::now().timestamp() + 600,
+        jiff::Timestamp::now().as_second() + 600,
         Some("deploying"),
     )
     .await
@@ -145,7 +145,7 @@ async fn timeline_merges_and_keeps_operator_streams_private() {
 
 /// This month, as the report route spells it.
 fn this_month() -> String {
-    chrono::Utc::now().format("%Y-%m").to_string()
+    jiff::Timestamp::now().strftime("%Y-%m").to_string()
 }
 
 #[tokio::test]
@@ -158,7 +158,7 @@ async fn report_renders_and_rejects_bad_months() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body = body_text(res).await;
-    let label = chrono::Utc::now().format("%B %Y").to_string();
+    let label = jiff::Timestamp::now().strftime("%B %Y").to_string();
     assert!(
         body.contains("Service report") && body.contains(&label),
         "{body}"
@@ -297,7 +297,7 @@ const TENANTS: &str = r#"
 #[tokio::test]
 async fn group_token_gets_its_detail_but_no_operator_data() {
     let (app, store) = app_with_pool(TENANTS).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     // Web and the DB are down (3 failures meet the threshold); Intra has
     // a latency series (so its sparkline can carry markers) and a
     // detailed failure.
@@ -486,7 +486,7 @@ async fn theme_and_token_travel_with_the_navigation() {
 #[tokio::test]
 async fn status_page_states_every_state_in_words() {
     let (app, store) = test_app_with_pool().await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for offset in [30, 60, 90] {
         sqlx::query(
             "INSERT INTO checks (time, monitor_id, status, error) VALUES (?, 'web', 0, 'HTTP 503')",
@@ -564,7 +564,7 @@ fn web_seen_from_paris(status: &str) -> hora_core::mesh::vantage::VantageMap {
 
 /// Web is down from this node: three failed checks and the incident open.
 async fn web_down_here(store: &hora_core::db::Store) {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for offset in [30, 60, 90] {
         sqlx::query(
             "INSERT INTO checks (time, monitor_id, status, error) VALUES (?, 'web', 0, 'timeout')",
@@ -1014,7 +1014,7 @@ async fn a_monitor_is_down_on_the_page_by_its_own_fail_threshold() {
         monitor("patient", "fail_threshold = 5"),
     ))
     .await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     // One failed check for the first two, three in a row for the third:
     // what the global threshold (3) calls degraded, degraded and down.
     for (id, failures) in [("strict", 1), ("lenient", 1), ("patient", 3)] {

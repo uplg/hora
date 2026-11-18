@@ -50,7 +50,7 @@ pub(crate) async fn tune(args: &[String]) -> Result<(), CliError> {
         days_label(lookback)
     );
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut printed = 0_usize;
     for monitor in selected {
         let retention = i64::from(monitor.retention_days(config.alerts.default_retention_days));

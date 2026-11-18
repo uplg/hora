@@ -4,8 +4,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::TimeDelta;
-
 use hora_core::config::Monitor;
 use hora_core::db::{self, DayRow, Latest, Point};
 use hora_core::status::MonitorState;
@@ -50,8 +48,8 @@ fn mark_maintenance(
 ) {
     for window in windows.iter().filter(|window| window.covers(id)) {
         // ISO dates compare as strings.
-        let first = window.start.format("%Y-%m-%d").to_string();
-        let last = window.end.format("%Y-%m-%d").to_string();
+        let first = window.start.strftime("%Y-%m-%d").to_string();
+        let last = window.end.strftime("%Y-%m-%d").to_string();
         for cell in bar
             .iter_mut()
             .filter(|cell| cell.date >= first && cell.date <= last)
@@ -288,8 +286,8 @@ fn budget_view(monitor: &Monitor, ctx: &SummaryCtx, daily: &[DayRow]) -> Option<
     // The window is `window` calendar days ending today, so its first day is
     // `window - 1` days back: counting from `window` days back summed one day
     // more than the budget and the coverage are sized for.
-    let cutoff = (ctx.now - TimeDelta::days(i64::from(window).saturating_sub(1)))
-        .format("%Y-%m-%d")
+    let cutoff = hora_core::clock::shift_days(ctx.now, -i64::from(window).saturating_sub(1))
+        .strftime("%Y-%m-%d")
         .to_string();
     let mut available = 0_i64;
     let mut total = 0_i64;
@@ -337,17 +335,16 @@ pub(super) fn format_slo_pct(basis_points: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, TimeDelta, Utc};
     use hora_core::db::DayRow;
 
     use super::super::SummaryCtx;
     use super::super::status::BudgetState;
     use super::budget_view;
 
-    fn day(now: DateTime<Utc>, days_ago: i64, up: i64, down: i64) -> DayRow {
+    fn day(now: jiff::Timestamp, days_ago: i64, up: i64, down: i64) -> DayRow {
         DayRow {
-            day: (now - TimeDelta::days(days_ago))
-                .format("%Y-%m-%d")
+            day: hora_core::clock::shift_days(now, -days_ago)
+                .strftime("%Y-%m-%d")
                 .to_string(),
             up,
             down,
@@ -368,10 +365,10 @@ mod tests {
         )
         .expect("config");
         let monitor = &config.monitors[0];
-        let now = DateTime::from_timestamp(1_780_000_000, 0).expect("date");
+        let now = hora_core::clock::at(1_780_000_000).expect("date");
         let ctx = SummaryCtx {
             now,
-            timestamp: now.timestamp(),
+            timestamp: now.as_second(),
             alerts: hora_core::config::Alerts::default(),
             cert_threshold: 14,
             history_days: 90,

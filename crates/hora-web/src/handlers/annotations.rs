@@ -2,7 +2,6 @@
 
 use axum::Json;
 use axum::extract::{Query, State};
-use chrono::Utc;
 use serde::Deserialize;
 
 use hora_core::db::{self};
@@ -67,9 +66,11 @@ pub(crate) async fn announce(
     };
     let until = match query.until.as_deref() {
         None => None,
-        Some(raw) => Some(announce::parse_until(raw, Utc::now().timestamp()).ok_or(
-            AppError::BadRequest(announce::AnnounceError::InvalidUntil.message()),
-        )?),
+        Some(raw) => Some(
+            announce::parse_until(raw, jiff::Timestamp::now().as_second()).ok_or(
+                AppError::BadRequest(announce::AnnounceError::InvalidUntil.message()),
+            )?,
+        ),
     };
     let announcement = Announcement::new(
         &query.title,
@@ -108,7 +109,7 @@ pub(crate) async fn announce_clear(
     State(state): State<AppState>,
     _operator: Operator,
 ) -> Result<Json<AnnounceClearResponse>, AppError> {
-    let cleared = db::clear_announcements(&state.core, Utc::now().timestamp()).await?;
+    let cleared = db::clear_announcements(&state.core, jiff::Timestamp::now().as_second()).await?;
     state.refresh_now().await;
     tracing::info!(cleared, "announcements cleared via API");
     Ok(Json(AnnounceClearResponse { cleared }))

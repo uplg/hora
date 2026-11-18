@@ -9,10 +9,9 @@
 //! at most [`ROWS_PER_GROUP`] compact rows (no bar, no chart), problems first;
 //! "Show all" is the group's own page.
 
-use std::fmt::Write as _;
-
-use chrono::{DateTime, Utc};
+use hora_core::clock;
 use hora_core::config::Config;
+use std::fmt::Write as _;
 
 use crate::display::DisplayState;
 use crate::layout::{count_word, join_and, ms, pct};
@@ -271,7 +270,7 @@ pub(crate) struct Ask {
 // One flat assembly of the page's parts; splitting it would only scatter it.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> StatusPage<'a> {
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let total = summary.monitors.len();
     let mut counts = Counts::default();
     for monitor in &summary.monitors {
@@ -365,11 +364,11 @@ pub(crate) fn build<'a>(summary: &'a Summary, config: &Config, ask: &Ask) -> Sta
             title: "Next".to_owned(),
             body: format!(
                 "{} to {}: {}.",
-                window.start.format("%A %-d %B, %H:%M"),
-                if window.end.date_naive() == window.start.date_naive() {
-                    window.end.format("%H:%M UTC").to_string()
+                window.start.strftime("%A %-d %B, %H:%M"),
+                if clock::date(window.end) == clock::date(window.start) {
+                    window.end.strftime("%H:%M UTC").to_string()
                 } else {
-                    window.end.format("%A %-d %B, %H:%M UTC").to_string()
+                    window.end.strftime("%A %-d %B, %H:%M UTC").to_string()
                 },
                 if window.reason.is_empty() {
                     "planned maintenance"
@@ -449,17 +448,20 @@ pub(crate) fn summary_sentence(summary: &Summary) -> String {
         total > SCALE_AT,
         summary.places(),
         &[],
-        Utc::now(),
+        jiff::Timestamp::now(),
     );
     format!("{headline} {lead}{rest}")
 }
 
 /// The active maintenance windows the page is about, soonest end first.
-fn active_windows(summary: &Summary, now: DateTime<Utc>) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+fn active_windows(
+    summary: &Summary,
+    now: jiff::Timestamp,
+) -> Vec<(jiff::Timestamp, jiff::Timestamp)> {
     // The summary holds the windows this page may announce (a group page
     // drops other groups'), each with its own hours. One may have ended
     // since the summary was built.
-    let mut windows: Vec<(DateTime<Utc>, DateTime<Utc>)> = summary
+    let mut windows: Vec<(jiff::Timestamp, jiff::Timestamp)> = summary
         .maintenances
         .iter()
         .filter(|window| now >= window.start && now <= window.end)
@@ -473,23 +475,26 @@ fn active_windows(summary: &Summary, now: DateTime<Utc>) -> Vec<(DateTime<Utc>, 
 /// one planned at runtime (through the API, or announced by a peer). The
 /// summary holds the ones this page may announce; one may have started
 /// since it was built.
-fn next_window(summary: &Summary, now: DateTime<Utc>) -> Option<&crate::summary::MaintenanceView> {
+fn next_window(
+    summary: &Summary,
+    now: jiff::Timestamp,
+) -> Option<&crate::summary::MaintenanceView> {
     summary
         .upcoming
         .iter()
         .filter(|window| {
             window.start > now
-                && window.start <= now + chrono::TimeDelta::days(crate::summary::UPCOMING_DAYS)
+                && window.start <= clock::shift_days(now, crate::summary::UPCOMING_DAYS)
         })
         .min_by_key(|window| window.start)
 }
 
-fn hero_window(start: DateTime<Utc>, end: DateTime<Utc>, now: DateTime<Utc>) -> Window {
-    let length = (end - start).num_minutes().max(1);
-    let done = (now - start).num_minutes().clamp(0, length);
+fn hero_window(start: jiff::Timestamp, end: jiff::Timestamp, now: jiff::Timestamp) -> Window {
+    let length = ((end.as_second() - start.as_second()) / 60).max(1);
+    let done = ((now.as_second() - start.as_second()) / 60).clamp(0, length);
     Window {
-        start: start.format("%H:%M").to_string(),
-        end: end.format("%H:%M").to_string(),
+        start: start.strftime("%H:%M").to_string(),
+        end: end.strftime("%H:%M").to_string(),
         progress: format!(
             "{} of {}",
             crate::layout::minutes(done),
@@ -511,8 +516,8 @@ fn sentence(
     total: usize,
     scale: bool,
     places: usize,
-    windows: &[(DateTime<Utc>, DateTime<Utc>)],
-    now: DateTime<Utc>,
+    windows: &[(jiff::Timestamp, jiff::Timestamp)],
+    now: jiff::Timestamp,
 ) -> (String, String, String) {
     let names = |state: DisplayState| -> Vec<&str> {
         summary
@@ -556,12 +561,12 @@ fn sentence(
         }
     } else if counts.maint > 0 {
         match windows.first() {
-            Some((_, end)) if end.date_naive() == now.date_naive() => {
-                format!("Planned maintenance, until {}.", end.format("%H:%M"))
+            Some((_, end)) if clock::date(*end) == clock::date(now) => {
+                format!("Planned maintenance, until {}.", end.strftime("%H:%M"))
             }
             Some((_, end)) => format!(
                 "Planned maintenance, until {}.",
-                end.format("%a %-d %b, %H:%M")
+                end.strftime("%a %-d %b, %H:%M")
             ),
             None => "Planned maintenance.".to_owned(),
         }
@@ -644,7 +649,7 @@ fn chips(
     counts: &Counts,
     local: &[&MonitorView],
     summary: &Summary,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Vec<Chip> {
     let quiet_days = summary.quiet_days;
     let mut chips = Vec::new();
@@ -700,7 +705,7 @@ fn chips(
         chips.push(Chip {
             state: DisplayState::Maint.class(),
             icon: "",
-            text: format!("Planned: {}", next.start.format("%a %-d %b, %H:%M UTC")),
+            text: format!("Planned: {}", next.start.strftime("%a %-d %b, %H:%M UTC")),
             href: Some("#next".to_owned()),
         });
     }
@@ -832,7 +837,7 @@ fn attention_rows(summary: &Summary) -> Vec<Row<'_>> {
 /// One monitor's row. `with_bar` draws its daily bar (small pages).
 fn row(monitor: &MonitorView, with_bar: bool) -> Row<'_> {
     let state = monitor.display_state();
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let detail = match state {
         // Up over the bar's days, the figure its bar shows.
         DisplayState::Up | DisplayState::Maint => monitor
@@ -893,7 +898,9 @@ fn why(monitor: &MonitorView) -> Option<String> {
             });
         }
         DisplayState::Down => {
-            if let Some(since) = crate::monitor_page::since_line(monitor, Utc::now().timestamp()) {
+            if let Some(since) =
+                crate::monitor_page::since_line(monitor, jiff::Timestamp::now().as_second())
+            {
                 parts.push(since);
             }
             if let Some(error) = &monitor.last_error {
@@ -1289,7 +1296,7 @@ mod local_routing_tests {
 mod maintenance_window_tests {
     use std::collections::HashMap;
 
-    use chrono::{TimeDelta, Utc};
+    use hora_core::clock;
 
     use super::{Ask, build};
     use crate::summary::{BuildState, build_summary, for_group};
@@ -1299,12 +1306,8 @@ mod maintenance_window_tests {
     /// group's page took whichever ended first: the other group's hours.
     #[tokio::test]
     async fn a_group_page_shows_its_own_windows_hours() {
-        let now = Utc::now();
-        let at = |hours: i64| {
-            (now + TimeDelta::hours(hours))
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string()
-        };
+        let now = jiff::Timestamp::now();
+        let at = |hours: i64| clock::rfc3339(clock::shift(now, hours * 3600));
         let config = hora_core::config::parse(&format!(
             r#"
             [page]
@@ -1361,7 +1364,7 @@ mod maintenance_window_tests {
         assert_eq!(window.length, 6 * 60);
         assert_eq!(
             window.end,
-            (now + TimeDelta::hours(5)).format("%H:%M").to_string()
+            clock::shift(now, 5 * 3600).strftime("%H:%M").to_string()
         );
 
         let beta = for_group(&built.summary, &config, "Beta").expect("group");
