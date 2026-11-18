@@ -17,8 +17,6 @@
 
 use std::fmt::Write as _;
 
-use chrono::DateTime;
-
 /// The units a duration is written in, largest first, with their SI symbols.
 const UNITS: [(u64, &str); 4] = [(86_400, "d"), (3600, "h"), (60, "min"), (1, "s")];
 
@@ -78,9 +76,9 @@ pub fn short_date(timestamp: i64) -> String {
 }
 
 fn format_timestamp(timestamp: i64, pattern: &str) -> String {
-    DateTime::from_timestamp(timestamp, 0).map_or_else(
+    crate::clock::at(timestamp).map_or_else(
         || timestamp.to_string(),
-        |at| at.format(pattern).to_string(),
+        |at| at.strftime(pattern).to_string(),
     )
 }
 
@@ -325,7 +323,7 @@ mod tests {
         assert_eq!(utc(1_700_000_540), "2023-11-14 22:22:20 UTC");
         assert_eq!(date(1_700_000_540), "2023-11-14");
         assert_eq!(short_date(1_700_000_540), "Nov 14");
-        // Out of chrono's range: the raw number, not an empty string.
+        // Out of the calendar's range: the raw number, not an empty string.
         assert_eq!(utc(i64::MAX), i64::MAX.to_string());
     }
 

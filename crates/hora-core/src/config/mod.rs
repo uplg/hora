@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::Deserialize;
 
 #[cfg(test)]
@@ -190,11 +190,19 @@ fn default_digest_schedule() -> String {
 pub struct Maintenance {
     #[serde(default)]
     pub title: String,
-    pub start: DateTime<Utc>,
-    pub end: DateTime<Utc>,
+    #[serde(deserialize_with = "crate::clock::deserialize_config")]
+    pub start: Timestamp,
+    #[serde(deserialize_with = "crate::clock::deserialize_config")]
+    pub end: Timestamp,
     /// Monitors covered by the window; empty = all monitors.
     #[serde(default)]
     pub monitors: Vec<String>,
+}
+
+fn optional_instant<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Timestamp>, D::Error> {
+    crate::clock::deserialize_config(deserializer).map(Some)
 }
 
 /// Severity of an [`Incident`] or an ad-hoc announcement, controlling its
@@ -269,8 +277,8 @@ pub struct Incident {
     #[serde(default)]
     pub severity: Severity,
     /// When it was posted (RFC 3339, quoted in TOML); shown if present.
-    #[serde(default)]
-    pub at: Option<DateTime<Utc>>,
+    #[serde(default, deserialize_with = "optional_instant")]
+    pub at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

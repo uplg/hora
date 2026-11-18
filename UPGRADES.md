@@ -4,6 +4,13 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.12.0 → 0.12.1
+
+No migration and no new config key. A date in the config (`start`, `end`,
+`at`) written without its leading zeros (`2026-6-8T1:00:00Z`) is no longer
+read: write it as RFC 3339 has it (`2026-06-08T01:00:00Z`). `hora check`
+with the new binary tells you.
+
 ## 0.11.5 → 0.12.0
 
 Three migrations run on the first start. One rewrites the `checks` table

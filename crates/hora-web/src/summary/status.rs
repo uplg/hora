@@ -3,8 +3,6 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, TimeDelta, Utc};
-
 use hora_core::SECONDS_PER_DAY;
 use hora_core::db::DayRow;
 
@@ -155,17 +153,17 @@ pub(crate) fn cert_label(secs_left: i64) -> String {
 }
 
 pub(crate) fn iso(timestamp: i64) -> Option<String> {
-    DateTime::from_timestamp(timestamp, 0).map(|dt| dt.to_rfc3339())
+    hora_core::clock::at(timestamp).map(hora_core::clock::rfc3339_offset)
 }
 
 /// Build the daily uptime bar (oldest to newest), zero-filling missing days.
-pub(crate) fn build_bar(daily: &[DayRow], now: DateTime<Utc>, days: u16) -> Vec<DayCell> {
+pub(crate) fn build_bar(daily: &[DayRow], now: jiff::Timestamp, days: u16) -> Vec<DayCell> {
     let by_day: HashMap<&str, &DayRow> = daily.iter().map(|row| (row.day.as_str(), row)).collect();
     let mut cells = Vec::with_capacity(usize::from(days));
 
     for offset in (0..days).rev() {
-        let date = (now - TimeDelta::days(i64::from(offset)))
-            .format("%Y-%m-%d")
+        let date = hora_core::clock::shift_days(now, -i64::from(offset))
+            .strftime("%Y-%m-%d")
             .to_string();
         let cell = by_day.get(date.as_str()).map_or_else(
             || DayCell {

@@ -22,7 +22,7 @@ members = ["."]
 libfuzzer-sys = "0.4"
 arc-swap = "1.9.2"
 axum = "0.8.9"
-chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 hora-core = { path = "../crates/hora-core", features = ["test-support"] }
 hora-notify = { path = "../crates/hora-notify" }
 hora-web = { path = "../crates/hora-web" }

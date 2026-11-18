@@ -201,7 +201,7 @@ pub(super) fn apply(app: &mut App, fetched: Fetched) -> FollowUp {
             }
             app.summary = Some(summary);
             app.error = None;
-            app.updated = chrono::Utc::now().format("%H:%M:%S UTC").to_string();
+            app.updated = jiff::Timestamp::now().strftime("%H:%M:%S UTC").to_string();
             app.selected_id().map_or(FollowUp::Nothing, FollowUp::Spark)
         }
         Fetched::Summary(Err(err)) => {

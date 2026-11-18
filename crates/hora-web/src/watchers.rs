@@ -351,7 +351,7 @@ pub(crate) fn build(
     }));
 
     // The 30-day confirmations: what the peers said when this node saw a down.
-    let since = chrono::Utc::now().timestamp() - 30 * hora_core::SECONDS_PER_DAY;
+    let since = jiff::Timestamp::now().as_second() - 30 * hora_core::SECONDS_PER_DAY;
     let verdicts: Vec<&str> = incidents
         .iter()
         .filter(|incident| incident.started_at >= since)

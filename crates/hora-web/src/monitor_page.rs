@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use hora_core::clock;
 use hora_core::config::{Config, Kind, Monitor};
 use hora_core::db::{EventMarker, Incident};
 
@@ -354,7 +354,7 @@ pub(crate) fn build(
     detailed: bool,
     show_target: bool,
 ) -> MonitorPage {
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let state = m.display_state();
     let places_count = 1 + m.vantages.len();
     let every = hora_core::fmt::period(monitor.interval_secs);
@@ -396,8 +396,8 @@ pub(crate) fn build(
                     .map(|cause| format!("Caused by {cause}"))
                     .or_else(|| incident.error.clone())
                     .unwrap_or_default(),
-                date: DateTime::from_timestamp(incident.started_at, 0)
-                    .map_or_default(|at| at.format("%-d %b").to_string()),
+                date: hora_core::clock::at(incident.started_at)
+                    .map_or_default(|at| at.strftime("%-d %b").to_string()),
             }
         })
         .collect();
@@ -461,12 +461,12 @@ pub(crate) fn down_for(m: &MonitorView, now: i64) -> Option<i64> {
 /// not today. `None` when it is not shown down.
 pub(crate) fn since_line(m: &MonitorView, now: i64) -> Option<String> {
     let length = down_for(m, now)?;
-    let since = DateTime::from_timestamp(m.down_since?, 0)?;
-    let today = DateTime::from_timestamp(now, 0)?.date_naive();
-    let at = if since.date_naive() == today {
-        since.format("%H:%M UTC").to_string()
+    let since = hora_core::clock::at(m.down_since?)?;
+    let today = clock::date(clock::at(now)?);
+    let at = if clock::date(since) == today {
+        since.strftime("%H:%M UTC").to_string()
     } else {
-        since.format("%a %-d %b, %H:%M UTC").to_string()
+        since.strftime("%a %-d %b, %H:%M UTC").to_string()
     };
     Some(format!("Since {at} ({}).", minutes(length)))
 }
@@ -598,8 +598,8 @@ fn outage_note(m: &MonitorView, incidents: &[Incident]) -> String {
     let within: Vec<&Incident> = incidents
         .iter()
         .filter(|incident| {
-            DateTime::from_timestamp(incident.started_at, 0)
-                .is_some_and(|at| at.format("%Y-%m-%d").to_string().as_str() >= first)
+            hora_core::clock::at(incident.started_at)
+                .is_some_and(|at| at.strftime("%Y-%m-%d").to_string().as_str() >= first)
         })
         .collect();
     let minutes_of = |incident: &Incident| incident.duration_s.map(|secs| (secs + 59) / 60);
@@ -616,8 +616,8 @@ fn outage_note(m: &MonitorView, incidents: &[Incident]) -> String {
             }
         }
         [one] => {
-            let on = DateTime::from_timestamp(one.started_at, 0)
-                .map_or_default(|at| at.format("%-d %b").to_string());
+            let on = hora_core::clock::at(one.started_at)
+                .map_or_default(|at| at.strftime("%-d %b").to_string());
             match minutes_of(one) {
                 Some(length) => format!("One outage, {}, on {on}", minutes(length)),
                 None => format!("One outage, ongoing, since {on}"),
@@ -642,8 +642,10 @@ fn split_unit(text: &str) -> (String, String) {
 }
 
 fn short_date(date: &str) -> String {
-    NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .map_or_else(|_| date.to_owned(), |day| day.format("%-d %b").to_string())
+    date.parse::<jiff::civil::Date>().map_or_else(
+        |_| date.to_owned(),
+        |day| day.strftime("%-d %b").to_string(),
+    )
 }
 
 /// The bar's days, each with its words and the incidents that started then.
@@ -665,7 +667,7 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
                 _ => DisplayState::None,
             };
             let figure = cell.permille.map(hora_core::fmt::permille);
-            let date = NaiveDate::parse_from_str(&cell.date, "%Y-%m-%d").ok();
+            let date = cell.date.parse::<jiff::civil::Date>().ok();
             let short = short_date(&cell.date);
             let tip = match &figure {
                 Some(figure) => format!("{short}: {} · {figure} up", state.word()),
@@ -689,12 +691,12 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
             let started: Vec<(i64, String)> = incidents
                 .iter()
                 .filter(|incident| {
-                    DateTime::from_timestamp(incident.started_at, 0)
-                        .is_some_and(|at| at.format("%Y-%m-%d").to_string() == cell.date)
+                    hora_core::clock::at(incident.started_at)
+                        .is_some_and(|at| at.strftime("%Y-%m-%d").to_string() == cell.date)
                 })
                 .map(|incident| {
-                    let at = DateTime::from_timestamp(incident.started_at, 0)
-                        .map_or_default(|at| at.format("%H:%M UTC").to_string());
+                    let at = hora_core::clock::at(incident.started_at)
+                        .map_or_default(|at| at.strftime("%H:%M UTC").to_string());
                     let length = incident
                         .duration_s
                         .map_or_else(|| "ongoing".to_owned(), hora_core::fmt::duration);
@@ -712,7 +714,7 @@ fn days(m: &MonitorView, incidents: &[Incident]) -> Vec<Day> {
                 recent: index + 30 >= m.bar.len(),
                 title: date.map_or_else(
                     || cell.date.clone(),
-                    |day| day.format("%A %-d %B").to_string(),
+                    |day| day.strftime("%A %-d %B").to_string(),
                 ),
                 text,
                 incidents: started,

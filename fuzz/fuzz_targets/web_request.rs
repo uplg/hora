@@ -117,7 +117,7 @@ async fn app(disclosed: &[u8]) -> Router {
     let (sender, receiver) = tokio::sync::watch::channel(config);
     // The router reads the configuration for as long as it lives.
     std::mem::forget(sender);
-    let tick = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let tick = u64::try_from(jiff::Timestamp::now().as_second()).unwrap_or(0);
     hora_web::router(
         hora_web::AppState::new(store, receiver, Arc::new(AtomicU64::new(tick)), notifier)
             .with_vantage(vantages),

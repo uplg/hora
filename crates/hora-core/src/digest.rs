@@ -70,7 +70,7 @@ async fn tick(
         warn!("invalid digest schedule {:?}", digest.schedule);
         return 3600;
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     // First run ever: baseline now, so enabling the digest mid-week waits for
     // the next scheduled slot instead of firing immediately.
@@ -121,8 +121,8 @@ async fn tick(
 
 /// The first scheduled occurrence strictly after `last_sent`.
 fn next_occurrence(cron: &croner::Cron, last_sent: i64) -> Option<i64> {
-    let from = chrono::DateTime::from_timestamp(last_sent, 0)?;
-    Some(cron.find_next_occurrence(&from, false).ok()?.timestamp())
+    let from = crate::clock::CronTime(last_sent);
+    Some(cron.find_next_occurrence(&from, false).ok()?.0)
 }
 
 async fn read_last_sent(store: &Store) -> Option<i64> {
@@ -255,13 +255,9 @@ mod tests {
     fn next_occurrence_is_strictly_after_last_sent() {
         let cron: croner::Cron = "0 8 * * 1".parse().unwrap(); // Mondays 08:00
         // 2026-06-08 was a Monday; sent exactly at 08:00 UTC.
-        let sent = chrono::DateTime::parse_from_rfc3339("2026-06-08T08:00:00Z")
-            .unwrap()
-            .timestamp();
+        let sent = crate::clock::parse_rfc3339("2026-06-08T08:00:00Z").unwrap();
         let next = next_occurrence(&cron, sent).unwrap();
-        let expected = chrono::DateTime::parse_from_rfc3339("2026-06-15T08:00:00Z")
-            .unwrap()
-            .timestamp();
+        let expected = crate::clock::parse_rfc3339("2026-06-15T08:00:00Z").unwrap();
         assert_eq!(next, expected);
     }
 }

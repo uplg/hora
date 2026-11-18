@@ -95,7 +95,7 @@ pub async fn insert_check(store: &Store, monitor_id: &str, outcome: &Outcome) ->
     insert_check_row(
         store,
         CheckRow {
-            time: chrono::Utc::now().timestamp(),
+            time: jiff::Timestamp::now().as_second(),
             monitor_id,
             status: outcome.status,
             latency_ms: outcome.latency_ms,
@@ -126,7 +126,7 @@ pub async fn insert_heartbeat_miss(
         monitor_id,
         kind,
         reason,
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     )
     .await
 }
@@ -173,7 +173,7 @@ pub async fn insert_push(
         status,
         latency_ms,
         message,
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     )
     .await
 }

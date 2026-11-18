@@ -6,8 +6,6 @@
 //! a day per domain is plenty, so the watcher gates on the stored
 //! `checked_at` rather than polling each tick.
 
-use chrono::DateTime;
-
 use crate::http::get_json_following;
 
 /// The community RDAP bootstrap: redirects `/domain/{name}` to the
@@ -52,8 +50,7 @@ fn expiration_event(body: &serde_json::Value) -> Option<i64> {
         })?
         .get("eventDate")?
         .as_str()
-        .and_then(|date| DateTime::parse_from_rfc3339(date).ok())
-        .map(|date| date.timestamp())
+        .and_then(crate::clock::parse_rfc3339)
 }
 
 /// The answer parsing for the fuzz targets in `fuzz/` (built with
@@ -86,9 +83,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let expected = DateTime::parse_from_rfc3339("2026-08-13T04:00:00Z")
-            .unwrap()
-            .timestamp();
+        let expected = crate::clock::parse_rfc3339("2026-08-13T04:00:00Z").unwrap();
         assert_eq!(expiration_event(&body), Some(expected));
     }
 
@@ -143,9 +138,7 @@ mod tests {
             ("/registry/example.org", json_response(body)),
         ])
         .await;
-        let expected = DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
-            .unwrap()
-            .timestamp();
+        let expected = crate::clock::parse_rfc3339("2030-01-01T00:00:00Z").unwrap();
         let url = format!("{base}/domain/example.org");
         // A client that never follows (the loop does) and one that does.
         for client in [

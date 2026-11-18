@@ -2,12 +2,10 @@
 //! `/history.atom` feed. The Atom XML is written by hand (a feed is a dozen
 //! lines; a template engine would not pull its weight there).
 
-use std::collections::HashMap;
-use std::fmt::Write as _;
-
-use chrono::DateTime;
 use hora_core::db::{EventMarker, Incident, PushedAlert};
 use hora_core::fmt::{self, xml_escape};
+use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use crate::layout::Chrome;
 use crate::page::{Document, glyph, raw, state};
@@ -162,9 +160,7 @@ pub(crate) struct IncidentRow {
 
 /// A timestamp as `<time datetime>` wants it: `2026-09-18T19:12:00Z`.
 fn iso(timestamp: i64) -> String {
-    DateTime::from_timestamp(timestamp, 0).map_or_else(String::new, |at| {
-        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-    })
+    hora_core::clock::at(timestamp).map_or_else(String::new, hora_core::clock::rfc3339)
 }
 
 /// The multi-vantage verdict (as `hora_core::mesh::confirm` writes it) in a
@@ -481,9 +477,9 @@ pub(crate) fn timeline_rows(entries: &[hora_core::timeline::Entry]) -> Vec<Timel
                 _ => ("info", "Change"),
             };
             TimelineRow {
-                at: DateTime::from_timestamp(entry.at, 0).map_or_else(
+                at: hora_core::clock::at(entry.at).map_or_else(
                     || fmt::utc(entry.at),
-                    |at| at.format("%a %-d %b, %H:%M").to_string(),
+                    |at| at.strftime("%a %-d %b, %H:%M").to_string(),
                 ),
                 iso: iso(entry.at),
                 state,
@@ -543,9 +539,9 @@ pub(crate) fn incident_rows(
     monitor_names: &HashMap<String, String>,
 ) -> Vec<IncidentRow> {
     let at = |timestamp: i64, pattern: &str| {
-        DateTime::from_timestamp(timestamp, 0).map_or_else(
+        hora_core::clock::at(timestamp).map_or_else(
             || timestamp.to_string(),
-            |at| at.format(pattern).to_string(),
+            |at| at.strftime(pattern).to_string(),
         )
     };
     incidents
@@ -591,7 +587,7 @@ pub(crate) fn incident_rows(
                 day: at(incident.started_at, "%-d %b %Y"),
                 started_iso: iso(incident.started_at),
                 ended_iso: incident.ended_at.map(iso),
-                now_iso: iso(chrono::Utc::now().timestamp()),
+                now_iso: iso(jiff::Timestamp::now().as_second()),
                 started_short: at(incident.started_at, "%-d %b, %H:%M UTC"),
                 ended_short: incident
                     .ended_at
@@ -653,8 +649,12 @@ pub(crate) fn render_atom(
         .map(|incident| incident.ended_at.unwrap_or(incident.started_at))
         .max()
         .unwrap_or(0);
-    if let Some(dt) = DateTime::from_timestamp(updated, 0) {
-        let _ = writeln!(out, "  <updated>{}</updated>", dt.to_rfc3339());
+    if let Some(dt) = hora_core::clock::at(updated) {
+        let _ = writeln!(
+            out,
+            "  <updated>{}</updated>",
+            hora_core::clock::rfc3339_offset(dt)
+        );
     }
 
     for incident in incidents {
@@ -676,14 +676,22 @@ pub(crate) fn render_atom(
         let _ = writeln!(out, "    <id>{link}</id>");
         let _ = writeln!(out, "    <link href=\"{link}\" rel=\"alternate\"/>");
 
-        if let Some(dt) = DateTime::from_timestamp(incident.started_at, 0) {
-            let _ = writeln!(out, "    <published>{}</published>", dt.to_rfc3339());
+        if let Some(dt) = hora_core::clock::at(incident.started_at) {
+            let _ = writeln!(
+                out,
+                "    <published>{}</published>",
+                hora_core::clock::rfc3339_offset(dt)
+            );
         }
         // `updated` moves when the incident resolves, so feed readers refresh
         // the entry instead of keeping the stale "Ongoing" version.
         let entry_updated = incident.ended_at.unwrap_or(incident.started_at);
-        if let Some(dt) = DateTime::from_timestamp(entry_updated, 0) {
-            let _ = writeln!(out, "    <updated>{}</updated>", dt.to_rfc3339());
+        if let Some(dt) = hora_core::clock::at(entry_updated) {
+            let _ = writeln!(
+                out,
+                "    <updated>{}</updated>",
+                hora_core::clock::rfc3339_offset(dt)
+            );
         }
 
         let _ = writeln!(

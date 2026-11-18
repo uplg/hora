@@ -4,7 +4,6 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use chrono::Utc;
 use serde::Deserialize;
 
 use hora_core::config::Config;
@@ -75,7 +74,7 @@ impl PlannedWindow {
             starts_at: row.starts_at,
             ends_at: resolved
                 .as_ref()
-                .map_or(row.ends_at, |window| window.end.timestamp()),
+                .map_or(row.ends_at, |window| window.end.as_second()),
             state,
             announced: planned::is_announced(config, &row),
             host: resolved.as_ref().and_then(|window| window.host.clone()),
@@ -113,7 +112,7 @@ pub(crate) async fn plan(
     Operator { config }: Operator,
     Query(query): Query<MaintenanceQuery>,
 ) -> Result<Json<PlannedWindow>, AppError> {
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let planned = planned::plan(
         &state.core,
         &config,
@@ -167,7 +166,7 @@ pub(crate) async fn list(
     State(state): State<AppState>,
     Operator { config }: Operator,
 ) -> Result<Json<PlannedWindows>, AppError> {
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let windows = db::pending_maintenance_windows(&state.core, now)
         .await?
         .into_iter()
@@ -193,7 +192,7 @@ pub(crate) async fn cancel(
     Operator { config }: Operator,
     Path(id): Path<i64>,
 ) -> Result<Json<PlannedWindow>, AppError> {
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let window = planned::cancel(&state.core, id)
         .await
         .map_err(|err| match err {

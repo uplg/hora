@@ -435,7 +435,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "hora-compact-{tag}-{}-{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            jiff::Timestamp::now().as_nanosecond()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("hora.db").to_string_lossy().into_owned();

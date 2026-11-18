@@ -356,7 +356,7 @@ pub(super) async fn prune_with(
     purge_removed: bool,
     pace: &Pace,
 ) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     roll_up_history(store, now, pace).await;
 

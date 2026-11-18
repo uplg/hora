@@ -12,8 +12,6 @@
 //! - `C<id>`: cancel a window;
 //! - `T<seconds>`: let time pass.
 #![no_main]
-
-use chrono::DateTime;
 use hora_core::db::Store;
 use hora_core::mesh::wire::HeartbeatBody;
 use hora_core::planned::{self, Plan};
@@ -89,7 +87,7 @@ async fn run(data: &[u8]) {
             .expect("the database answers");
         assert!(announced.len() <= planned::MAX_ANNOUNCED_WINDOWS);
         let schedule = planned::schedule_between(&store, &config, now - DAY, now + 8 * DAY).await;
-        let at = DateTime::from_timestamp(now, 0).expect("a time");
+        let at = hora_core::clock::at(now).expect("a time");
         for window in schedule.windows() {
             assert!(window.start <= window.end);
             let _ = window.is_active(at);

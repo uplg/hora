@@ -284,7 +284,7 @@ async fn peer_monitors_match_the_full_summary() {
     // The peer answer reads the same snapshot as the page: it must report
     // exactly the status and p50 the authenticated summary shows.
     let (app, store) = test_app_with_pool().await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for (offset, latency) in [(60, 40), (120, 10), (180, 30), (240, 20), (300, 50)] {
         sqlx::query(
             "INSERT INTO checks (time, monitor_id, status, latency_ms) VALUES (?, 'web', 1, ?)",
@@ -523,7 +523,7 @@ async fn peer_probe_answers_honestly_for_a_monitor_in_maintenance() {
     let toml = vantage_config(port);
     let (app, store) = app_with_pool(&toml).await;
     let config = hora_core::config::parse(&toml).expect("config");
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     hora_core::planned::plan(
         &store,
         &config,
@@ -537,7 +537,7 @@ async fn peer_probe_answers_honestly_for_a_monitor_in_maintenance() {
     )
     .await
     .expect("planned");
-    let at = chrono::DateTime::from_timestamp(now, 0).expect("time");
+    let at = hora_core::clock::at(now).expect("time");
     assert!(hora_core::planned::in_maintenance(&store, &config, "svc", at).await);
 
     let body = format!(r#"{{"from":"hora-a","kind":"tcp","target":"127.0.0.1:{port}"}}"#);

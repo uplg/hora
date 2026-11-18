@@ -314,7 +314,7 @@ pub fn spawn(
         // Set once shutdown began: when the inbox stops being read.
         let mut closing: Option<tokio::time::Instant> = None;
         loop {
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             let mut sleep_for = state.next_deadline().map_or(IDLE_SWEEP, |deadline| {
                 Duration::from_secs(u64::try_from(deadline - now).unwrap_or(0).max(1))
             });
@@ -327,7 +327,7 @@ pub fn spawn(
             }
             tokio::select! {
                 message = alerts.recv() => {
-                    let now = chrono::Utc::now().timestamp();
+                    let now = jiff::Timestamp::now().as_second();
                     {
                         let config = config.borrow();
                         state.retain_monitors(|id| config.monitors.iter().any(|m| m.id == id));
@@ -355,13 +355,13 @@ pub fn spawn(
                     closing = Some(tokio::time::Instant::now() + SHUTDOWN_GRACE);
                 }
             }
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             for alert in state.flush(now) {
                 send_down(&mut lanes, &config, alert).await;
             }
             settle(&store, &mut state).await;
         }
-        for alert in state.drain(chrono::Utc::now().timestamp()) {
+        for alert in state.drain(jiff::Timestamp::now().as_second()) {
             send_down(&mut lanes, &config, alert).await;
         }
         settle(&store, &mut state).await;

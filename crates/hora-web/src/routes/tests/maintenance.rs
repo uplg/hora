@@ -80,7 +80,7 @@ fn heartbeat(body: &str) -> Request<Body> {
 }
 
 async fn muted(store: &hora_core::db::Store, id: &str, at: i64) -> bool {
-    let at = chrono::DateTime::from_timestamp(at, 0).expect("time");
+    let at = hora_core::clock::at(at).expect("time");
     hora_core::planned::in_maintenance(store, &mesh_config(), id, at).await
 }
 
@@ -123,11 +123,11 @@ async fn maintenance_takes_the_operator_token_in_a_header() {
 #[tokio::test]
 async fn a_window_is_planned_once_listed_and_cancelled() {
     let (app, store) = app_with_pool(MESH).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let start = now + 3600;
-    let rfc = chrono::DateTime::from_timestamp(start, 0)
+    let rfc = hora_core::clock::at(start)
         .expect("time")
-        .format("%Y-%m-%dT%H:%M:%SZ");
+        .strftime("%Y-%m-%dT%H:%M:%SZ");
     let plan =
         format!("/api/maintenance?host=frank&starts_at={rfc}&duration=10m&reason=kernel%20reboot");
 
@@ -347,7 +347,7 @@ async fn an_active_window_shows_on_the_page_for_the_right_audience() {
 #[tokio::test]
 async fn a_trusted_peers_heartbeat_announces_and_withdraws_its_window() {
     let (app, store) = app_with_pool(MESH).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     // Two hours for the reboot of its own host: accepted, cut to the 15
     // minutes this node grants.
     let announcement = format!(
@@ -421,7 +421,7 @@ async fn a_trusted_peers_heartbeat_announces_and_withdraws_its_window() {
 #[tokio::test]
 async fn an_oversized_announcement_changes_nothing_and_the_heartbeat_counts() {
     let (app, store) = app_with_pool(MESH).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let announcement = format!(
         r#"{{"maintenance":[{{"id":12,"starts_at":{},"ends_at":{},"reason":"kernel reboot","host":"frank"}}]}}"#,
         now - 10,
@@ -446,7 +446,7 @@ async fn an_oversized_announcement_changes_nothing_and_the_heartbeat_counts() {
 async fn an_announcement_is_ignored_from_a_peer_that_was_not_trusted_with_it() {
     // The shared test app's peer has no accept_maintenance_secs.
     let (app, store) = test_app_with_pool().await;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let announcement = format!(
         r#"{{"maintenance":[{{"id":1,"starts_at":{},"ends_at":{},"reason":"reboot"}}]}}"#,
         now - 10,

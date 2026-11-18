@@ -94,8 +94,8 @@ pub async fn apply(
     let reason = reason
         .map(|reason| bounded(reason, MAX_SILENCE_REASON_CHARS))
         .filter(|reason| !reason.is_empty());
-    let until = chrono::Utc::now()
-        .timestamp()
+    let until = jiff::Timestamp::now()
+        .as_second()
         .saturating_add(i64::try_from(duration_secs).unwrap_or(i64::MAX));
     db::insert_silences(store, &ids, until, reason.as_deref())
         .await
@@ -196,7 +196,7 @@ mod tests {
             Err(SilenceError::UnknownId(_))
         ));
         // Nothing was written by the refused calls.
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         assert!(db::active_silences(&store, now).await.unwrap().is_empty());
 
         let long = "é".repeat(MAX_SILENCE_REASON_CHARS + 50);

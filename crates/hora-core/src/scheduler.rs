@@ -346,7 +346,7 @@ async fn run(
         // stale - exactly what the dead-man heartbeat and /healthz want to detect).
         // `fetch_max` across all monitors tracks the most recent tick of any of them.
         last_tick.fetch_max(
-            u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0),
+            u64::try_from(jiff::Timestamp::now().as_second()).unwrap_or(0),
             Ordering::Relaxed,
         );
 
@@ -440,10 +440,10 @@ async fn run(
                 )
                 .await;
                 state.level = AlertLevel::Down;
-                let now = chrono::Utc::now().timestamp();
+                let now = jiff::Timestamp::now().as_second();
                 state.local_only_asked = local_only.then_some(now);
                 state.announce_checked = Some(now);
-            } else if state.reannounce_due(chrono::Utc::now().timestamp(), reannounce_secs) {
+            } else if state.reannounce_due(jiff::Timestamp::now().as_second(), reannounce_secs) {
                 // Delivered since: nothing more to watch. Still not: every
                 // channel failed, or dropped it - said again, on the same
                 // incident, for as long as the outage lasts.
@@ -461,13 +461,13 @@ async fn run(
                             &mut open_incident,
                         )
                         .await;
-                        let now = chrono::Utc::now().timestamp();
+                        let now = jiff::Timestamp::now().as_second();
                         state.local_only_asked = local_only.then_some(now);
                         Some(now)
                     }
                     _ => None,
                 };
-            } else if state.reask_due(chrono::Utc::now().timestamp()) {
+            } else if state.reask_due(jiff::Timestamp::now().as_second()) {
                 let snapshot = config.borrow().clone();
                 let still_local = reconfirm_local_down(
                     &snapshot,
@@ -479,7 +479,7 @@ async fn run(
                     open_incident,
                 )
                 .await;
-                state.local_only_asked = still_local.then(|| chrono::Utc::now().timestamp());
+                state.local_only_asked = still_local.then(|| jiff::Timestamp::now().as_second());
             }
         } else if outcome.is_degraded() && alert_on_degraded {
             // Up but slow: same anti-flap threshold as down, separate state.
@@ -530,7 +530,7 @@ async fn confirm_down(
     // "What changed?": the most recent event marker (`hora event`) within the
     // lookback, phrased relative to now ("deploy api v2.3, 3 min before"). Read
     // errors just drop the annotation - it must never delay the alert.
-    let event = correlated_event(store, chrono::Utc::now().timestamp()).await;
+    let event = correlated_event(store, jiff::Timestamp::now().as_second()).await;
 
     // Unless one is already open (resumed from a previous run mid-outage).
     // Recorded *before* the peers are consulted, so the incident history
@@ -624,7 +624,7 @@ async fn resume_local_only(
         },
     );
     if still_local {
-        state.local_only_asked = Some(chrono::Utc::now().timestamp());
+        state.local_only_asked = Some(jiff::Timestamp::now().as_second());
     }
 }
 
@@ -704,7 +704,7 @@ async fn reconfirm_local_down(
             impacted: impacted_names,
             notify: monitor.notify.clone(),
             vantage: verdict.map(|verdict| verdict.text),
-            event: correlated_event(store, chrono::Utc::now().timestamp()).await,
+            event: correlated_event(store, jiff::Timestamp::now().as_second()).await,
             local_only: false,
             incident: open_incident,
         }),
@@ -759,7 +759,7 @@ pub(crate) async fn muted(store: &Store, config: &watch::Receiver<Arc<Config>>, 
 /// asks for - a down, a certificate or a domain about to expire, a new
 /// release - so that a silence mutes whatever a maintenance window does.
 pub(crate) async fn muted_under(store: &Store, config: &Config, id: &str) -> bool {
-    crate::planned::in_maintenance(store, config, id, chrono::Utc::now()).await
+    crate::planned::in_maintenance(store, config, id, jiff::Timestamp::now()).await
         || silenced(store, id).await
 }
 
@@ -784,7 +784,7 @@ async fn alert_degraded(notifier: &Notifiers, monitor: &Monitor, outcome: &Outco
 /// Whether an ad-hoc silence covers this monitor right now. A read error fails
 /// open (logged, not silenced): a database hiccup must never mute an alert.
 pub(crate) async fn silenced(store: &Store, monitor_id: &str) -> bool {
-    match db::is_silenced(store, monitor_id, chrono::Utc::now().timestamp()).await {
+    match db::is_silenced(store, monitor_id, jiff::Timestamp::now().as_second()).await {
         Ok(silenced) => silenced,
         Err(err) => {
             error!(monitor = %monitor_id, "failed to read silences: {err:#}");
@@ -822,7 +822,7 @@ async fn tick_outcome(
                 &watch.cadence,
                 watch.expected_since,
                 i64::try_from(monitor.interval_secs).unwrap_or(i64::MAX),
-                chrono::Utc::now().timestamp(),
+                jiff::Timestamp::now().as_second(),
             )
             .await;
         }
@@ -848,7 +848,7 @@ async fn tick_outcome(
         probe::local::note(
             &monitor.id,
             outcome.error.as_deref().unwrap_or("out of resources"),
-            chrono::Utc::now().timestamp(),
+            jiff::Timestamp::now().as_second(),
         );
         return None;
     }
@@ -900,7 +900,7 @@ async fn evaluate_burn(
     state: &mut BurnAlerts,
 ) {
     let window_days = monitor.slo_window_days();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     let burn_1h = burn_window(store, &monitor.id, now - 3600, slo_bp).await;
     let fast_threshold = slo::fast_burn_threshold_x10(window_days);
@@ -955,7 +955,7 @@ async fn fire_burn_alert(
     window: &'static str,
 ) {
     let window_days = monitor.slo_window_days();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let since = now - i64::from(window_days) * crate::SECONDS_PER_DAY;
     // No estimate beats a wrong one: unreadable history drops the ETA only.
     let exhausted_in_secs = match db::availability(store, &monitor.id, since).await {
@@ -1135,7 +1135,7 @@ mod tests {
                 notifier: crate::notifications::shared(&config, &client),
                 monitor: config.monitors[0].clone(),
                 posts,
-                now: chrono::Utc::now().timestamp(),
+                now: jiff::Timestamp::now().as_second(),
             }
         }
 
@@ -1251,7 +1251,7 @@ mod tests {
     async fn a_recent_event_is_named_with_its_age() {
         let store = Store::in_memory().await;
         assert_eq!(correlated_event(&store, 10_000).await, None);
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         db::insert_event(&store, "deploy api v2.3").await.unwrap();
         // Three minutes later: named, with how long before.
         let phrase = correlated_event(&store, now + 180).await.expect("an event");
@@ -1747,7 +1747,7 @@ mod tests {
     async fn a_silenced_down_is_not_sent() {
         let (config, _posts) = reporting_job().await;
         let store = Store::in_memory().await;
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         db::insert_silence(&store, "job", now + 3600, Some("migrating"))
             .await
             .unwrap();
@@ -1917,7 +1917,7 @@ mod tests {
     /// Plan a window for `svc` through the API's own door, from `offset`
     /// seconds from now, for `secs` seconds.
     async fn plan_window(store: &Store, config: &Config, offset: i64, secs: u32) {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         crate::planned::plan(
             store,
             config,
@@ -2100,7 +2100,7 @@ mod tests {
         let monitor = |id: &str| config.find_monitor(id).expect("configured").clone();
         // Failed checks, one per minute of the range (minutes ago).
         let fail = async |id: &'static str, minutes_ago: std::ops::Range<i64>| {
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             for ago in minutes_ago {
                 sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, ?, 0)")
                     .bind(now - ago * 60)

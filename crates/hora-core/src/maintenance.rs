@@ -66,7 +66,7 @@ pub fn spawn_pruner(
                     }
                 }
                 _ = rollup.tick() => {
-                    let now = chrono::Utc::now().timestamp();
+                    let now = jiff::Timestamp::now().as_second();
                     if let Err(err) = roll_up_recent(&store, now).await {
                         tracing::warn!("hourly roll-up failed: {err}");
                     }

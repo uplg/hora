@@ -66,7 +66,7 @@ pub async fn insert_maintenance_window(
     .bind(window.selector)
     .bind(window.origin)
     .bind(window.remote_id)
-    .bind(chrono::Utc::now().timestamp())
+    .bind(jiff::Timestamp::now().as_second())
     .execute(store.sqlx())
     .await?
     .rows_affected()

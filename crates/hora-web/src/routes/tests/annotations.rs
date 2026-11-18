@@ -101,7 +101,7 @@ async fn announce_until_takes_a_utc_clock_time() {
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
     let until = body["until"].as_i64().expect("until");
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     assert!(until > now && until <= now + 86_400, "{until}");
     assert_eq!(until % 86_400, 18 * 3600, "18:00 UTC");
 }
@@ -139,7 +139,7 @@ async fn silence_mutes_the_monitor_in_the_database() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     assert!(
         hora_core::db::is_silenced(&store, "web", now)
             .await
@@ -166,7 +166,7 @@ async fn silence_accepts_a_watched_peer() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     assert!(
         hora_core::db::is_silenced(&store, "peer-x", now)
             .await
@@ -182,7 +182,7 @@ async fn silence_all_uses_the_wildcard() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     assert!(
         hora_core::db::is_silenced(&store, "beat", now)
             .await

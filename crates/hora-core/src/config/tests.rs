@@ -474,7 +474,7 @@ fn maintenance_window_mutes_selected_monitor() {
             interval_secs = 60
         "#,
     );
-    let parse_dt = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+    let parse_dt = |s: &str| s.parse::<jiff::Timestamp>().unwrap();
     let schedule = crate::planned::Schedule::merged(&config, &[]);
     assert!(schedule.in_maintenance("db", parse_dt("2026-06-08T01:00:00Z")));
     // Outside the window, or a monitor not listed.
@@ -615,6 +615,45 @@ fn rejects_inverted_maintenance_window() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("start must be before end"), "got: {error}");
+}
+
+/// The spellings chrono loaded keep loading; a date without its offset
+/// never did, and says why.
+#[test]
+fn config_dates_keep_their_looser_spellings() {
+    let config = parse(
+        r#"
+            [page]
+            [server]
+            [[maintenance]]
+            start = "2026-06-08 00:00:00 UTC"
+            end = "2026-06-08T04:00:00 +02:00"
+            [[incidents]]
+            title = "Investigating"
+            at = " 2026-06-07T12:00:00Z "
+        "#,
+    );
+    assert_eq!(config.maintenance[0].start.as_second(), 1_780_876_800);
+    assert_eq!(config.maintenance[0].end.as_second(), 1_780_884_000);
+    assert_eq!(
+        config.incidents[0].at.map(jiff::Timestamp::as_second),
+        Some(1_780_833_600)
+    );
+    let error = load(
+        r#"
+            [page]
+            [server]
+            [[maintenance]]
+            start = "2026-06-08T00:00:00"
+            end = "2026-06-08T02:00:00Z"
+        "#,
+    )
+    .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("RFC 3339 date-time with its offset"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1333,12 +1372,12 @@ fn cron_keeps_the_3x_shorthand_steps() {
         assert!(super::parse_cron(pattern).is_ok(), "{pattern}");
     }
     assert!(super::parse_cron("61 * * * *").is_err());
-    let from = chrono::DateTime::from_timestamp(0, 0).expect("epoch");
+    let from = crate::clock::CronTime(0);
     let next = super::parse_cron("5/5 * * * *")
         .expect("valid")
         .find_next_occurrence(&from, false)
         .expect("next");
-    assert_eq!(next.timestamp(), 300);
+    assert_eq!(next.0, 300);
 }
 
 /// Found by the `schedule` fuzz target: croner takes a field that lists
@@ -1359,7 +1398,7 @@ fn cron_refuses_a_time_field_that_lists_nothing() {
         );
     }
     // A stray comma beside a value is the value alone, as croner reads it.
-    let from = chrono::DateTime::from_timestamp(0, 0).expect("epoch");
+    let from = crate::clock::CronTime(0);
     for pattern in [
         ",5 * * * *",
         "5, * * * *",

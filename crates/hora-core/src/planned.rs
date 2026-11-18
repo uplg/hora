@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use tracing::{error, info, warn};
 
 use crate::config::{Config, Peer};
@@ -165,8 +165,8 @@ pub struct Window {
     pub id: Option<i64>,
     /// The config window's title, or the reason given when it was planned.
     pub title: String,
-    pub start: DateTime<Utc>,
-    pub end: DateTime<Utc>,
+    pub start: Timestamp,
+    pub end: Timestamp,
     /// Covers every monitor and every peer watch.
     pub all: bool,
     /// Otherwise, the ids it covers: monitors, and watched peers' listen ids.
@@ -185,7 +185,7 @@ impl Window {
 
     /// Whether `at` falls inside the window, both bounds included.
     #[must_use]
-    pub fn is_active(&self, at: DateTime<Utc>) -> bool {
+    pub fn is_active(&self, at: Timestamp) -> bool {
         at >= self.start && at <= self.end
     }
 
@@ -214,8 +214,8 @@ impl Window {
 pub fn resolve(config: &Config, row: &MaintenanceWindow) -> Option<Window> {
     let origin = Origin::parse(&row.origin)?;
     let selector = Selector::parse(&row.selector)?;
-    let start = DateTime::from_timestamp(row.starts_at, 0)?;
-    let end = DateTime::from_timestamp(row.ends_at, 0)?;
+    let start = crate::clock::at(row.starts_at)?;
+    let end = crate::clock::at(row.ends_at)?;
     let mut window = Window {
         id: Some(row.id),
         title: row.reason.clone(),
@@ -238,7 +238,7 @@ pub fn resolve(config: &Config, row: &MaintenanceWindow) -> Option<Window> {
         (Origin::Peer(peer_id), selector) => {
             let peer = config.peers.iter().find(|peer| &peer.id == peer_id)?;
             let accepted = trusted_secs(peer)?;
-            window.end = end.min(start + chrono::TimeDelta::seconds(accepted));
+            window.end = end.min(crate::clock::shift(start, accepted));
             window.monitors.push(peer.listen_id().to_owned());
             // A peer declares maintenance for its own host and nothing else:
             // not for another host, never for monitors it would name.
@@ -326,7 +326,7 @@ impl Schedule {
     /// The window covering `id` (a monitor id, or a watched peer's listen
     /// id) at `at`, if any.
     #[must_use]
-    pub fn active(&self, id: &str, at: DateTime<Utc>) -> Option<&Window> {
+    pub fn active(&self, id: &str, at: Timestamp) -> Option<&Window> {
         self.windows
             .iter()
             .find(|window| window.is_active(at) && window.covers(id))
@@ -334,7 +334,7 @@ impl Schedule {
 
     /// Whether `id` is inside a maintenance window at `at` (alerts muted).
     #[must_use]
-    pub fn in_maintenance(&self, id: &str, at: DateTime<Utc>) -> bool {
+    pub fn in_maintenance(&self, id: &str, at: Timestamp) -> bool {
         self.active(id, at).is_some()
     }
 }
@@ -357,9 +357,9 @@ pub async fn active_window(
     store: &Store,
     config: &Config,
     id: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Option<Window> {
-    let at = now.timestamp();
+    let at = now.as_second();
     schedule_between(store, config, at, at)
         .await
         .active(id, now)
@@ -369,7 +369,7 @@ pub async fn active_window(
 /// Whether `id` (a monitor id, or a watched peer's listen id) is inside a
 /// maintenance window at `now`: the question every alert asks before it goes
 /// out. Checks are recorded either way.
-pub async fn in_maintenance(store: &Store, config: &Config, id: &str, now: DateTime<Utc>) -> bool {
+pub async fn in_maintenance(store: &Store, config: &Config, id: &str, now: Timestamp) -> bool {
     active_window(store, config, id, now).await.is_some()
 }
 
@@ -471,9 +471,7 @@ pub fn parse_start(raw: &str) -> Option<i64> {
     if !raw.is_empty() && raw.bytes().all(|byte| byte.is_ascii_digit()) {
         return raw.parse().ok();
     }
-    DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .map(|at| at.timestamp())
+    crate::clock::parse_rfc3339(raw)
 }
 
 /// Plan a maintenance window on this node, at `now`.
