@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-18
+
+A maintenance release: an unmaintained dependency leaves, and nothing you see
+changes.
+
 ### Changed
 
 - **Dates are computed with [`jiff`](https://crates.io/crates/jiff) instead
@@ -1922,7 +1927,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/uplg/hora/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0
 [0.12.0-beta.1]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0-beta.1
 [0.11.5]: https://github.com/uplg/hora/compare/v0.11.4...v0.11.5
