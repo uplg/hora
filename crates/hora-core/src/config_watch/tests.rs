@@ -15,6 +15,7 @@ const EVENTS_ONLY: Follow = Follow {
     recheck: Duration::from_secs(3600),
     events: true,
     file_itself: false,
+    trusted: false,
 };
 
 /// A directory of its own under the system's temporary one, removed on drop.
@@ -235,6 +236,7 @@ async fn the_periodic_reread_finds_a_change_nothing_announced() {
             recheck: Duration::from_millis(150),
             events: false,
             file_itself: false,
+            trusted: true,
         },
     );
     assert!(follower.watcher.is_none() && follower.watched.is_empty());
@@ -245,6 +247,93 @@ async fn the_periodic_reread_finds_a_change_nothing_announced() {
     assert_eq!(change(&mut reloader).await, "two");
     std::fs::write(&path, "three").unwrap();
     assert_eq!(change(&mut reloader).await, "three");
+}
+
+/// A follower whose re-read ticks every 50 ms, trusting the notifications or
+/// not, with its requests handed to the test.
+fn ticking(path: &Path, trusted: bool) -> (Follower, mpsc::Receiver<()>) {
+    let (tx, rx) = mpsc::channel(64);
+    let how = Follow {
+        recheck: Duration::from_millis(50),
+        events: true,
+        file_itself: false,
+        trusted,
+    };
+    (Follower::new(path, tx, how), rx)
+}
+
+/// How many requests arrive within `window`.
+async fn requests_within(rx: &mut mpsc::Receiver<()>, window: Duration) -> usize {
+    let deadline = Instant::now() + window;
+    let mut count = 0;
+    while let Ok(Some(())) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        count += 1;
+    }
+    count
+}
+
+/// On a trusted filesystem with every watch in place, nothing ticks: an idle
+/// daemon does not wake to re-read its config. A change is still announced.
+/// Untrusted, the same follower ticks.
+#[tokio::test]
+async fn trusted_notifications_leave_the_periodic_reread_off() {
+    let dir = Scratch::new("trusted");
+    let path = dir.path("config.toml");
+    std::fs::write(&path, "one").unwrap();
+
+    let (follower, mut rx) = ticking(&path, true);
+    assert!(!follower.rechecks());
+    tokio::spawn(follower.run());
+    // A backend may still deliver the write that created the file (`FSEvents`
+    // batches): a few requests at most, never one per tick.
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await <= 2);
+    std::fs::write(&path, "two").unwrap();
+    tokio::time::timeout(PATIENCE, rx.recv())
+        .await
+        .expect("the change was announced");
+
+    let (follower, mut rx) = ticking(&path, false);
+    assert!(follower.rechecks());
+    tokio::spawn(follower.run());
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await >= 4);
+}
+
+/// A directory that does not exist yet cannot be watched: until it does, the
+/// re-read runs even on a trusted filesystem, and it finds the directory.
+/// Once the watch is in place the ticks stop.
+#[tokio::test]
+async fn a_missing_watch_keeps_the_periodic_reread_on() {
+    let dir = Scratch::new("missing");
+    let sub = dir.path("conf");
+    let path = sub.join("config.toml");
+
+    let (follower, mut rx) = ticking(&path, true);
+    assert!(follower.incomplete && follower.rechecks());
+    tokio::spawn(follower.run());
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await >= 4);
+
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(&path, "one").unwrap();
+    // The next tick places the watch; what was announced meanwhile drains.
+    let _ = requests_within(&mut rx, Duration::from_millis(600)).await;
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await <= 2);
+    std::fs::write(&path, "two").unwrap();
+    tokio::time::timeout(PATIENCE, rx.recv())
+        .await
+        .expect("the change was announced");
+}
+
+/// Once the backend reported an error, its silence is not trusted again.
+#[tokio::test]
+async fn a_backend_error_turns_the_periodic_reread_on() {
+    let dir = Scratch::new("failed");
+    let path = dir.path("config.toml");
+    std::fs::write(&path, "one").unwrap();
+    let (follower, mut rx) = ticking(&path, true);
+    follower.failed.store(true, Ordering::Relaxed);
+    assert!(follower.rechecks());
+    tokio::spawn(follower.run());
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await >= 4);
 }
 
 /// The follower stops, and its watcher with it, when the supervisor drops
@@ -625,6 +714,45 @@ fn a_network_filesystem_is_found() {
     // FUSE in general passes local writes through (Unraid's shfs).
     let unraid = "30 1 0:40 / /mnt/user rw - fuse.shfs shfs rw\n";
     assert_eq!(found(unraid, "/mnt/user/appdata/hora/config.toml"), []);
+}
+
+fn trusted(mountinfo: &str, file: &str) -> Option<String> {
+    mount_trusted(mountinfo, Path::new(file), Path::new(file))
+}
+
+/// A local filesystem with no caveat is trusted; everything else is not.
+#[test]
+fn only_a_local_filesystem_without_caveats_is_trusted() {
+    assert_eq!(
+        trusted(COMPOSE, "/etc/hora/config.toml").as_deref(),
+        Some("ext4")
+    );
+    // The container's own overlay: a lower layer can change underneath.
+    assert_eq!(trusted(COMPOSE, "/config.toml"), None);
+
+    let unraid = "30 1 0:40 / /mnt/user rw - fuse.shfs shfs rw\n";
+    assert_eq!(
+        trusted(unraid, "/mnt/user/appdata/hora/config.toml").as_deref(),
+        Some("fuse.shfs")
+    );
+    // A FUSE filesystem that is not known to pass local writes through.
+    let sshfs = "31 1 0:41 / /mnt/remote rw - fuse.sshfs host: rw\n";
+    assert_eq!(trusted(sshfs, "/mnt/remote/config.toml"), None);
+    let unknown = "32 1 0:42 / /mnt/odd rw - fuse.something odd rw\n";
+    assert_eq!(trusted(unknown, "/mnt/odd/config.toml"), None);
+
+    let nfs = format!("{COMPOSE}1520 1502 0:61 / /mnt/shared rw - nfs4 nas:/export rw\n");
+    assert_eq!(trusted(&nfs, "/mnt/shared/config.toml"), None);
+
+    // A file mounted on its own, even from ext4: a caveat stands.
+    let single = COMPOSE.replace(
+        "/home/ops/hora/config /etc/hora ",
+        "/home/ops/hora/config.toml /etc/hora/config.toml ",
+    );
+    assert_eq!(trusted(&single, "/etc/hora/config.toml"), None);
+
+    // No mount table, no trust.
+    assert_eq!(trusted("", "/etc/hora/config.toml"), None);
 }
 
 #[test]

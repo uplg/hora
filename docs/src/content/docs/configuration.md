@@ -110,10 +110,19 @@ changing, and three things tell it to look:
   config is followed through its links, which covers a Kubernetes
   `ConfigMap` (updated by swapping the `..data` link). Other files in the
   directory - the database, when it sits next to the config - wake nothing.
-- **A re-read every 60 s**, whatever the notifications said. This is what
-  applies a change where there are none: a network filesystem (NFS, SMB, 9p,
-  sshfs) edited from another machine, some FUSE and overlay setups. It costs
-  one read of the file a minute; a text that has not changed is not parsed.
+- **A re-read every 60 s**, wherever the notifications cannot be trusted.
+  This is what applies a change where there are none: a network filesystem
+  (NFS, SMB, 9p, sshfs) edited from another machine, some FUSE and overlay
+  setups. It costs one read of the file a minute; a text that has not
+  changed is not parsed. On Linux, with the config on a local filesystem
+  (ext4, xfs, btrfs, ZFS, tmpfs, Unraid's user shares, mergerfs, ...) and
+  not mounted as a single file, the re-read is off, so an idle Hora does not
+  wake up for it. It comes back on by itself for as long as a watch cannot
+  be placed (a directory of the path does not exist yet, the watch limit is
+  reached), and for good once the notification backend reports an error.
+  `hora doctor` says which case applies. A write that goes around a FUSE
+  share - on Unraid, to `/mnt/cache/...` instead of `/mnt/user/...` - is
+  announced to no one; SIGHUP applies it.
 - **SIGHUP**, to apply it now: `kill -HUP <pid>` - in Docker,
   `docker kill -s HUP hora`.
 

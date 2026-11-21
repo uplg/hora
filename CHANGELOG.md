@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An idle daemon no longer wakes up every minute to re-read its config**
+  where file notifications can be trusted: on Linux, with the config on a
+  local filesystem (ext4, xfs, btrfs, ZFS, tmpfs, Unraid's user shares,
+  mergerfs, ...) and not bind-mounted as a single file. Changes still apply
+  about a second after the file is saved. The re-read every 60 s stays where
+  notifications can miss a change (a network or unknown FUSE filesystem, an
+  overlay, a single-file mount, any platform without a readable mount table),
+  comes back while a watch cannot be placed, and stays on once the
+  notification backend reported an error. `hora doctor` names the filesystem
+  it trusts.
+
 ## [0.12.2] - 2026-11-22
 
 A security release for eight advisories. One

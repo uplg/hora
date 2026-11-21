@@ -14,11 +14,14 @@
 //!   Kubernetes `ConfigMap` is a link into a `..data` directory that is itself
 //!   a link, swapped atomically) has every directory of its link chain
 //!   watched, and the watches are moved when the chain changes.
-//! - **A re-read every [`RECHECK`]**, because notifications cannot be trusted
-//!   everywhere: a network filesystem says nothing about a change made on
+//! - **A re-read every [`RECHECK`]**, wherever notifications cannot be
+//!   trusted: a network filesystem says nothing about a change made on
 //!   another machine, some FUSE and overlay setups say nothing at all, and an
-//!   event queue can overflow. A missed event then costs at most that long,
-//!   on every platform.
+//!   event queue can overflow. A missed event then costs at most that long.
+//!   On a local filesystem ([`trusted_filesystem`]) the re-read is off while
+//!   every watch is in place, so an idle daemon does not wake for it; it is
+//!   back on for as long as a watch is missing, and for good once the backend
+//!   reported an error.
 //!
 //! What no source can fix is a config bind-mounted as a single file: the
 //! container holds the inode, and a file replaced on the host is a different
@@ -30,6 +33,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -39,9 +43,10 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, warn};
 
-/// How often the config file is re-read whatever the notifications said. It
-/// is the bound on a missed event, and the only way a change arrives where
-/// there are no events at all. Reading a few kilobytes of TOML and comparing
+/// How often the config file is re-read whatever the notifications said,
+/// where they cannot be trusted (see the module documentation). It is the bound
+/// on a missed event, and the only way a change arrives where there are no
+/// events at all. Reading a few kilobytes of TOML and comparing
 /// them with the text last seen, once a minute, costs nothing worth a
 /// cheaper test: an inode or a modification time would save the read and be
 /// wrong on exactly the filesystems this is for (coarse or cached attributes
@@ -78,6 +83,36 @@ const NETWORK_FILESYSTEMS: &[&str] = &[
     "fuse.glusterfs",
     "fuse.rclone",
     "fuse.s3fs",
+];
+
+/// The filesystem types whose notifications announce every change made on
+/// this machine - and with the config on one of them, every change that
+/// reaches it: an edit on the host of a bind-mounted directory is a local
+/// write too. On these the periodic re-read is off while every watch is in
+/// place. Anything else keeps it: a network filesystem, a FUSE filesystem not
+/// listed here, an overlay (a lower layer can change underneath it), and any
+/// config whose mount table cannot be read.
+const LOCAL_FILESYSTEMS: &[&str] = &[
+    "ext2",
+    "ext3",
+    "ext4",
+    "xfs",
+    "btrfs",
+    "zfs",
+    "bcachefs",
+    "f2fs",
+    "jfs",
+    "reiserfs",
+    "tmpfs",
+    "ramfs",
+    "vfat",
+    "exfat",
+    "ntfs3",
+    // Unraid's user shares and mergerfs pass local writes through. A write
+    // that goes around them (Unraid's `/mnt/cache/...` instead of
+    // `/mnt/user/...`) is announced to no one: SIGHUP applies it.
+    "fuse.shfs",
+    "fuse.mergerfs",
 ];
 
 /// A reason live reload works less well than the documentation promises,
@@ -130,16 +165,33 @@ impl fmt::Display for Caveat {
 /// on Linux only, and one that cannot be read is no finding.
 #[must_use]
 pub fn caveats(config_path: &Path) -> Vec<Caveat> {
-    if !cfg!(target_os = "linux") {
-        return Vec::new();
-    }
-    let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+    let Some((mountinfo, file, resolved)) = mount_table(config_path) else {
         return Vec::new();
     };
+    mount_caveats(&mountinfo, &file, &resolved)
+}
+
+/// The type of the filesystem the config is on, when its notifications can
+/// be trusted to announce every change: a local one (`LOCAL_FILESYSTEMS`), with
+/// no [`caveats`]. `None` everywhere else, and wherever nothing can be known
+/// (the mount table is read on Linux only).
+#[must_use]
+pub fn trusted_filesystem(config_path: &Path) -> Option<String> {
+    let (mountinfo, file, resolved) = mount_table(config_path)?;
+    mount_trusted(&mountinfo, &file, &resolved)
+}
+
+/// The mount table, with the config path made absolute and the same with its
+/// symbolic links followed. `None` off Linux and when it cannot be read.
+fn mount_table(config_path: &Path) -> Option<(String, PathBuf, PathBuf)> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
     let file = std::path::absolute(config_path).unwrap_or_else(|_| config_path.to_path_buf());
     // The file a symlinked config leads to is the one that is mounted.
     let resolved = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
-    mount_caveats(&mountinfo, &file, &resolved)
+    Some((mountinfo, file, resolved))
 }
 
 /// Log each of [`caveats`] as a warning. The daemon calls it once at startup
@@ -164,21 +216,37 @@ fn mount_caveats(mountinfo: &str, file: &Path, resolved: &Path) -> Vec<Caveat> {
             file: file.to_path_buf(),
         });
     }
-    // The filesystem the file is on is the one mounted at the longest mount
-    // point that contains it; of several stacked on one point the last line
-    // is the one on top (`max_by_key` keeps the last maximum).
-    let fstype = mounts
-        .iter()
-        .filter(|mount| resolved.starts_with(&mount.point))
-        .max_by_key(|mount| mount.point.components().count())
-        .map(|mount| mount.fstype.as_str());
-    if let Some(fstype) = fstype.filter(|fstype| NETWORK_FILESYSTEMS.contains(fstype)) {
+    if let Some(fstype) =
+        filesystem(&mounts, resolved).filter(|fstype| NETWORK_FILESYSTEMS.contains(fstype))
+    {
         found.push(Caveat::NetworkFilesystem {
             file: file.to_path_buf(),
             fstype: fstype.to_owned(),
         });
     }
     found
+}
+
+/// [`trusted_filesystem`] for a given mount table.
+fn mount_trusted(mountinfo: &str, file: &Path, resolved: &Path) -> Option<String> {
+    if !mount_caveats(mountinfo, file, resolved).is_empty() {
+        return None;
+    }
+    let mounts: Vec<Mount> = mountinfo.lines().filter_map(parse_mount).collect();
+    filesystem(&mounts, resolved)
+        .filter(|fstype| LOCAL_FILESYSTEMS.contains(fstype))
+        .map(str::to_owned)
+}
+
+/// The type of the filesystem `resolved` is on: the one mounted at the
+/// longest mount point that contains it; of several stacked on one point the
+/// last line is the one on top (`max_by_key` keeps the last maximum).
+fn filesystem<'a>(mounts: &'a [Mount], resolved: &Path) -> Option<&'a str> {
+    mounts
+        .iter()
+        .filter(|mount| resolved.starts_with(&mount.point))
+        .max_by_key(|mount| mount.point.components().count())
+        .map(|mount| mount.fstype.as_str())
 }
 
 /// The two fields of a mount this module reads.
@@ -341,9 +409,13 @@ pub(crate) fn start(config_path: &Path) -> Reloader {
     for caveat in &caveats {
         warn!("{caveat}");
     }
+    // Where nothing stands against the notifications, the periodic re-read
+    // waits for one of them to be missing (`Follower::rechecks`).
+    let trusted = caveats.is_empty() && trusted_filesystem(config_path).is_some();
     let how = Follow {
         recheck: RECHECK,
         events: true,
+        trusted,
         // A file mounted on its own gets no event through its directory (the
         // directory in the container is not the one the file lives in), but a
         // write in place still reaches a watch on the file itself. Nowhere
@@ -397,6 +469,10 @@ struct Follow {
     events: bool,
     /// Whether the file itself is watched besides its directory.
     file_itself: bool,
+    /// Whether the notifications can be trusted to announce every change, so
+    /// the periodic re-read runs only while one of them is known to be
+    /// missing.
+    trusted: bool,
 }
 
 /// One thing handed to the notification backend: a directory (or the file),
@@ -439,6 +515,8 @@ fn identity(_path: &Path) -> Option<(u64, u64)> {
 struct Plan {
     targets: Vec<Target>,
     names: HashSet<OsString>,
+    /// Whether a directory to watch does not exist (yet).
+    missing: bool,
 }
 
 /// Walk from the config path along its symbolic links. Every step gives a
@@ -477,10 +555,10 @@ fn plan(config_path: &Path, file_itself: bool) -> Plan {
     }
     for directory in directories {
         // A directory that does not exist (yet) is found by a later plan.
-        if let Some(target) = Target::at(&directory)
-            && !plan.targets.contains(&target)
-        {
-            plan.targets.push(target);
+        match Target::at(&directory) {
+            Some(target) if !plan.targets.contains(&target) => plan.targets.push(target),
+            Some(_) => {}
+            None => plan.missing = true,
         }
     }
     plan
@@ -540,6 +618,12 @@ struct Follower {
     watched: Vec<Target>,
     /// Whether a watch that could not be placed was already reported.
     complained: bool,
+    /// Whether the watches miss part of the plan: one could not be placed, or
+    /// a directory does not exist (yet).
+    incomplete: bool,
+    /// Set from the backend's thread once it reported an error: what it
+    /// stops announcing is not known, so its silence is never trusted again.
+    failed: Arc<AtomicBool>,
 }
 
 impl Follower {
@@ -563,17 +647,21 @@ impl Follower {
     ) -> Self {
         let (events_tx, events) = mpsc::channel(16);
         let interest = Arc::new(Mutex::new(Interest::default()));
+        let failed = Arc::new(AtomicBool::new(false));
         let watcher = if how.events {
             let seen = Arc::clone(&interest);
+            let backend_failed = Arc::clone(&failed);
             let tx = events_tx.clone();
-            let mut error_logged = false;
             let created =
                 notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                     if let Err(err) = &event
-                        && !error_logged
+                        && !backend_failed.swap(true, Ordering::Relaxed)
                     {
-                        error_logged = true;
-                        warn!("config file notifications reported an error ({err}); re-reading");
+                        warn!(
+                            "config file notifications reported an error ({err}); re-reading \
+                             now and every {} s from here on",
+                            how.recheck.as_secs()
+                        );
                     }
                     let concerned =
                         concerns(&event, &seen.lock().unwrap_or_else(PoisonError::into_inner));
@@ -607,6 +695,8 @@ impl Follower {
             interest,
             watched: Vec::new(),
             complained: false,
+            incomplete: false,
+            failed,
         };
         follower.rewatch(plan(config_path, how.file_itself));
         follower
@@ -624,7 +714,9 @@ impl Follower {
             tokio::select! {
                 () = self.out.closed() => break,
                 _ = self.events.recv() => {}
-                _ = recheck.tick() => {}
+                // Overdue after a pause: the first tick once it is due again
+                // comes at once.
+                _ = recheck.tick(), if self.rechecks() => {}
             }
             if self.watcher.is_some() {
                 let (path, file_itself) = (self.config_path.clone(), self.how.file_itself);
@@ -640,6 +732,17 @@ impl Follower {
         }
     }
 
+    /// Whether the periodic re-read is due: always where the notifications are
+    /// not trusted, and elsewhere while one is known to be missing - no
+    /// watcher, a watch that could not be placed, a directory of the chain
+    /// that does not exist (yet), a backend that reported an error.
+    fn rechecks(&self) -> bool {
+        !self.how.trusted
+            || self.watcher.is_none()
+            || self.incomplete
+            || self.failed.load(Ordering::Relaxed)
+    }
+
     /// Move the watches to `plan`: drop those on what is no longer part of the
     /// chain (or was replaced - a removed directory took its watch with it),
     /// add the missing ones, and tell the callback which names matter now.
@@ -649,6 +752,7 @@ impl Follower {
         let Some(watcher) = self.watcher.as_mut() else {
             return;
         };
+        let missing = plan.missing;
         {
             let mut interest = self.interest.lock().unwrap_or_else(PoisonError::into_inner);
             interest.watched = plan
@@ -689,6 +793,7 @@ impl Follower {
         // Tried again at the next event or tick; reported again only after it
         // worked in between.
         self.complained = failed;
+        self.incomplete = failed || missing;
         self.watched = placed;
     }
 }
