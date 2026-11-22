@@ -4,6 +4,11 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.12.1 → 0.12.2
+
+No migration and no new config key. Pull the new image and recreate the
+container.
+
 ## 0.12.0 → 0.12.1
 
 No migration and no new config key. A date in the config (`start`, `end`,

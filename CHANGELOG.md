@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-22
+
+A security release for eight advisories. One
+lets a monitored server stop Hora; six are in the SMTP client of the e-mail
+channel; the last is the SQLite one that 0.12.0 could not fix yet. No other
+change.
+
 ### Security
 
 - **url 2.5.9.** Fixes RUSTSEC-2026-0592: `Url::origin()` overflowed the
@@ -1952,7 +1959,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/uplg/hora/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/uplg/hora/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0
 [0.12.0-beta.1]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0-beta.1
