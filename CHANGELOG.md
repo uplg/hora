@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-22
+
+A security release for eight advisories. One
+lets a monitored server stop Hora; six are in the SMTP client of the e-mail
+channel; the last is the SQLite one that 0.12.0 could not fix yet. No other
+change.
+
+### Security
+
+- **url 2.5.9.** Fixes RUSTSEC-2026-0592: `Url::origin()` overflowed the
+  stack on a deeply nested `blob:` URL, which aborts the process. Hora asks
+  every redirect of an HTTP monitor for its origin, so a monitored server (or
+  whoever answers for it over plain HTTP) could stop Hora with one very long
+  `Location` header.
+- **lettre 0.11.24.** Fixes six advisories in the SMTP client behind the
+  e-mail channel. Three can be played by whoever sits between Hora and the
+  relay when the channel uses STARTTLS, its default: RUSTSEC-2026-0560
+  (replies injected after the cleartext `STARTTLS` reply were taken for the
+  relay's answers over TLS, so a refused alert could look accepted),
+  RUSTSEC-2026-0565 (a reply that never ends was buffered until memory ran
+  out) and RUSTSEC-2026-0562 (a panic on an `EHLO` reply line of white
+  space). Three concern what a message is built from, which Hora takes from
+  its own config: RUSTSEC-2026-0561 (missing dot-stuffing after a bare LF or
+  CR), RUSTSEC-2026-0563 (a quoted local part sent as a different address)
+  and RUSTSEC-2026-0564 (a panic on a display name holding CR or LF). A
+  channel on implicit TLS (`implicit_tls = true`) was not exposed to the
+  first three.
+- **sqlx 0.9.1 and libsqlite3-sys 0.40, with a fixed SQLite.** Fixes
+  RUSTSEC-2026-0459 (uninitialized memory returned from a database opened
+  with a crafted `-wal` file), which 0.12.0 had to leave ignored: sqlx now
+  accepts the fixed libsqlite3-sys. The audit ignores nothing again.
+
 ## [0.12.1] - 2026-11-18
 
 A maintenance release: an unmaintained dependency leaves, and nothing you see
@@ -1927,7 +1959,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/uplg/hora/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/uplg/hora/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0
 [0.12.0-beta.1]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0-beta.1
