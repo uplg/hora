@@ -27,6 +27,8 @@ config.
 - **Method**: `HEAD` becomes `method = "HEAD"`. Any other method than `GET`
   comes out as a comment (Hora sends no request body), and so does a `HEAD`
   on a monitor with a keyword or JSON assertion, which needs the body.
+- **Ignore TLS/SSL errors**: `ignoreTls` becomes `ignore_tls = true` on an
+  http monitor.
 - **Retries**: `maxretries = N` becomes `fail_threshold = N + 1` on the
   monitor, the same number of failed checks in a row. Kuma retries at its
   own `retryInterval`, Hora at the monitor's interval; at 0 the line is left

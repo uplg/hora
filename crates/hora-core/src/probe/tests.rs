@@ -339,7 +339,7 @@ async fn a_probe_never_reuses_a_connection() {
     // A connection that stops answering without closing must not poison the
     // probes that follow: each one opens its own.
     let (url, connections) = serve_once_per_connection().await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&url);
     monitor.timeout_secs = 2;
     for round in 1..=3 {
@@ -355,7 +355,7 @@ async fn expected_redirect_is_not_followed() {
             "HTTP/1.1 301 Moved Permanently\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         )
         .await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&url);
     spec_mut(&mut monitor).expected_status = Some(ExpectedStatus::code(301));
     let outcome = http(&client, &monitor, spec(&monitor)).await;
@@ -374,7 +374,7 @@ async fn expected_redirect_is_not_followed() {
 async fn a_listed_status_is_up() {
     let (url, _hits) =
         serve("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&url);
     // Unset, only a 2xx is up.
     let outcome = http(&client, &monitor, spec(&monitor)).await;
@@ -400,7 +400,7 @@ async fn a_list_holding_a_redirect_judges_the_first_answer() {
         "HTTP/1.1 301 Moved Permanently\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     )
     .await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&url);
     // Followed, the 301 would never be the answer judged and could not count.
     spec_mut(&mut monitor).expected_status = Some(ExpectedStatus::parse_list("200,301").unwrap());
@@ -440,7 +440,7 @@ async fn serve_recording() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Strin
 #[tokio::test]
 async fn a_head_monitor_sends_head_on_every_hop() {
     let (url, seen) = serve_recording().await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&url);
     let outcome = http(&client, &monitor, spec(&monitor)).await;
     assert!(outcome.is_up(), "{:?}", outcome.error);
@@ -465,7 +465,7 @@ async fn truncated_body_is_a_body_error_not_an_assertion_failure() {
     // Announces 100 bytes, sends 7, closes: a transport failure mid-body.
     let (url, _hits) =
         serve("HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial").await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&url);
     spec_mut(&mut monitor).keyword = Some(KeywordAssert {
         text: "complete".to_owned(),
@@ -486,7 +486,7 @@ async fn an_assertion_on_a_cut_body_says_so() {
         .into_boxed_str(),
     );
     let (url, _hits) = serve(body).await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&url);
     spec_mut(&mut monitor).keyword = Some(KeywordAssert {
         text: "operational".to_owned(),
@@ -520,7 +520,7 @@ async fn compressed_bodies_are_decoded_before_the_assertions() {
         socket.write_all(head.as_bytes()).await.unwrap();
         socket.write_all(GZIP).await.unwrap();
     });
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&format!("http://{addr}/"));
     spec_mut(&mut monitor).keyword = Some(KeywordAssert {
         text: "operational".to_owned(),
@@ -532,7 +532,7 @@ async fn compressed_bodies_are_decoded_before_the_assertions() {
 
 #[tokio::test]
 async fn transport_failures_name_their_cause() {
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     // Plain HTTP where TLS was expected: rustls names the problem.
     let (url, _hits) =
         serve("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await;
@@ -559,7 +559,7 @@ async fn a_proxy_refusing_us_is_blamed_not_the_target() {
         "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     )
     .await;
-    let client = crate::http::probe_client(Some(&proxy)).unwrap();
+    let client = crate::http::probe_client(Some(&proxy), false).unwrap();
     // Plain http goes through the proxy as a request: the 407 is an answer.
     let mut monitor = http_monitor("http://target.invalid/");
     spec_mut(&mut monitor).proxy = Some(proxy.clone());
@@ -596,7 +596,7 @@ async fn a_public_target_redirecting_inwards_is_refused() {
         .into_boxed_str(),
     );
     let (proxy, _hits) = serve(redirect).await;
-    let client = crate::http::probe_client(Some(&proxy)).unwrap();
+    let client = crate::http::probe_client(Some(&proxy), false).unwrap();
     let mut monitor = http_monitor("http://1.1.1.1/");
     spec_mut(&mut monitor).proxy = Some(proxy.clone());
     let outcome = http(&client, &monitor, spec(&monitor)).await;
@@ -614,11 +614,75 @@ async fn a_public_target_redirecting_inwards_is_refused() {
 
     // An internal target may redirect to another internal address, as ever.
     let (front, _hits) = serve(redirect).await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let monitor = http_monitor(&front.replace("127.0.0.1", "localhost"));
     let outcome = http(&client, &monitor, spec(&monitor)).await;
     assert!(outcome.is_up(), "{:?}", outcome.error);
     assert_eq!(inside_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ignore_tls_accepts_a_self_signed_certificate() {
+    // The shared fixture: a self-signed certificate for `localhost`.
+    let port = crate::testing::tls_server().await;
+    let url = format!("https://localhost:{port}/");
+    let mut monitor = http_monitor(&url);
+    monitor.timeout_secs = 5;
+
+    // Verified, as every monitor is by default: the certificate is refused.
+    let client = crate::http::probe_client(None, false).unwrap();
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert!(!outcome.is_up(), "a self-signed certificate passed");
+
+    // The monitor's explicit exception: the same server is up.
+    spec_mut(&mut monitor).ignore_tls = true;
+    let client = crate::http::probe_client(None, true).unwrap();
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert!(outcome.is_up(), "{:?}", outcome.error);
+}
+
+/// With `ignore_tls` the chain stays on the target's host: a hop to another
+/// host is a down of its own, and that host is never asked. On the same host
+/// (another port included) it is followed as ever.
+#[tokio::test]
+async fn ignore_tls_does_not_follow_a_redirect_to_another_host() {
+    let (elsewhere, elsewhere_hits) =
+        serve("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await;
+    // 127.0.0.1 vs localhost: another host, the same server.
+    let redirect: &'static str = Box::leak(
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: {}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            elsewhere.replace("127.0.0.1", "localhost")
+        )
+        .into_boxed_str(),
+    );
+    let (front, _hits) = serve(redirect).await;
+    let client = crate::http::probe_client(None, true).unwrap();
+    let mut monitor = http_monitor(&front);
+    spec_mut(&mut monitor).ignore_tls = true;
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(outcome.reason, Some(FailureKind::UnverifiedRedirect));
+    let error = outcome.error.as_deref().unwrap();
+    assert!(error.ends_with("with ignore_tls"), "{error}");
+    assert_eq!(elsewhere_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        public_reason(outcome.reason, error),
+        "redirected to another host"
+    );
+
+    // The same host on another port: followed.
+    let same_host: &'static str = Box::leak(
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: {elsewhere}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .into_boxed_str(),
+    );
+    let (front, _hits) = serve(same_host).await;
+    let mut monitor = http_monitor(&front);
+    spec_mut(&mut monitor).ignore_tls = true;
+    let outcome = http(&client, &monitor, spec(&monitor)).await;
+    assert!(outcome.is_up(), "{:?}", outcome.error);
+    assert_eq!(elsewhere_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -958,7 +1022,7 @@ async fn jq_http_assertions_evaluate_the_response_body() {
         "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"value\":\"5\"}",
     )
     .await;
-    let client = crate::http::probe_client(None).unwrap();
+    let client = crate::http::probe_client(None, false).unwrap();
     let mut monitor = http_monitor(&url);
     spec_mut(&mut monitor).jq = Some(JqAssert {
         query: Compiled::parse(".value | tonumber").unwrap(),

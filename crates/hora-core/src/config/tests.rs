@@ -456,6 +456,62 @@ fn dual_stack_validation() {
 }
 
 #[test]
+fn ignore_tls_is_an_http_opt_in() {
+    let base = |body: &str| {
+        format!(
+            r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "x"
+                name = "X"
+                interval_secs = 60
+                {body}
+            "#
+        )
+    };
+
+    // Off unless said; with the pin and the expiry watch, and dual-stack.
+    let config = load(&base("target = \"https://router.example\"")).unwrap();
+    assert!(!http_spec(&config.monitors[0]).ignore_tls);
+    for body in [
+        "target = \"https://192.0.2.10:8443/\"\nignore_tls = true",
+        "target = \"https://192.0.2.10/\"\nignore_tls = true\ncheck_cert = true\n\
+         cert_pin = \"0000000000000000000000000000000000000000000000000000000000000000\"",
+        "target = \"https://router.example\"\nignore_tls = true\ndual_stack = true",
+        "target = \"https://router.example\"\nignore_tls = true\n\
+         proxy = \"socks5://127.0.0.1:1080\"",
+    ] {
+        let config = load(&base(body)).expect(body);
+        assert!(config.monitors[0].ignore_tls(), "{body}");
+    }
+
+    // Another kind: refused, not ignored.
+    let error = load(&base(
+        "kind = \"tcp\"\ntarget = \"192.0.2.10:443\"\nignore_tls = true",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("ignore_tls requires an http monitor"),
+        "got: {error}"
+    );
+    // Through an https proxy the proxy's certificate would go unverified too.
+    let error = load(&base(
+        "target = \"https://192.0.2.10/\"\nignore_tls = true\n\
+         proxy = \"HTTPS://proxy.example:3128\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("https proxy"), "got: {error}");
+    load(&base(
+        "target = \"https://192.0.2.10/\"\nignore_tls = false\n\
+         proxy = \"https://proxy.example:3128\"",
+    ))
+    .expect("ignore_tls = false through an https proxy");
+}
+
+#[test]
 fn maintenance_window_mutes_selected_monitor() {
     let config = parse(
         r#"

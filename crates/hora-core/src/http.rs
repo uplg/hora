@@ -38,6 +38,7 @@ pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
         Policy::custom(same_origin_redirect),
         None,
         Reuse::Pooled,
+        Certs::Verified,
     )
 }
 
@@ -54,11 +55,21 @@ pub fn client(proxy: Option<&str>) -> reqwest::Result<Client> {
 /// later probe and its retry until the process restarts, on a target that
 /// answers anyone else.
 ///
+/// With `ignore_tls` (a monitor's explicit opt-in) the client accepts any
+/// server certificate; such a client is only ever used for the monitors that
+/// set it, never shared with verifying ones.
+///
 /// # Errors
 ///
 /// Returns an error if the proxy URL is invalid or the client cannot be built.
-pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
-    build(proxy, Policy::none(), None, Reuse::Fresh)
+pub fn probe_client(proxy: Option<&str>, ignore_tls: bool) -> reqwest::Result<Client> {
+    build(
+        proxy,
+        Policy::none(),
+        None,
+        Reuse::Fresh,
+        Certs::of(ignore_tls),
+    )
 }
 
 /// Like [`probe_client`], but restricted to one address family by binding the
@@ -70,8 +81,14 @@ pub fn probe_client(proxy: Option<&str>) -> reqwest::Result<Client> {
 /// # Errors
 ///
 /// Returns an error if the client cannot be built.
-pub fn probe_client_family(local: std::net::IpAddr) -> reqwest::Result<Client> {
-    build(None, Policy::none(), Some(local), Reuse::Fresh)
+pub fn probe_client_family(local: std::net::IpAddr, ignore_tls: bool) -> reqwest::Result<Client> {
+    build(
+        None,
+        Policy::none(),
+        Some(local),
+        Reuse::Fresh,
+        Certs::of(ignore_tls),
+    )
 }
 
 /// Whether a client keeps idle connections for its next request.
@@ -83,11 +100,30 @@ enum Reuse {
     Fresh,
 }
 
+/// Whether a client verifies the server's certificate.
+#[derive(Clone, Copy)]
+enum Certs {
+    Verified,
+    /// A monitor's `ignore_tls`: any certificate is accepted.
+    Unverified,
+}
+
+impl Certs {
+    fn of(ignore_tls: bool) -> Self {
+        if ignore_tls {
+            Self::Unverified
+        } else {
+            Self::Verified
+        }
+    }
+}
+
 fn build(
     proxy: Option<&str>,
     redirect: Policy,
     local: Option<std::net::IpAddr>,
     reuse: Reuse,
+    certs: Certs,
 ) -> reqwest::Result<Client> {
     let mut builder = Client::builder()
         .user_agent(concat!("hora/", env!("CARGO_PKG_VERSION")))
@@ -96,7 +132,8 @@ fn build(
         // Backstop for requests without a per-request timeout (notifiers); probes
         // override this with the monitor's own timeout.
         .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(10));
+        .connect_timeout(Duration::from_secs(10))
+        .tls_danger_accept_invalid_certs(matches!(certs, Certs::Unverified));
     if matches!(reuse, Reuse::Fresh) {
         builder = builder.pool_max_idle_per_host(0);
     }

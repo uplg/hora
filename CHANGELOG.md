@@ -76,7 +76,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section sets its `name`, `group` and `notify` (default: every channel).
   It is private unless `public = true`: a visitor of the status page does
   not see it, and its alerts go out either way.
-
 - **MQTT monitors** (`kind = "mqtt"`): the latest message on a topic, read
   from one connection per `[[brokers]]` entry (`mqtt://` or `mqtts://`,
   credentials in `username` / `password`), shared by every monitor that
@@ -87,6 +86,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published periodically gets no verdict for one interval after a start or a
   reconnect instead of a false down. Brokers reload live; a new
   `[[brokers]]` section, no change to existing configs.
+- **`ignore_tls` on http monitors**: accept the target's certificate
+  without verifying it (self-signed, expired, another name), for a device
+  that serves its own - a router or a controller UI. Off by default, per
+  monitor; such monitors get probe clients of their own, never shared with
+  the verifying ones. The exception covers the target's host only: a
+  redirect to another host is a down, *redirected to another host*. Refused
+  on other kinds and through an `https://` proxy. The expiry watch and
+  `cert_pin` work as before (they never verified the chain), so a pin is
+  the recommended companion. Part of the check fingerprint only when set,
+  so peers keep agreeing on every other monitor. `hora import kuma` carries
+  Kuma's `ignoreTls` over.
 
 ### Changed
 

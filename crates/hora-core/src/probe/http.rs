@@ -120,6 +120,10 @@ pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) ->
             FailureKind::PrivateRedirect,
             "redirected to a private address".to_owned(),
         ),
+        Ok(Err(HttpError::UnverifiedRedirect(to))) => Outcome::down(
+            FailureKind::UnverifiedRedirect,
+            format!("redirected to another host ({to}) with ignore_tls"),
+        ),
         Ok(Err(HttpError::Request(err))) => request_failure(spec, &err),
         Err(_elapsed) => Outcome::down(FailureKind::Timeout, "request timed out".to_owned()),
     }
@@ -139,6 +143,8 @@ enum HttpError {
     InsecureRedirect(String),
     /// A public target redirected to an internal address.
     PrivateRedirect,
+    /// An `ignore_tls` monitor redirected to another host; holds its origin.
+    UnverifiedRedirect(String),
 }
 
 /// Send the monitor's request, following redirects manually so the configured
@@ -151,6 +157,10 @@ enum HttpError {
 /// an internal address, which is refused (see
 /// [`RedirectGuard`](crate::http::RedirectGuard), which also states what a DNS
 /// rebinding or a proxy leaves open).
+///
+/// With `ignore_tls` the chain stays on the target's host (any scheme or
+/// port): the exception is for the certificate of the device the monitor
+/// names, and a hop elsewhere would be fetched unverified too.
 ///
 /// The method does not change along the chain: a `HEAD` monitor sends `HEAD`
 /// to every hop, a `GET` one `GET`. The rule that turns a request into a
@@ -206,6 +216,11 @@ async fn send_following_redirects(
             // says https means it, so this is a down, not a silent downgrade.
             Some(next) if is_downgrade(&url, &next) => {
                 return Err(HttpError::InsecureRedirect(
+                    next.origin().ascii_serialization(),
+                ));
+            }
+            Some(next) if spec.ignore_tls && next.host_str() != target.host_str() => {
+                return Err(HttpError::UnverifiedRedirect(
                     next.origin().ascii_serialization(),
                 ));
             }

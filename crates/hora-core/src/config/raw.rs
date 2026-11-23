@@ -143,6 +143,13 @@ pub(crate) struct RawMonitor {
     /// `socks5://…`). HTTP monitors only.
     #[serde(default)]
     pub(crate) proxy: Option<String>,
+    /// HTTP monitor: accept the server's certificate without verifying it -
+    /// self-signed, expired, issued for another name. The explicit exception
+    /// for a device that serves its own certificate (a router or controller
+    /// UI); off by default. Covers the target's host only: a redirect to
+    /// another host is refused. `check_cert` and `cert_pin` still apply.
+    #[serde(default)]
+    pub(crate) ignore_tls: Option<bool>,
     /// The monitor's own secret, sent as `X-Push-Token`: required on
     /// `/api/push/{id}` (a push monitor must set one, or opt out with
     /// `allow_unauthenticated`) and accepted on `/api/monitors/{id}/alert`.
@@ -300,6 +307,7 @@ impl Default for RawMonitor {
             dual_stack: None,
             notify: None,
             proxy: None,
+            ignore_tls: None,
             push_token: None,
             allow_unauthenticated: None,
             kuma_push: None,

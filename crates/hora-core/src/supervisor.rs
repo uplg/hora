@@ -364,7 +364,7 @@ fn reconcile(
     for monitor in &config.monitors {
         if !fleet.running.contains_key(&monitor.id) {
             // The proxy URL is validated at config load, so this rarely fails.
-            let client = match probe_clients.get(monitor.proxy()) {
+            let client = match probe_clients.get(monitor.proxy(), monitor.ignore_tls()) {
                 Ok(client) => client,
                 Err(err) => {
                     warn!(monitor = %monitor.id, "monitor not started, bad proxy: {err:#}");
@@ -399,37 +399,40 @@ fn reconcile(
 }
 
 /// The probe clients monitors share: one for every monitor without a proxy,
-/// one per proxy URL for the others. A client carries its own TLS setup -
+/// one per proxy URL for the others - and apart from those, the same again
+/// for the monitors with `ignore_tls`, which never share a verifying client.
+/// A client carries its own TLS setup -
 /// about 45 KB - so one per monitor cost 450 MB at 10,000 monitors. Nothing
 /// about a probe client is per monitor (credentials and timeouts are set per
 /// request), and it keeps no connection between probes
 /// (see [`probe_client`](crate::http::probe_client)).
 #[derive(Default)]
 struct ProbeClients {
-    clients: HashMap<Option<String>, Client>,
+    /// Keyed by proxy and `ignore_tls`.
+    clients: HashMap<(Option<String>, bool), Client>,
 }
 
 impl ProbeClients {
-    /// The client for `proxy`, built on first use.
-    fn get(&mut self, proxy: Option<&str>) -> reqwest::Result<Client> {
-        let key = proxy.map(str::to_owned);
+    /// The client for `proxy` and `ignore_tls`, built on first use.
+    fn get(&mut self, proxy: Option<&str>, ignore_tls: bool) -> reqwest::Result<Client> {
+        let key = (proxy.map(str::to_owned), ignore_tls);
         if let Some(client) = self.clients.get(&key) {
             return Ok(client.clone());
         }
-        let client = crate::http::probe_client(proxy)?;
+        let client = crate::http::probe_client(proxy, ignore_tls)?;
         self.clients.insert(key, client.clone());
         Ok(client)
     }
 
-    /// Forget the clients of proxies no monitor uses any more (running
-    /// monitors keep their own handle on theirs until they restart).
+    /// Forget the clients no monitor uses any more (running monitors keep
+    /// their own handle on theirs until they restart). The plain verifying
+    /// client stays.
     fn retain_used(&mut self, config: &Config) {
-        self.clients.retain(|proxy, _| {
-            proxy.is_none()
-                || config
-                    .monitors
-                    .iter()
-                    .any(|monitor| monitor.proxy() == proxy.as_deref())
+        self.clients.retain(|(proxy, ignore_tls), _| {
+            (proxy.is_none() && !ignore_tls)
+                || config.monitors.iter().any(|monitor| {
+                    monitor.proxy() == proxy.as_deref() && monitor.ignore_tls() == *ignore_tls
+                })
         });
     }
 }
@@ -626,17 +629,23 @@ mod tests {
     #[test]
     fn monitors_share_a_probe_client_per_proxy() {
         let mut clients = ProbeClients::default();
-        clients.get(None).unwrap();
-        clients.get(None).unwrap();
-        clients.get(Some("http://proxy.example:3128")).unwrap();
-        clients.get(Some("http://proxy.example:3128")).unwrap();
+        clients.get(None, false).unwrap();
+        clients.get(None, false).unwrap();
+        clients
+            .get(Some("http://proxy.example:3128"), false)
+            .unwrap();
+        clients
+            .get(Some("http://proxy.example:3128"), false)
+            .unwrap();
+        clients.get(None, true).unwrap();
         assert_eq!(
             clients.clients.len(),
-            2,
-            "one client per proxy, not per monitor"
+            3,
+            "one client per proxy and certificate policy, not per monitor"
         );
 
-        // A reload that drops the proxied monitor forgets its client.
+        // A reload that drops the proxied and the ignore_tls monitor forgets
+        // their clients.
         let config = config::parse(
             "[page]\n[server]\n[[monitors]]\nid = \"a\"\nname = \"A\"\n\
              target = \"https://example.com\"\ninterval_secs = 60\n",
@@ -644,6 +653,6 @@ mod tests {
         .unwrap();
         clients.retain_used(&config);
         assert_eq!(clients.clients.len(), 1);
-        assert!(clients.clients.contains_key(&None));
+        assert!(clients.clients.contains_key(&(None, false)));
     }
 }
