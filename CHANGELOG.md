@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Recurring maintenance windows.** A `[[maintenance]]` window takes a
+  five-field `cron` instead of `start` and `end`, read on the wall clock of
+  `timezone` (an IANA name, UTC by default), and lasts `duration_secs` (up
+  to a week) from each run: a weekly backup no longer needs a window per
+  week. Daylight saving time is followed. Muting, the cards, the daily bars,
+  the report and the upcoming window on the page read each run like a fixed
+  window. The time zone database is compiled in, so the container image
+  needs none. Fixed windows are unchanged.
+
 ## [0.12.3] - 2026-11-23
 
 The running version on the page, and an idle daemon that stays asleep where

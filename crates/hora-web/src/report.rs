@@ -619,7 +619,7 @@ mod tests {
             remote_id: None,
             created_at: 0,
         };
-        let schedule = hora_core::planned::Schedule::merged(&config, &[stored]);
+        let schedule = hora_core::planned::Schedule::merged(&config, &[stored], 0, i64::MAX);
         let windows = schedule.windows();
         assert_eq!(maintenance_days("2026-05", "api", windows), [1, 2]);
         assert_eq!(maintenance_days("2026-04", "api", windows), [29, 30]);

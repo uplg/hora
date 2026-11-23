@@ -230,6 +230,16 @@ default_retention_days = 90
 # end   = "2026-06-08T02:00:00Z"
 # monitors = ["database"]
 #
+# A recurring window: from every run of a five-field cron on the wall clock
+# of `timezone` (IANA, default UTC; daylight saving time followed), for
+# duration_secs (at most a week). Not combined with start/end.
+# [[maintenance]]
+# title = "Weekly backup"
+# cron = "0 3 * * 0"
+# timezone = "America/New_York"
+# duration_secs = 7200
+# monitors = ["database"]
+#
 # A window can also be planned while the daemon runs, with no config edit:
 #   hora maintenance plan --host frank --at 2026-11-13T05:00:00Z --for 10m "kernel reboot"
 #   POST /api/maintenance?host=frank&starts_at=...&duration=10m&reason=...

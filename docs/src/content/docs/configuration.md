@@ -216,6 +216,7 @@ Values that cannot work are refused too:
 | `expected_status` | statuses from 100 to 599 and classes `"1xx"` to `"5xx"`; a list is not empty |
 | `method` | `"GET"` or `"HEAD"`, on an http monitor; no `"HEAD"` with `keyword`, `json_query` or `number_regex` |
 | `fail_threshold` on a monitor | at least 1 |
+| A `[[maintenance]]` window | `start` and `end`, or a `cron` with `duration_secs` from 1 to a week (604800) and an IANA `timezone` |
 | An IPv6 `tcp` target | bracketed: `[::1]:80`, not `::1:80` |
 | `dns_resolver` | an IP and a port (`8.8.8.8:53`, `[2620:fe::fe]:53`), not a hostname |
 

@@ -297,18 +297,24 @@ pub struct Schedule {
 
 impl Schedule {
     /// The config's windows followed by the stored ones that apply (see
-    /// [`resolve`]).
+    /// [`resolve`]). A recurring config window is listed by its runs that
+    /// overlap the unix seconds `from` to `to`.
     #[must_use]
-    pub fn merged(config: &Config, stored: &[MaintenanceWindow]) -> Self {
-        let configured = config.maintenance.iter().map(|window| Window {
-            id: None,
-            title: window.title.clone(),
-            start: window.start,
-            end: window.end,
-            all: window.monitors.is_empty(),
-            monitors: window.monitors.clone(),
-            host: None,
-            origin: Origin::Config,
+    pub fn merged(config: &Config, stored: &[MaintenanceWindow], from: i64, to: i64) -> Self {
+        let configured = config.maintenance.iter().flat_map(|window| {
+            window
+                .spans(from, to)
+                .into_iter()
+                .map(|(start, end)| Window {
+                    id: None,
+                    title: window.title.clone(),
+                    start,
+                    end,
+                    all: window.monitors.is_empty(),
+                    monitors: window.monitors.clone(),
+                    host: None,
+                    origin: Origin::Config,
+                })
         });
         Self {
             windows: configured
@@ -349,7 +355,7 @@ pub async fn schedule_between(store: &Store, config: &Config, from: i64, to: i64
             error!("failed to read the planned maintenance windows: {err:#}");
             Vec::new()
         });
-    Schedule::merged(config, &stored)
+    Schedule::merged(config, &stored, from, to)
 }
 
 /// The window covering `id` at `now`, from the config or the database.

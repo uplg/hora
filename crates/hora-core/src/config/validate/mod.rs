@@ -146,11 +146,13 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     let channel_names = validate_channels(config)?;
 
     for window in &config.maintenance {
-        anyhow::ensure!(
-            window.start < window.end,
-            "maintenance window {:?}: start must be before end",
-            window.title
-        );
+        if let super::MaintenanceTime::Fixed { start, end } = &window.time {
+            anyhow::ensure!(
+                start < end,
+                "maintenance window {:?}: start must be before end",
+                window.title
+            );
+        }
     }
 
     let mut seen = HashSet::new();

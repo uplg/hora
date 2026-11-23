@@ -6,6 +6,7 @@
 
 mod channel;
 mod env;
+mod maintenance;
 mod monitor;
 mod parsed;
 mod peer;
@@ -16,6 +17,7 @@ mod tests;
 mod validate;
 
 pub use channel::Channel;
+pub use maintenance::{Maintenance, MaintenanceTime, Recurrence};
 pub use monitor::{
     DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JsonAssert, KeywordAssert, Kind, Monitor, MonitorKind,
     NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls, TcpSpec,
@@ -181,22 +183,6 @@ pub(super) fn default_true() -> bool {
 
 fn default_digest_schedule() -> String {
     "0 8 * * 1".to_owned()
-}
-
-/// A scheduled maintenance window: alerts for the affected monitors are muted
-/// between `start` and `end` (RFC 3339 timestamps, quoted in TOML).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Maintenance {
-    #[serde(default)]
-    pub title: String,
-    #[serde(deserialize_with = "crate::clock::deserialize_config")]
-    pub start: Timestamp,
-    #[serde(deserialize_with = "crate::clock::deserialize_config")]
-    pub end: Timestamp,
-    /// Monitors covered by the window; empty = all monitors.
-    #[serde(default)]
-    pub monitors: Vec<String>,
 }
 
 fn optional_instant<'de, D: serde::Deserializer<'de>>(
