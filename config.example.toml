@@ -55,6 +55,12 @@ rate_limit_burst = 30
 # client_ip_header is set (every connection then comes from your proxy).
 # 0 turns it off. Read once at startup.
 # max_connections_per_ip = 256
+# While nobody reads the status summary (pages, /api/summary, /metrics, the
+# peers' poll), it is rebuilt every this many seconds (default 30; 5..3600).
+# A request after a quiet stretch still waits up to 2 s for a fresh build once
+# the summary is older than 10 s, so a longer pause saves database reads at
+# no cost to a page someone opens. Read on every rebuild.
+# summary_idle_refresh_secs = 300
 # The operator token: required to view private monitors (those with
 # `public = false`) and to call the write endpoints (/api/silence,
 # /api/maintenance, /api/announce, /api/event, /api/monitors/{id}/alert). Sent as

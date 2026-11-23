@@ -144,6 +144,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    validate_tuning(config)?;
 
     for window in &config.maintenance {
         anyhow::ensure!(
@@ -233,6 +234,18 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         config.alerts.notify_unconfirmed.as_deref(),
         &channel_names,
     )?;
+    Ok(())
+}
+
+/// The server's tuning keys are checked for sense.
+fn validate_tuning(config: &Config) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config
+            .server
+            .summary_idle_refresh_secs
+            .is_none_or(|secs| (5..=3600).contains(&secs)),
+        "server.summary_idle_refresh_secs must be between 5 and 3600"
+    );
     Ok(())
 }
 

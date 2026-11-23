@@ -184,6 +184,20 @@ If the host itself runs out of descriptors or memory, checks are skipped
 rather than recorded as failures, and the node reports itself degraded on
 `/healthz` until they run again.
 
+### Summary refresh
+
+```toml
+[server]
+summary_idle_refresh_secs = 300
+```
+
+The status summary (pages, `/api/summary`, `/metrics`, the peers' poll) is
+rebuilt every 5 s while someone reads it and every
+`summary_idle_refresh_secs` (default 30, 5..3600) while nobody does. The
+first request after a quiet stretch still waits up to 2 s for a fresh build
+once the summary is older than 10 s, so a longer pause saves database
+reads without serving an old page. Read on every rebuild.
+
 As a guide, the image with 300 monitors and a year of history uses about
 18 MiB at rest and 45 MiB at the worst of a connection flood: a 64 MiB
 limit is comfortable. A small fleet (ten monitors) stays under 20 MiB.

@@ -19,8 +19,9 @@
 //! at 500 monitors rebuilding every 5 s is about a hundred queries a second,
 //! day and night, for a page nobody may open for hours. When no request read
 //! the snapshot since the previous build, the next one waits
-//! [`IDLE_REFRESH`] instead. The request that ends such a stretch is not
-//! handed the old page in silence: if the snapshot is older than
+//! [`IDLE_REFRESH`] instead, or `[server] summary_idle_refresh_secs` when
+//! set. The request that ends such a stretch is not handed the old page in
+//! silence: if the snapshot is older than
 //! [`STALE_AFTER`] it wakes the refresher and waits for the rebuild, up to
 //! [`FRESH_WAIT`].
 //!
@@ -89,6 +90,17 @@ impl Default for Cadence {
 }
 
 impl Cadence {
+    /// These timings with the idle pause the config sets, if it does.
+    fn configured(self, config: &Config) -> Self {
+        Self {
+            idle: config
+                .server
+                .summary_idle_refresh_secs
+                .map_or(self.idle, Duration::from_secs),
+            ..self
+        }
+    }
+
     /// The pause after a build that took `took`. Watched: `active` between
     /// two starts, and never less than the build itself. Unwatched: `idle`.
     fn pause(&self, took: Duration, watched: bool) -> Duration {
@@ -428,7 +440,7 @@ async fn run(
         // Nobody read the snapshot since the last pause was chosen: stretch
         // this one. A reader arriving meanwhile wakes the loop itself.
         let watched = this.read.swap(false, Ordering::AcqRel);
-        let pause = this.cadence.pause(took, watched);
+        let pause = this.cadence.configured(&current).pause(took, watched);
         this.idle.store(!watched, Ordering::Release);
         drop(this);
 
@@ -468,17 +480,22 @@ mod tests {
     }
 
     async fn state() -> AppState {
-        let config = hora_core::config::parse(
+        state_with("").await
+    }
+
+    async fn state_with(server: &str) -> AppState {
+        let config = hora_core::config::parse(&format!(
             r#"
             [page]
             [server]
+            {server}
             [[monitors]]
             id = "web"
             name = "Web"
             target = "https://example.com"
             interval_secs = 60
-            "#,
-        )
+            "#
+        ))
         .expect("config");
         let config = Arc::new(config);
         let client = hora_core::http::client(None).expect("client");
@@ -517,6 +534,34 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &fresh));
         assert!(fresh.built_at.elapsed() < Duration::from_millis(300));
         assert_eq!(*refresher.published.borrow(), settled + 1);
+    }
+
+    /// `summary_idle_refresh_secs` stretches the unread pause past the
+    /// built-in one, and costs the next reader nothing: it still gets a
+    /// snapshot built for it.
+    #[tokio::test]
+    async fn the_configured_idle_pause_still_rebuilds_for_the_next_reader() {
+        let state = state_with("summary_idle_refresh_secs = 3600").await;
+        let refresher = Arc::new(Refresher {
+            cadence: Cadence {
+                active: Duration::from_millis(10),
+                idle: Duration::from_millis(20),
+                stale_after: Duration::from_millis(50),
+                fresh_wait: Duration::from_secs(10),
+            },
+            ..Refresher::default()
+        });
+        let first = refresher.snapshot(&state).await;
+        // Unread: at the built-in 20 ms this would be dozens of builds.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let settled = refresher.started.load(Ordering::Acquire);
+        assert!(settled <= 3, "{settled} builds with one early reader");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(refresher.started.load(Ordering::Acquire), settled);
+
+        let fresh = refresher.snapshot(&state).await;
+        assert!(!Arc::ptr_eq(&first, &fresh));
+        assert!(fresh.built_at.elapsed() < Duration::from_millis(300));
     }
 
     /// Many requests reaching a snapshot nobody has rendered yet: one of

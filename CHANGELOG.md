@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`[server] summary_idle_refresh_secs`**: how long the status summary
+  waits before its next rebuild while nobody reads it (default 30 s, as
+  before; 5..3600). A longer pause saves database reads on an idle node;
+  the first request after a quiet stretch still waits for a fresh build.
+
 ## [0.12.3] - 2026-11-23
 
 The running version on the page, and an idle daemon that stays asleep where
