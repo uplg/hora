@@ -207,6 +207,25 @@ monitors = ["database"]          # empty = all monitors
 `monitors` takes monitor ids and the `listen_id` of watched
 [peers](../peers/), so a planned reboot of another node stays quiet too.
 
+A window that comes back - a weekly backup, nightly updates - takes a
+`cron` instead of `start` and `end`, read on the wall clock of `timezone`
+(an IANA name, UTC by default, daylight saving time included), and lasts
+`duration_secs` (up to a week) from each run:
+
+```toml
+[[maintenance]]
+title = "Weekly backup"
+cron = "0 3 * * 0"               # Sundays 03:00 ...
+timezone = "America/New_York"    # ... New York time, summer and winter
+duration_secs = 7200             # 2 h from each run
+monitors = ["database"]
+```
+
+A wall-clock time that happens twice when the clocks go back is one run,
+at the first; one skipped when they go forward runs when the clocks jump.
+Like a fixed window, each run includes its last second. The page and the
+report list the runs like any other window.
+
 ### Planned at runtime
 
 The same window can be planned while the daemon runs, with no config edit

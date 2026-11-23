@@ -3,14 +3,15 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-use hora_core::config::{Kind, Monitor};
+use hora_core::config::{Kind, Monitor, MonitorKind};
 use hora_core::db::{self};
 use hora_core::notifications::{AlertSeverity, Event};
 use hora_core::status::CheckStatus;
 
-use crate::auth::{Viewer, push_token_is};
+use crate::auth::{Viewer, ct_eq, push_token_is};
 use crate::error::AppError;
 use crate::flood;
 use crate::{AppState, MAX_ALERT_DEDUP_CHARS, MAX_ALERT_TAG_CHARS, MAX_ALERT_TAGS};
@@ -22,8 +23,10 @@ pub(crate) struct PushQuery {
     status: Option<String>,
     #[serde(default)]
     msg: Option<String>,
+    /// Read as text: a Kuma producer sends fractional milliseconds, or an
+    /// empty value (see [`parse_ping`]).
     #[serde(default)]
-    ping: Option<i64>,
+    ping: Option<String>,
 }
 
 /// The largest latency a heartbeat may report, in milliseconds: a day.
@@ -32,6 +35,7 @@ const MAX_PING_MS: i64 = 86_400_000;
 #[utoipa::path(
     post,
     path = "/api/push/{id}",
+    description = "A push monitor with `kuma_push = true` is also reached the way Uptime Kuma's producers call it: `GET` or `POST /api/push/<push_token>`, the token in place of the id and no header. The answer is then `{\"ok\":true}`, a fractional `ping` is rounded and an empty one ignored, and a body is never read.",
     params(
         ("id" = String, Path, description = "Push monitor id"),
         ("status" = Option<String>, Query, description = "up (default), down or degraded"),
@@ -41,7 +45,7 @@ const MAX_PING_MS: i64 = 86_400_000;
     request_body(content = Option<hora_core::mesh::wire::HeartbeatBody>, description = "Only between two Hora, and optional: the maintenance windows the sending peer plans. Applied only for a peer with `accept_maintenance_secs` whose heartbeat carries its `listen_token`; ignored for a push monitor. A heartbeat without a body announces none"),
     security((), ("push_token" = [])),
     responses(
-        (status = 200, description = "Heartbeat recorded"),
+        (status = 200, description = "Heartbeat recorded (`ok`, or `{\"ok\":true}` on a Kuma push URL)"),
         (status = 400, description = "Unknown status, or a ping that is negative or over a day"),
         (status = 401, description = "Missing or wrong X-Push-Token (also for an unknown id, so ids cannot be probed), or a `?token=` in the URL: a write takes its token from a header only")
     )
@@ -50,13 +54,28 @@ pub(crate) async fn push(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<PushQuery>,
+    method: axum::http::Method,
     headers: HeaderMap,
     // Taken unread: nothing of it is buffered for a caller that has not
     // shown its token, and a job's heartbeat body is never read at all. Only
     // an authorized peer's is, bounded, for the maintenance it announces.
     body: axum::body::Body,
-) -> Result<&'static str, AppError> {
+) -> Result<Response, AppError> {
     let config = state.config.borrow().clone();
+    // A Kuma push URL carries the monitor's token where the id goes: the
+    // path itself authorizes, for the monitors that opted in (validation
+    // keeps their tokens apart from every id). Anything else reached by GET
+    // is refused like a wrong token.
+    if let Some(monitor) = kuma_monitor(&config, &id) {
+        let status = parse_status(query.status.as_deref())?;
+        let ping = parse_ping(query.ping.as_deref(), true)?;
+        let msg = bounded_msg(query.msg.as_deref());
+        db::insert_push(&state.core, &monitor.id, status, ping, msg.as_deref()).await?;
+        return Ok(Json(serde_json::json!({ "ok": true })).into_response());
+    }
+    if method == axum::http::Method::GET {
+        return Err(AppError::Unauthorized("invalid push token"));
+    }
     // A push id is either a push monitor or a watched peer's listen id (peers
     // heartbeat the same endpoint); the expected token comes from whichever
     // matches, with its explicit opt-out.
@@ -83,8 +102,13 @@ pub(crate) async fn push(
     } else {
         // The same 401 as a wrong token: a 404 here would tell anyone which
         // push ids exist (and so which ones to try tokens on). The operator
-        // finds a typo'd id in the log.
-        tracing::debug!(id = %hora_core::bounded(&id, 64), "push for an unknown id");
+        // finds a typo'd id in the log - unless it may be a mistyped Kuma
+        // token, which stays out of it.
+        if config.monitors.iter().any(is_kuma_push) {
+            tracing::debug!("push for an unknown id or Kuma token");
+        } else {
+            tracing::debug!(id = %hora_core::bounded(&id, 64), "push for an unknown id");
+        }
         return Err(AppError::Unauthorized("invalid push token"));
     };
 
@@ -100,38 +124,87 @@ pub(crate) async fn push(
         return Err(AppError::Unauthorized("invalid push token"));
     }
 
-    // A typo'd status must fail loudly: recording `status=dwon` as "up" would
-    // report the opposite of what the job meant.
-    let status = match query.status.as_deref() {
-        None | Some("") => CheckStatus::Up,
-        Some(word) => CheckStatus::parse(word)
-            .ok_or(AppError::BadRequest("status must be up, down or degraded"))?,
-    };
-    // A latency a job reports is at most a day: beyond it the figure is a
-    // bug in the job, and stored as it is a handful of them would weigh on
-    // every average they enter.
-    if query
-        .ping
-        .is_some_and(|ping| !(0..=MAX_PING_MS).contains(&ping))
-    {
-        return Err(AppError::BadRequest(
-            "ping must be between 0 and 86400000 ms (a day)",
-        ));
-    }
-    // Bound the stored message so a buggy or hostile pusher can't bloat the DB.
-    let msg = query.msg.as_deref().map(|msg| {
-        hora_core::fmt::printable(msg)
-            .chars()
-            .take(MAX_PUSH_MSG_CHARS)
-            .collect::<String>()
-    });
-    db::insert_push(&state.core, &id, status, query.ping, msg.as_deref()).await?;
+    let status = parse_status(query.status.as_deref())?;
+    let ping = parse_ping(query.ping.as_deref(), false)?;
+    let msg = bounded_msg(query.msg.as_deref());
+    db::insert_push(&state.core, &id, status, ping, msg.as_deref()).await?;
     // The heartbeat is recorded whatever its announcement is worth: a peer
     // that is alive must never read as silent because of what it announced.
     if let Some(peer) = peer {
         apply_announcement(&state, peer, expected_token.is_some(), body).await;
     }
-    Ok("ok")
+    Ok("ok".into_response())
+}
+
+fn is_kuma_push(monitor: &Monitor) -> bool {
+    matches!(&monitor.spec, MonitorKind::Push(push) if push.kuma_push)
+}
+
+/// The `kuma_push` monitor whose token is `segment`. Every such token is
+/// compared, in constant time, so the answer's timing tells nothing about
+/// which one came close.
+fn kuma_monitor<'a>(config: &'a hora_core::config::Config, segment: &str) -> Option<&'a Monitor> {
+    config
+        .monitors
+        .iter()
+        .filter(|monitor| is_kuma_push(monitor))
+        .fold(None, |found, monitor| {
+            let matches = monitor
+                .push_token
+                .as_ref()
+                .is_some_and(|token| ct_eq(segment, token.as_ref()));
+            found.or(matches.then_some(monitor))
+        })
+}
+
+/// A typo'd status must fail loudly: recording `status=dwon` as "up" would
+/// report the opposite of what the job meant.
+fn parse_status(status: Option<&str>) -> Result<CheckStatus, AppError> {
+    match status {
+        None | Some("") => Ok(CheckStatus::Up),
+        Some(word) => CheckStatus::parse(word)
+            .ok_or(AppError::BadRequest("status must be up, down or degraded")),
+    }
+}
+
+/// The reported latency in whole milliseconds. A latency a job reports is
+/// at most a day: beyond it the figure is a bug in the job, and stored as it
+/// is a handful of them would weigh on every average they enter. A Kuma
+/// producer (`kuma`) may send a fraction (rounded) or an empty value (none).
+fn parse_ping(ping: Option<&str>, kuma: bool) -> Result<Option<i64>, AppError> {
+    let out_of_range = || AppError::BadRequest("ping must be between 0 and 86400000 ms (a day)");
+    let Some(ping) = ping else {
+        return Ok(None);
+    };
+    let ms = if kuma {
+        if ping.is_empty() {
+            return Ok(None);
+        }
+        let ms: f64 = ping.parse().map_err(|_| out_of_range())?;
+        // In range (and finite) first, so the rounding below is exact.
+        #[allow(clippy::cast_precision_loss)]
+        if !(0.0..=MAX_PING_MS as f64).contains(&ms) {
+            return Err(out_of_range());
+        }
+        format!("{ms:.0}").parse().map_err(|_| out_of_range())?
+    } else {
+        ping.parse().map_err(|_| out_of_range())?
+    };
+    if (0..=MAX_PING_MS).contains(&ms) {
+        Ok(Some(ms))
+    } else {
+        Err(out_of_range())
+    }
+}
+
+/// Bound the stored message so a buggy or hostile pusher can't bloat the DB.
+fn bounded_msg(msg: Option<&str>) -> Option<String> {
+    msg.map(|msg| {
+        hora_core::fmt::printable(msg)
+            .chars()
+            .take(MAX_PUSH_MSG_CHARS)
+            .collect::<String>()
+    })
 }
 
 use hora_core::planned::MAX_ANNOUNCEMENT_BYTES;

@@ -10,7 +10,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
-jiff.workspace = true
+# The time zone database is compiled in: a recurring maintenance window's
+# `timezone` must resolve in a container image that ships none.
+jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 croner.workspace = true
 futures-util.workspace = true
 hickory-resolver = { workspace = true }

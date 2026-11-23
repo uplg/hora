@@ -144,13 +144,16 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    validate_tuning(config)?;
 
     for window in &config.maintenance {
-        anyhow::ensure!(
-            window.start < window.end,
-            "maintenance window {:?}: start must be before end",
-            window.title
-        );
+        if let super::MaintenanceTime::Fixed { start, end } = &window.time {
+            anyhow::ensure!(
+                start < end,
+                "maintenance window {:?}: start must be before end",
+                window.title
+            );
+        }
     }
 
     let mut seen = HashSet::new();
@@ -219,6 +222,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         )?;
     }
 
+    validate_kuma_push(config, &seen)?;
     crate::topology::validate_dag(&config.monitors)?;
 
     validate_peers(config, &seen, &channel_names)?;
@@ -233,6 +237,33 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         config.alerts.notify_unconfirmed.as_deref(),
         &channel_names,
     )?;
+    Ok(())
+}
+
+/// The server's tuning keys - the summary's idle pause, the database
+/// sizing - are checked for sense.
+fn validate_tuning(config: &Config) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config
+            .server
+            .summary_idle_refresh_secs
+            .is_none_or(|secs| (5..=3600).contains(&secs)),
+        "server.summary_idle_refresh_secs must be between 5 and 3600"
+    );
+    if let Some(database) = &config.server.database {
+        anyhow::ensure!(
+            database
+                .cache_kib
+                .is_none_or(|kib| (64..=1_048_576).contains(&kib)),
+            "server.database.cache_kib must be between 64 and 1048576"
+        );
+        anyhow::ensure!(
+            database
+                .max_connections
+                .is_none_or(|connections| (1..=64).contains(&connections)),
+            "server.database.max_connections must be between 1 and 64"
+        );
+    }
     Ok(())
 }
 
@@ -266,6 +297,43 @@ fn validate_push_auth(monitor: &super::Monitor) -> anyhow::Result<()> {
             "monitor {}: push monitor accepts unauthenticated heartbeats \
              (allow_unauthenticated) - its id appears on the status page/API, so anyone \
              who can reach /api/push can forge them",
+            monitor.id
+        );
+    }
+    Ok(())
+}
+
+/// A Kuma push URL finds its monitor by the token in its path, the same
+/// segment a native push names an id in: so each token must be URL-safe,
+/// name one monitor only, and never read as a monitor id or a watched peer's
+/// listen id.
+fn validate_kuma_push(config: &Config, monitor_ids: &HashSet<&str>) -> anyhow::Result<()> {
+    let mut tokens = HashSet::new();
+    for monitor in &config.monitors {
+        let (super::MonitorKind::Push(push), Some(token)) = (&monitor.spec, &monitor.push_token)
+        else {
+            continue;
+        };
+        if !push.kuma_push {
+            continue;
+        }
+        let token = token.as_ref();
+        // The messages never quote the token: it is the credential.
+        anyhow::ensure!(
+            is_url_safe_id(token),
+            "monitor {}: a kuma_push push_token must be alphanumeric, '-' or '_' \
+             (it is a path segment)",
+            monitor.id
+        );
+        anyhow::ensure!(
+            tokens.insert(token),
+            "monitor {}: its kuma_push push_token is another kuma_push monitor's too",
+            monitor.id
+        );
+        anyhow::ensure!(
+            !monitor_ids.contains(token)
+                && !config.peers.iter().any(|peer| peer.listen_id() == token),
+            "monitor {}: its kuma_push push_token equals a monitor id or a peer listen_id",
             monitor.id
         );
     }

@@ -317,13 +317,20 @@ Optional query parameters: `?status=up|down|degraded`, `msg=...` (recorded
 with the heartbeat), `ping=<ms>` (round-trip latency). An unknown `status`
 or a negative `ping` is refused with a 400, so a typo never reads as up.
 
-**A heartbeat that does not come is down at once.** Hora looks at a push
-monitor at least every minute; once the last heartbeat is older than
-`interval_secs` (or a scheduled run is later than `grace_secs`), the
-monitor is down and alerted, without waiting for `fail_threshold` (the
-global one or the monitor's own): the
+**A heartbeat that does not come is down at once.** Hora looks at a
+healthy push monitor when a heartbeat comes and when its deadline passes;
+once the last heartbeat is older than `interval_secs` (or a scheduled run
+is later than `grace_secs`), the monitor is down and alerted, without
+waiting for `fail_threshold` (the global one or the monitor's own): the
 interval or the grace is the tolerance. Size them for the job, not for the
 threshold.
+
+A monitor that is not healthy - down, degraded, recovered during a
+maintenance window - is looked at again at least every minute (every
+`interval_secs` when shorter), so the threshold and the end of a
+maintenance window work as for any check. A heartbeat is looked at no
+sooner than one such period after the previous look: a burst of pushes
+counts once.
 
 **The job's own verdict drives alerting.** A heartbeat that says
 `status=down` counts as a failure on the next tick, with the job's `msg` as
@@ -336,6 +343,22 @@ evaluations (a few minutes; at once with `fail_threshold = 1` on the monitor), l
 # the backup ran but failed: say so, rather than staying silent
 curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \
   "https://status.example.com/api/push/nightly-backup?status=down&msg=disk+full"
+```
+
+**Producers set up for Uptime Kuma** can keep their URL: with
+`kuma_push = true` (and a `push_token`) the monitor is also reached by
+`GET` or `POST /api/push/<push_token>?status=up|down&msg=...&ping=...`, the
+token in place of the id and no header - what Kuma's push monitors hand
+out, and where some backup tools post their JSON report. The
+answer is `{"ok":true}`, a fractional `ping` is rounded, an empty one is
+ignored, and a body is never read. The token must be URL-safe and must not
+equal a monitor id or a peer's listen id. Hora's own log shows a push path
+only when it ends in a known id, and `/api/push/[redacted]` otherwise; a
+reverse proxy in front logs the full path unless told otherwise. The header form keeps working for the same monitor, and
+`hora import kuma` sets `kuma_push = true` on the push monitors it imports.
+
+```sh
+curl -fsS "https://status.example.com/api/push/${PUSH_TOKEN}?status=up&msg=OK&ping="
 ```
 
 **A push monitor that never pinged alerts too.** Once its interval (or its

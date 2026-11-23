@@ -149,6 +149,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
                 }),
                 None => None,
             },
+            kuma_push: raw.kuma_push.unwrap_or(false),
         }),
         Kind::Exec => {
             let mut command = std::mem::take(&mut raw.command).into_iter();
@@ -572,6 +573,14 @@ fn validate_schedule_and_slo(monitor: &RawMonitor) -> anyhow::Result<()> {
             )
         })?;
     }
+    // The token is the credential of the Kuma URL: without one the monitor
+    // has nothing to be found by.
+    anyhow::ensure!(
+        monitor.kuma_push != Some(true)
+            || (monitor.kind == Kind::Push && monitor.push_token.is_some()),
+        "monitor {}: kuma_push requires a push monitor with a push_token",
+        monitor.id
+    );
     anyhow::ensure!(
         monitor.schedule.is_some() || monitor.grace_secs.is_none(),
         "monitor {}: grace_secs requires a schedule",
