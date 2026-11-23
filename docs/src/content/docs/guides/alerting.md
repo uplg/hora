@@ -198,14 +198,15 @@ repeat_alert_secs = 900  # its own cadence; 0 turns them off for this monitor
 ```
 
 A reminder goes out with the first check after it is due, to the channels
-the down went to, with the same detail (the error, the root cause or what
-it impacts). There is none:
+the down went to, with the same detail (the error, what it impacts). There
+is none:
 
 - while the monitor is muted by a [maintenance window](#maintenance-windows)
   or a [silence](#ad-hoc-silences-deploy-hooks). One that came due goes out
   when the mute ends, once, never a backlog;
-- for a down folded into its root cause's alert: the cause's reminder
-  speaks for it;
+- for a monitor whose cause (a monitor it depends on) is down as well: the
+  cause's reminder speaks for it, naming what it takes down. Once the cause
+  is back, a monitor still down reminds for itself;
 - for a [local-only down](../peers/#local-only-downs) the peers have not
   confirmed. Once they do, the reminders count from the down that then goes
   out.

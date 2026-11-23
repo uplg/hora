@@ -530,7 +530,6 @@ async fn run(
             } else if let Some(every) = remind_every
                 && state.remind_due(jiff::Timestamp::now().as_second(), every)
             {
-                info!(monitor = %monitor.id, "still down: reminding");
                 let snapshot = config.borrow().clone();
                 remind_down(
                     &snapshot,
@@ -591,8 +590,13 @@ async fn save_reminded(store: &Store, monitor_id: &str, reminded: Option<i64>) {
 
 /// Remind of a confirmed outage: the down alert again, "still down" and for
 /// how long (from its incident), with its topology context read afresh,
-/// through the coalescer - which sends it only where the down itself went
-/// (not for a down folded into its root cause's).
+/// through the coalescer - which sends it only where the down itself went.
+///
+/// Not for a monitor whose cause is down: the cause's reminder names it
+/// among what it takes with it, and a dozen dependents saying so again each
+/// on their own is the noise their folded downs were spared. Read from the
+/// checks and not from what the coalescer folded, which it only remembers
+/// until a restart.
 async fn remind_down(
     config: &Config,
     store: &Store,
@@ -602,6 +606,11 @@ async fn remind_down(
     open_incident: Option<i64>,
 ) {
     let (cause, impacted) = down_context(config, store, monitor).await;
+    if let Some((cause, _)) = cause {
+        info!(monitor = %monitor.id, %cause, "still down, as its cause is: no reminder of its own");
+        return;
+    }
+    info!(monitor = %monitor.id, "still down: reminding");
     let started = match open_incident {
         Some(id) => db::incident_by_id(store, id)
             .await
@@ -626,7 +635,7 @@ async fn remind_down(
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            cause_name: cause.map(|(_, name)| name),
+            cause_name: None,
             impacted,
             notify: monitor.notify.clone(),
             vantage: None,
@@ -2350,5 +2359,68 @@ mod tests {
         fail("cache", 3..5).await;
         let (cause, _) = down_context(&config, &store, &monitor("edge")).await;
         assert_eq!(cause, Some(("cache".to_owned(), "Cache".to_owned())));
+    }
+    /// A monitor whose cause is down is not reminded of on its own: the
+    /// cause's reminder speaks for it. That is read from the checks, so it
+    /// holds after a restart, when nothing remembers which downs were
+    /// folded. Once the cause is back, the monitor reminds for itself.
+    #[tokio::test]
+    async fn a_down_whose_cause_is_down_has_no_reminder_of_its_own() {
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 1
+            [[monitors]]
+            id = "db"
+            name = "Database"
+            kind = "tcp"
+            target = "db.example.com:5432"
+            interval_secs = 60
+            [[monitors]]
+            id = "api"
+            name = "API"
+            target = "https://api.example.com"
+            interval_secs = 60
+            depends_on = ["db"]
+            "#,
+        )
+        .expect("config");
+        let store = Store::in_memory().await;
+        let monitor = |id: &str| config.find_monitor(id).expect("configured").clone();
+        let outcome = Outcome::down(probe::FailureKind::Pushed, "boom".to_owned());
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let check = async |status: i64| {
+            sqlx::query("INSERT INTO checks (time, monitor_id, status) VALUES (?, 'db', ?)")
+                .bind(jiff::Timestamp::now().as_second() + status)
+                .bind(status)
+                .execute(store.fixture_pool())
+                .await
+                .unwrap();
+        };
+
+        check(0).await;
+        remind_down(&config, &store, &alerts_tx, &monitor("api"), &outcome, None).await;
+        assert!(alerts_rx.try_recv().is_err(), "the cause speaks for it");
+        // The cause itself is reminded of, with what it takes down.
+        remind_down(&config, &store, &alerts_tx, &monitor("db"), &outcome, None).await;
+        match alerts_rx.try_recv() {
+            Ok(AlertMsg::Reminder(alert)) => {
+                assert_eq!(
+                    (alert.id.as_str(), &alert.impacted[..]),
+                    ("db", &["API".to_owned()][..])
+                );
+            }
+            _ => panic!("a reminder for the cause"),
+        }
+
+        // The database is back, the API still down: its own reminder.
+        check(1).await;
+        remind_down(&config, &store, &alerts_tx, &monitor("api"), &outcome, None).await;
+        assert!(matches!(
+            alerts_rx.try_recv(),
+            Ok(AlertMsg::Reminder(alert)) if alert.id == "api" && alert.cause_name.is_none()
+        ));
     }
 }
