@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`[server] summary_idle_refresh_secs`**: how long the status summary
+  waits before its next rebuild while nobody reads it (default 30 s, as
+  before; 5..3600). A longer pause saves database reads on an idle node;
+  the first request after a quiet stretch still waits for a fresh build.
+- **`[server] database = { cache_kib, max_connections }`** sizes the two
+  SQLite pools: the page cache of each connection, and the connections of
+  both pools together (a third for the daemon, the rest for the status
+  pages). Unset, as before: 4000 KiB for each of 3 + 6 connections. A
+  small container can trade page throughput for memory. `hora` commands
+  open the database with the same sizing.
+
 ### Changed
 
 - **A healthy push monitor is looked at when a heartbeat comes and when its
@@ -18,8 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-arm - is still looked at every minute (every `interval_secs` when
   shorter), and a heartbeat is never looked at sooner than one such period
   after the previous look, so a burst of `status=down` pushes confirms no
-  faster than before. Thirty healthy push monitors over a simulated hour:
-  about 160 heartbeat reads instead of 1 800. No new config key.
+  faster than before. No new config key.
 
 ## [0.12.3] - 2026-11-23
 
