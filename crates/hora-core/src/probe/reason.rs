@@ -20,6 +20,8 @@ pub enum FailureKind {
     /// A public target redirected to a loopback, link-local or private
     /// address (see `crate::http::RedirectGuard`).
     PrivateRedirect,
+    /// A monitor with `ignore_tls` was redirected off its target's host.
+    UnverifiedRedirect,
     /// The body could not be read or decoded.
     InvalidBody,
     /// Any other HTTP client error.
@@ -65,13 +67,14 @@ pub enum FailureKind {
 }
 
 impl FailureKind {
-    pub(crate) const ALL: [Self; 26] = [
+    pub(crate) const ALL: [Self; 27] = [
         Self::Timeout,
         Self::ConnectionFailed,
         Self::ConnectionTimedOut,
         Self::TooManyRedirects,
         Self::InsecureRedirect,
         Self::PrivateRedirect,
+        Self::UnverifiedRedirect,
         Self::InvalidBody,
         Self::RequestError,
         Self::Unresolvable,
@@ -116,6 +119,7 @@ impl FailureKind {
             Self::TooManyRedirects => "too_many_redirects",
             Self::InsecureRedirect => "insecure_redirect",
             Self::PrivateRedirect => "private_redirect",
+            Self::UnverifiedRedirect => "unverified_redirect",
             Self::InvalidBody => "invalid_body",
             Self::RequestError => "request_error",
             Self::Unresolvable => "unresolvable",
@@ -191,6 +195,8 @@ pub fn public_reason(kind: Option<FailureKind>, reason: &str) -> &str {
         // The detail names the plain-http origin; the category is enough.
         FailureKind::InsecureRedirect => "redirected to plain http",
         FailureKind::PrivateRedirect => "redirected to a private address",
+        // The detail names the other host; the category is enough.
+        FailureKind::UnverifiedRedirect => "redirected to another host",
         FailureKind::InvalidBody => "invalid response body",
         FailureKind::RequestError => "request error",
         FailureKind::Unresolvable => "could not resolve host",

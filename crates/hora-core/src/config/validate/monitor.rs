@@ -126,6 +126,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             max_body_kb: raw.max_body_kb,
             proxy: raw.proxy.take(),
             dual_stack,
+            ignore_tls: raw.ignore_tls.unwrap_or(false),
         }),
         Kind::Tcp => MonitorKind::Tcp(TcpSpec {
             target,
@@ -350,18 +351,38 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
 }
 
 /// Validate what an HTTP monitor sends and accepts: the `expected_status`
-/// entries, and a `method` that suits the assertions.
+/// entries, `ignore_tls` on an http monitor only, and a `method` that suits
+/// the assertions.
 fn validate_http_request(monitor: &RawMonitor) -> anyhow::Result<()> {
     if let Some(statuses) = &monitor.expected_status
         && let Err(err) = ExpectedStatus::from_raw(statuses)
     {
         anyhow::bail!("monitor {}: {err}", monitor.id);
     }
+    // A new key has no file to keep loading: on another kind it is a
+    // mistake, said at once rather than ignored with a warning.
+    anyhow::ensure!(
+        monitor.kind == Kind::Http || monitor.ignore_tls.is_none(),
+        "monitor {}: ignore_tls requires an http monitor",
+        monitor.id
+    );
+    // reqwest gives the proxy hop the same TLS setup as the target: through
+    // an https proxy, its certificate - and the credentials sent to it -
+    // would go unverified too.
+    let https_proxy = monitor
+        .proxy
+        .as_deref()
+        .and_then(|proxy| proxy.get(..8))
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+    anyhow::ensure!(
+        !(monitor.ignore_tls == Some(true) && https_proxy),
+        "monitor {}: ignore_tls cannot go through an https proxy (its certificate would \
+         not be verified either)",
+        monitor.id
+    );
     let Some(method) = &monitor.method else {
         return Ok(());
     };
-    // A new key has no file to keep loading: on another kind it is a
-    // mistake, said at once rather than ignored with a warning.
     anyhow::ensure!(
         monitor.kind == Kind::Http,
         "monitor {}: method requires an http monitor",

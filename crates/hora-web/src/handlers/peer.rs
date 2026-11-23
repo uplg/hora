@@ -81,7 +81,12 @@ pub(crate) async fn peer_probe(
     probe_monitor.probe_retries = Some(0);
     let client = state
         .probe_clients
-        .get_or_build(&config, monitor.proxy(), hora_core::http::probe_client)
+        .get_or_build(
+            &config,
+            monitor.proxy(),
+            monitor.ignore_tls(),
+            hora_core::http::probe_client,
+        )
         .map_err(|err| AppError::Internal(err.into()))?;
     // The kind check above leaves only the kinds with a live probe.
     let Some(probe) = probe_monitor.spec.network() else {

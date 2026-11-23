@@ -205,6 +205,8 @@ pub struct HttpSpec {
     pub proxy: Option<String>,
     /// Probe IPv4 and IPv6 separately and require both.
     pub dual_stack: bool,
+    /// Accept the target's certificate unverified (`ignore_tls`).
+    pub ignore_tls: bool,
 }
 
 /// `keyword` / `keyword_invert`.
@@ -385,6 +387,7 @@ impl std::fmt::Debug for HttpSpec {
             .field("max_body_kb", &self.max_body_kb)
             .field("proxy", &self.proxy.as_deref().map(redact_url_secrets))
             .field("dual_stack", &self.dual_stack)
+            .field("ignore_tls", &self.ignore_tls)
             // The parsed form of `target`, redacted above.
             .finish_non_exhaustive()
     }
@@ -488,6 +491,14 @@ impl Monitor {
             MonitorKind::Icmp(spec) => spec.dual_stack,
             MonitorKind::Dns(_) | MonitorKind::Push(_) | MonitorKind::Exec(_) => false,
         }
+    }
+
+    /// Whether this monitor's HTTP requests accept an unverified certificate
+    /// (`ignore_tls`, default off). Such a monitor never shares a probe
+    /// client with the verifying ones.
+    #[must_use]
+    pub fn ignore_tls(&self) -> bool {
+        matches!(&self.spec, MonitorKind::Http(spec) if spec.ignore_tls)
     }
 
     /// Whether this monitor should have its TLS certificate expiry checked:

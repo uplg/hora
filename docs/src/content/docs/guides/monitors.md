@@ -60,6 +60,7 @@ timeout_secs = 10
 # degraded_over_ms = 800    # up but slower than this = degraded (yellow)
 # headers = { Authorization = "Bearer ${TOKEN}" }
 # proxy = "socks5://127.0.0.1:9050"
+# ignore_tls = true         # accept a self-signed certificate: see below
 ```
 
 **`expected_status`** is a status (`200`), a class (`"2xx"`, any of `"1xx"`
@@ -153,6 +154,26 @@ peer certificate: Expired*. Through a `proxy`, a proxy that refuses the
 request (`407`, a refused tunnel, SOCKS credentials) is reported as
 *proxy failed: ...*, not as the target failing; the TLS certificate is read
 through the proxy too.
+
+**`ignore_tls = true`** accepts the target's certificate without verifying
+it - self-signed, expired, or issued for another name - for a device that
+serves its own, such as a router or a controller UI on your network
+(Uptime Kuma's *Ignore TLS/SSL errors*). It is off by default and applies
+to that monitor alone: its requests go through a client of their own, never
+shared with the monitors that verify. The connection is still encrypted,
+but anyone on the path could answer in the device's place, so set it only
+where you cannot install a trusted certificate. Pair it with a `cert_pin`
+(see [TLS certificates](#tls-certificates)): the pin then still alerts when
+the key changes. The exception covers the target's host only: a redirect
+to another host is not followed, and the monitor is down, *redirected to
+another host*. It cannot go through an `https://` proxy, whose own
+certificate would not be verified either.
+
+```toml
+target = "https://192.0.2.10:8443/"
+ignore_tls = true
+cert_pin = "abc123..."     # optional, recommended: alerts if the key changes
+```
 
 ### `tcp`
 
@@ -442,6 +463,10 @@ cert_pin = "abc123..."   # SHA-256 of the leaf public key
 An unexpected key change - MITM, botched renewal - alerts once per change,
 with the old and new fingerprints. Disable expiry checking per monitor with
 `check_cert = false`.
+
+The watcher reads the certificate without verifying it, so expiry and pin
+work the same on a monitor with `ignore_tls`: a self-signed certificate is
+warned about before it expires, and its pin is checked.
 
 Mail servers get the same watch: set `starttls = "smtp"` (or `"imap"`) on a
 tcp monitor and the watcher negotiates STARTTLS before reading the

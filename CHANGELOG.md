@@ -68,6 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   definitions and loops (`repeat`, `until`, `while`, `range`, `recurse(f)`)
   are refused, so that an expression always ends. No result, several, `null`, an array or an object
   fail the check. On the public page, a failure reads "content check failed".
+- **`ignore_tls` on http monitors**: accept the target's certificate
+  without verifying it (self-signed, expired, another name), for a device
+  that serves its own - a router or a controller UI. Off by default, per
+  monitor; such monitors get probe clients of their own, never shared with
+  the verifying ones. The exception covers the target's host only: a
+  redirect to another host is a down, *redirected to another host*. Refused
+  on other kinds and through an `https://` proxy. The expiry watch and
+  `cert_pin` work as before (they never verified the chain), so a pin is
+  the recommended companion. Part of the check fingerprint only when set,
+  so peers keep agreeing on every other monitor. `hora import kuma` carries
+  Kuma's `ignoreTls` over.
 
 ### Changed
 

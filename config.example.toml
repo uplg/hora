@@ -343,6 +343,10 @@ depends_on = ["api"]
 # headers = { Accept = "text/html", Authorization = "Bearer ${TOKEN}" }  # optional
 # notify = ["alerts-discord"]   # optional; route alerts to specific channels
 # proxy = "socks5://127.0.0.1:9050"   # optional; route requests through a proxy
+# ignore_tls = true       # optional, http; accept the target's certificate unverified
+#                         # (self-signed, expired, another name) - for a device that
+#                         # serves its own. This monitor only, its host only (no
+#                         # redirect elsewhere), no https proxy. Pair with cert_pin.
 # public = false          # optional; hide from public status page
 # public_error_detail = true  # optional; publish the raw failure reason (default:
 #                             # anonymous viewers see a safe category only)

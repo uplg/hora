@@ -327,7 +327,7 @@ difference or an unreachable peer, so it can gate a config deploy in CI.
 
 A peer confirms a down only with a monitor that checks the same way: same
 kind and target, same `method`, same expected statuses, assertions and headers, same
-`dual_stack`, DNS record, pinned answer and resolver, same STARTTLS
+`ignore_tls` and `dual_stack`, DNS record, pinned answer and resolver, same STARTTLS
 protocol. Timeouts, intervals, thresholds and the proxy are each node's own
 business. A peer that watches the URL with another assertion answers as if
 it did not watch it, and the down is alerted unconfirmed. The target is sent
