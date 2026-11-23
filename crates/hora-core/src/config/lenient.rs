@@ -50,6 +50,10 @@ pub struct BuiltinMonitor {
     /// what a visitor came to read, and the alert does not need the card.
     #[serde(default)]
     pub public: Option<bool>,
+    /// "Still down" reminders while it stays down, like a monitor's
+    /// `repeat_alert_secs`; absent = `[alerts] repeat_alert_secs`, 0 = none.
+    #[serde(default)]
+    pub repeat_alert_secs: Option<u64>,
 }
 
 /// One entry a lenient load left out or changed, or a standing problem with
@@ -406,6 +410,14 @@ fn drop_blamed(config: &mut Config, message: &str, issues: &mut Vec<ConfigIssue>
         ));
         return true;
     }
+    if message.starts_with("config_monitor.") {
+        config.config_monitor = None;
+        issues.push(ConfigIssue::new(
+            "config_monitor",
+            format!("{message}; defaults used"),
+        ));
+        return true;
+    }
     let blamed = |prefixes: &[String]| prefixes.iter().any(|p| message.starts_with(p.as_str()));
     let pick = |matches: Vec<usize>| {
         if duplicate {
@@ -524,6 +536,12 @@ fn config_monitor(settings: &BuiltinMonitor) -> Result<Monitor, String> {
     if let Some(notify) = &settings.notify {
         let routes = notify.iter().map(|route| route.as_str().into()).collect();
         monitor.insert("notify".into(), toml::Value::Array(routes));
+    }
+    if let Some(secs) = settings.repeat_alert_secs {
+        monitor.insert(
+            "repeat_alert_secs".into(),
+            i64::try_from(secs).unwrap_or(i64::MAX).into(),
+        );
     }
     toml::Value::Table(monitor)
         .try_into::<Monitor>()
@@ -757,6 +775,7 @@ mod tests {
         assert_eq!(builtin.fail_threshold, Some(1));
         assert!(builtin.push_token.is_none() && !builtin.allow_unauthenticated);
         assert!(builtin.notify.is_none(), "every channel");
+        assert!(builtin.repeat_alert_secs.is_none(), "[alerts]' reminders");
         assert!(!builtin.public, "the operator's view only, token or not");
         let shown = load(&format!("{}[config_monitor]\npublic = true\n", http("a")));
         let builtin = shown
@@ -770,7 +789,7 @@ mod tests {
     fn config_monitor_names_groups_and_routes_the_built_in() {
         let config = load(&format!(
             "{WEBHOOK}{}[config_monitor]\nname = \"Config valid\"\ngroup = \"Watchdog\"\n\
-             notify = [\"ok\"]\n{}",
+             notify = [\"ok\"]\nrepeat_alert_secs = 3600\n{}",
             WEBHOOK.replace("\"ok\"", "\"other\""),
             http("a")
         ));
@@ -781,6 +800,7 @@ mod tests {
         assert_eq!(builtin.name, "Config valid");
         assert_eq!(builtin.group.as_deref(), Some("Watchdog"));
         assert_eq!(builtin.notify.as_deref(), Some(&["ok".to_owned()][..]));
+        assert_eq!(builtin.repeat_alert_secs, Some(3600));
         assert_eq!(builtin.fail_threshold, Some(1), "the rest stays built in");
     }
 
@@ -807,6 +827,26 @@ mod tests {
         }
     }
 
+    /// A reminder period out of bounds is an issue; the defaults are used.
+    #[test]
+    fn a_config_monitor_section_out_of_bounds_falls_back_to_the_defaults() {
+        let config = load(&format!(
+            "[config_monitor]\nname = \"Config valid\"\nrepeat_alert_secs = 2592001\n{}",
+            http("a")
+        ));
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert!(
+            has_issue(&config, "config_monitor", "defaults used"),
+            "{:?}",
+            config.issues
+        );
+        let builtin = config
+            .find_monitor(CONFIG_MONITOR_ID)
+            .expect("config monitor");
+        assert_eq!(builtin.name, "Hora configuration");
+        assert!(builtin.repeat_alert_secs.is_none());
+    }
+
     /// The strict parse checks the section like any monitor's routes, and
     /// knows its keys.
     #[test]
@@ -816,7 +856,9 @@ mod tests {
         let settings = config.config_monitor.expect("section");
         assert_eq!(settings.name.as_deref(), Some("Config valid"));
         assert!(config.monitors.is_empty(), "no built-in on a strict load");
+        assert!(super::super::parse(&section("repeat_alert_secs = 0")).is_ok());
         for bad in [
+            "repeat_alert_secs = 2592001",
             "notify = [\"nowhere\"]",
             "nmae = \"typo\"",
             "public = \"yes\"",
