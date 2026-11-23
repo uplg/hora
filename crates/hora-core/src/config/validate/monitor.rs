@@ -50,6 +50,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         slo_window_days: raw.slo_window_days,
         probe_retries: raw.probe_retries,
         fail_threshold: raw.fail_threshold,
+        repeat_alert_secs: raw.repeat_alert_secs,
         notify: raw.notify,
         check_cert: raw.check_cert,
         retention_days: raw.retention_days,

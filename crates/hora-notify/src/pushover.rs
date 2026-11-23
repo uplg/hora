@@ -230,6 +230,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         };
         let recovered = Event::Recovered {
             monitor: "API",

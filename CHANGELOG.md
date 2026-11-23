@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   priority is 2; both are refused otherwise and are sent only with an
   emergency. A channel without these keys sends exactly what it sent
   before.
+- **"Still down" reminders.** `repeat_alert_secs` in `[alerts]`, or on a
+  monitor (which wins, 0 included), says so again every that many seconds
+  while a confirmed outage lasts: "API is still DOWN (for 2 h)", to the
+  channels the down went to, with the same detail, until it recovers. None
+  while the monitor is muted by a maintenance window or a silence (one that
+  came due goes out when the mute ends, never a backlog), for a monitor
+  whose cause is down as well (the cause's reminder names it), or for a
+  local-only down the peers have not confirmed. The time of the last one is kept in the database, so a restart
+  neither repeats nor forgets one. The webhook payload of a reminder is a
+  `down` with `down_for_secs`. Off by default; no migration.
 
 ### Changed
 

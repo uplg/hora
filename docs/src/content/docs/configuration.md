@@ -15,7 +15,7 @@ documents every option; this page covers the mechanics.
 | `[page]` | Status page title, days rendered in the uptime bars |
 | `[server]` | Bind address, database path, CORS, rate limits, the operator token (`auth_token`), the read-only token (`view_token`), group tokens |
 | `[[channels]]` | Named notification channels (Telegram, Discord, email, ...) |
-| `[alerts]` | Fail threshold, cert expiry warning, retention, alert grouping, channel watchdog, where local-only downs go (`notify_unconfirmed`) |
+| `[alerts]` | Fail threshold, cert expiry warning, retention, alert grouping, still-down reminders, channel watchdog, where local-only downs go (`notify_unconfirmed`) |
 | `[[maintenance]]` | Scheduled windows that mute alerts |
 | `[[incidents]]` | Manual announcements shown as a status page banner |
 | `[[monitors]]` | The monitors themselves |
@@ -250,6 +250,7 @@ Values that cannot work are refused too:
 | `method` | `"GET"` or `"HEAD"`, on an http monitor; no `"HEAD"` with `keyword`, `json_query` or `number_regex` |
 | `fail_threshold` on a monitor | at least 1 |
 | A `[[maintenance]]` window | `start` and `end`, or a `cron` with `duration_secs` from 1 to a week (604800) and an IANA `timezone` |
+| `repeat_alert_secs`, in `[alerts]` or on a monitor | 0 (off) or at most 30 days (2592000) |
 | An IPv6 `tcp` target | bracketed: `[::1]:80`, not `::1:80` |
 | `dns_resolver` | an IP and a port (`8.8.8.8:53`, `[2620:fe::fe]:53`), not a hostname |
 

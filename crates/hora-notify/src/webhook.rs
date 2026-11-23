@@ -33,9 +33,11 @@ impl WebhookNotifier {
                 vantage,
                 event,
                 local_only,
+                down_for_secs,
             } => Payload {
                 message: error,
                 local_only: Some(local_only),
+                down_for_secs,
                 cause,
                 impacted: if impacted.is_empty() {
                     None
@@ -170,6 +172,10 @@ struct Payload<'a> {
     /// before ("deploy api v2.3, 3 min before").
     #[serde(skip_serializing_if = "Option::is_none")]
     change: Option<&'a str>,
+    /// On a down that reminds of an outage still going on: how long it has
+    /// lasted, in seconds (0 when not known). Absent on the down itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    down_for_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     witness: Option<&'a str>,
     /// The registered domain, on domain-expiry events.
@@ -227,6 +233,7 @@ impl<'a> Payload<'a> {
             local_only: None,
             vantage: None,
             change: None,
+            down_for_secs: None,
             witness: None,
             domain: None,
             project: None,
@@ -321,6 +328,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         });
         assert_eq!(symptom.cause, Some("DB"));
 
@@ -332,9 +340,9 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         });
         assert_eq!(root.impacted, Some(["API", "Web"].as_slice()));
-
         let cert = WebhookNotifier::payload(Event::CertExpiring {
             monitor: "API",
             secs_left: 5 * 86_400 + 7,
@@ -399,5 +407,34 @@ mod tests {
             message: "",
         });
         assert!(titled.message.is_none());
+    }
+
+    /// A still-down reminder is a down that says how long it has lasted;
+    /// the down itself carries no such field.
+    #[test]
+    fn a_reminder_carries_how_long_the_outage_lasted() {
+        let down = WebhookNotifier::payload(Event::down("API", Some("boom")));
+        assert!(down.down_for_secs.is_none());
+
+        let reminder = WebhookNotifier::payload(Event::Down {
+            monitor: "API",
+            error: Some("boom"),
+            cause: None,
+            impacted: &[],
+            vantage: None,
+            event: None,
+            local_only: false,
+            down_for_secs: Some(7200),
+        });
+        assert_eq!(
+            serde_json::to_value(&reminder).unwrap(),
+            serde_json::json!({
+                "event": "down",
+                "monitor": "API",
+                "message": "boom",
+                "local_only": false,
+                "down_for_secs": 7200,
+            })
+        );
     }
 }

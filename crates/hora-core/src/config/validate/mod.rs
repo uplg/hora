@@ -145,16 +145,10 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     }
     let channel_names = validate_channels(config)?;
     validate_tuning(config)?;
-
-    for window in &config.maintenance {
-        if let super::MaintenanceTime::Fixed { start, end } = &window.time {
-            anyhow::ensure!(
-                start < end,
-                "maintenance window {:?}: start must be before end",
-                window.title
-            );
-        }
+    if config.alerts.repeat_alert_secs > 0 {
+        validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;
     }
+    validate_windows(config)?;
 
     let mut seen = HashSet::new();
     for monitor in &config.monitors {
@@ -179,6 +173,9 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
             &format!("monitor {} timeout_secs", monitor.id),
             monitor.timeout_secs,
         )?;
+        if let Some(secs) = monitor.repeat_alert_secs.filter(|secs| *secs > 0) {
+            validate_period(&format!("monitor {} repeat_alert_secs", monitor.id), secs)?;
+        }
         // A probe outliving its interval delays the next tick (the scheduler
         // never overlaps probes), so the effective cadence is the timeout,
         // not the interval. Push monitors probe nothing; their timeout is inert.
@@ -237,6 +234,21 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         config.alerts.notify_unconfirmed.as_deref(),
         &channel_names,
     )?;
+    Ok(())
+}
+
+/// A fixed maintenance window starts before it ends (a recurring one is
+/// checked as it is read).
+fn validate_windows(config: &Config) -> anyhow::Result<()> {
+    for window in &config.maintenance {
+        if let super::MaintenanceTime::Fixed { start, end } = &window.time {
+            anyhow::ensure!(
+                start < end,
+                "maintenance window {:?}: start must be before end",
+                window.title
+            );
+        }
+    }
     Ok(())
 }
 

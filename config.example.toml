@@ -221,6 +221,13 @@ default_retention_days = 90
 # minutes; once they no longer all see it up, the real down alert goes out.
 # notify_unconfirmed = ["ntfy-low"]   # a quiet channel instead
 # notify_unconfirmed = []             # record only, notify nobody
+#
+# Still-down reminders: while a confirmed outage lasts, say so again every
+# this many seconds ("API is still DOWN (for 2 h)"), to the channels the down
+# went to, until it recovers. 0, the default, sends none; a monitor may set
+# its own, 0 included. None while muted (maintenance, silence), for a down
+# folded into its root cause's, or for an unconfirmed local-only one.
+# repeat_alert_secs = 3600
 
 # --- Weekly digest ----------------------------------------------------------
 # A recap of the last 7 days through the notification channels: "99.97 %
@@ -323,6 +330,8 @@ depends_on = ["api"]
 #                         # number_regex. No other method: Hora sends no body.
 # fail_threshold = 1      # optional; consecutive failed checks before THIS monitor
 #                         # is down, instead of [alerts] fail_threshold. Any kind.
+# repeat_alert_secs = 900 # optional; still-down reminders every this many
+#                         # seconds, instead of [alerts]'s (0 = none)
 # degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)
 # slo_latency_ms = 500    # optional; the 24 h p95 is flagged met/breached against this
 # slo_uptime = 99.9        # optional; availability SLO (%). Shows the error budget

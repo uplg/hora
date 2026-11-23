@@ -3273,3 +3273,35 @@ fn pushover_channel_options_are_validated() {
         assert!(load(&format!("{MINIMAL}{channel}{bad}")).is_err(), "{bad}");
     }
 }
+
+/// Reminders of a lasting outage: the monitor's own cadence, else the
+/// global one; 0 turns them off; never longer than the longest period.
+#[test]
+fn repeat_alert_secs_falls_back_to_the_global_cadence() {
+    let config = load(&format!("{MINIMAL}\nrepeat_alert_secs = 3600")).unwrap();
+    assert_eq!(
+        config.monitors[0].repeat_alert_secs(&config.alerts),
+        Some(3600)
+    );
+    let config = load(&format!("{MINIMAL}\nrepeat_alert_secs = 0")).unwrap();
+    assert_eq!(config.monitors[0].repeat_alert_secs(&config.alerts), None);
+    let global = MINIMAL.replace("[server]", "[server]\n[alerts]\nrepeat_alert_secs = 600");
+    let config = load(&global).unwrap();
+    assert_eq!(
+        config.monitors[0].repeat_alert_secs(&config.alerts),
+        Some(600)
+    );
+    let off = load(&format!("{global}\nrepeat_alert_secs = 0")).unwrap();
+    assert_eq!(off.monitors[0].repeat_alert_secs(&off.alerts), None);
+    assert_eq!(parse(MINIMAL).alerts.repeat_alert_secs, 0);
+    assert_eq!(
+        parse(MINIMAL).monitors[0].repeat_alert_secs(&parse(MINIMAL).alerts),
+        None
+    );
+    assert!(load(&format!("{MINIMAL}\nrepeat_alert_secs = 99999999")).is_err());
+    let too_long = MINIMAL.replace(
+        "[server]",
+        "[server]\n[alerts]\nrepeat_alert_secs = 99999999",
+    );
+    assert!(load(&too_long).is_err());
+}

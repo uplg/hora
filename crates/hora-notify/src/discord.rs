@@ -213,6 +213,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         });
         assert_eq!(down.title, "\u{1F534} API is DOWN");
         assert_eq!(
@@ -277,6 +278,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         });
         assert_eq!(down.title, "\u{1F534} my\\_db\\_primary is DOWN");
         let body = down.description.expect("down has a body");
