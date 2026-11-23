@@ -1,6 +1,6 @@
 ---
 title: Monitors
-description: HTTP, TCP, ICMP, DNS and push probes - assertions, dual-stack, topology, visibility.
+description: HTTP, TCP, ICMP, DNS, push and MQTT probes - assertions, dual-stack, topology, visibility.
 ---
 
 A monitor is a `[[monitors]]` entry with an `id`, a `name`, a `kind` and a
@@ -392,6 +392,62 @@ first scheduled run plus `grace_secs`) has passed since Hora started
 watching it, it is down with *"no heartbeat received yet"*. That start time
 is stored, so a restart does not push the deadline back. If you declare a
 monitor for a job that does not run yet, comment it out until it does.
+
+### `mqtt`
+
+Reads the latest message on an MQTT topic. Every monitor of a broker shares
+one connection (MQTT 5, QoS 1 subscriptions), subscribed to exactly the
+topics its monitors name; each topic caches only its latest payload, no
+history. No probe goes out on a check: the monitor judges what is cached.
+
+```toml
+[[brokers]]
+name = "sensors"
+url = "mqtt://broker.example:1883"   # or mqtts:// (system trust roots)
+username = "monitor"                 # credentials in their own fields,
+password = "${MQTT_PASSWORD}"        # never in the URL
+# keep_alive_secs = 15               # 5 to 300
+# max_packet_kb = 64                 # largest packet and cached payload, 1 to 1024
+
+# Retained state: whatever was last published, however old.
+[[monitors]]
+id = "sensor-online"
+name = "Sensor online"
+kind = "mqtt"
+broker = "sensors"
+topic = "devices/sensor/state"       # a concrete topic: no + or # wildcards
+keyword = "online"                   # keyword / keyword_invert, as on http
+interval_secs = 60
+
+# A periodic reading: down when none arrived in the last 10 minutes.
+[[monitors]]
+id = "temperature"
+name = "Temperature"
+kind = "mqtt"
+broker = "sensors"
+topic = "home/sensor/temperature"
+json_query = "$.temperature"         # json_query / json_expected, as on http
+interval_secs = 60
+max_age_secs = 600
+```
+
+`number_regex` and `proxy` stay http-only. `max_body_kb` caps the payload
+the assertions accept (unset: the broker's `max_packet_kb`, beyond which the
+broker does not deliver a message and nothing is cached).
+
+The monitor is down when no message has arrived, when the latest one is
+older than `max_age_secs` (*no recent message*), when an assertion fails on
+the payload, when the broker is disconnected, or when it refused the
+subscription. Like any failed check, these count towards `fail_threshold`.
+A disconnect empties the cache, and Clean Start makes every reconnect
+subscribe again, so retained topics come back at once. A topic that is only
+published periodically has nothing cached for a while after a start, a
+reconnect or a change to the broker's topic list: for one interval (or
+`max_age_secs`, when shorter) such a monitor gets no verdict and nothing is
+recorded, instead of reading as down. A JSON assertion's verdict is kept
+for an unchanged message, so a frequently checked topic is parsed once per
+message. Two broker entries for the same endpoint and user are refused:
+monitors share one name. The peers of a mesh do not confirm MQTT monitors.
 
 ## Dual-stack verification
 

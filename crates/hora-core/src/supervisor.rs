@@ -136,6 +136,8 @@ const LIVENESS_CHECK: Duration = Duration::from_secs(30);
 /// liveness beacon.
 struct Deps {
     store: Store,
+    /// The shared MQTT connections, one per used broker.
+    mqtt: Arc<crate::mqtt::MqttHub>,
     client: Client,
     /// The monitors' probe clients, one per proxy (see [`ProbeClients`]).
     probe_clients: Mutex<ProbeClients>,
@@ -176,22 +178,22 @@ pub fn start(
         alerts_rx,
         shutdown.clone(),
     );
+    let (mqtt, mqtt_task) = crate::mqtt::spawn(rx.clone(), shutdown.clone());
     let deps = Deps {
         store,
+        mqtt,
         client,
         probe_clients: Mutex::default(),
         notifier: Arc::clone(&notifier),
         alerts: alerts_tx,
         last_tick,
     };
-    let task = tokio::spawn(supervise(
-        tx,
-        rx.clone(),
-        config_path,
-        deps,
-        coalescer,
-        shutdown,
-    ));
+    let supervisor_rx = rx.clone();
+    let task = tokio::spawn(async move {
+        supervise(tx, supervisor_rx, config_path, deps, coalescer, shutdown).await;
+        // The connections close on the same shutdown signal.
+        let _ = mqtt_task.await;
+    });
     Handle {
         config: rx,
         notifier,
@@ -340,6 +342,7 @@ fn reconcile(
                 rx.clone(),
                 scheduler::MonitorDeps {
                     store: deps.store.clone(),
+                    mqtt: Arc::clone(&deps.mqtt),
                     client,
                     confirm_client: deps.client.clone(),
                     notifier: Arc::clone(&deps.notifier),

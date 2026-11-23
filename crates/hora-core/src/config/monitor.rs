@@ -42,6 +42,11 @@ pub enum Kind {
     /// DNS resolution: resolve a name and assert the expected record type/value.
     /// Target is a hostname; `dns_expected` pins the answer (hijack detection).
     Dns,
+    /// The latest message on an MQTT topic (`broker`, `topic`), read from a
+    /// connection shared by every monitor of that `[[brokers]]` entry: down
+    /// when none arrived, when it is older than `max_age_secs`, or when an
+    /// assertion (`keyword`, `json_query`) fails on its payload.
+    Mqtt,
 }
 
 impl Kind {
@@ -55,6 +60,7 @@ impl Kind {
             Self::Exec => "exec",
             Self::Push => "push",
             Self::Dns => "dns",
+            Self::Mqtt => "mqtt",
         }
     }
 }
@@ -175,6 +181,7 @@ pub enum MonitorKind {
     Dns(DnsSpec),
     Push(PushSpec),
     Exec(ExecSpec),
+    Mqtt(MqttSpec),
 }
 
 /// An HTTP(S) check.
@@ -241,6 +248,25 @@ pub struct NumberAssert {
     /// Inclusive bounds.
     pub min: Option<i64>,
     pub max: Option<i64>,
+}
+
+/// The latest message on an MQTT topic, cached by the broker's shared
+/// connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqttSpec {
+    /// The `[[brokers]]` entry, by name.
+    pub broker: String,
+    /// A concrete topic (no wildcards).
+    pub topic: String,
+    /// The message must be at most this old; unset = any age (retained state).
+    pub max_age_secs: Option<u64>,
+    /// The payload must (or, inverted, must not) contain this text.
+    pub keyword: Option<KeywordAssert>,
+    /// A `JSONPath` evaluated against a JSON payload.
+    pub json: Option<JsonAssert>,
+    /// Cap (KiB) on the payload the assertions accept; unset = the broker's
+    /// packet limit.
+    pub max_body_kb: Option<u32>,
 }
 
 /// A TCP connect check.
@@ -333,6 +359,7 @@ impl MonitorKind {
             Self::Dns(_) => Kind::Dns,
             Self::Push(_) => Kind::Push,
             Self::Exec(_) => Kind::Exec,
+            Self::Mqtt(_) => Kind::Mqtt,
         }
     }
 
@@ -344,7 +371,7 @@ impl MonitorKind {
             Self::Tcp(spec) => Some(NetworkProbe::Tcp(spec)),
             Self::Icmp(spec) => Some(NetworkProbe::Icmp(spec)),
             Self::Dns(spec) => Some(NetworkProbe::Dns(spec)),
-            Self::Push(_) | Self::Exec(_) => None,
+            Self::Push(_) | Self::Exec(_) | Self::Mqtt(_) => None,
         }
     }
 }
@@ -456,7 +483,7 @@ impl Monitor {
             MonitorKind::Tcp(spec) => &spec.target,
             MonitorKind::Icmp(spec) => &spec.target,
             MonitorKind::Dns(spec) => &spec.target,
-            MonitorKind::Push(_) | MonitorKind::Exec(_) => "",
+            MonitorKind::Push(_) | MonitorKind::Exec(_) | MonitorKind::Mqtt(_) => "",
         }
     }
 
@@ -486,7 +513,10 @@ impl Monitor {
             MonitorKind::Http(spec) => spec.dual_stack,
             MonitorKind::Tcp(spec) => spec.dual_stack,
             MonitorKind::Icmp(spec) => spec.dual_stack,
-            MonitorKind::Dns(_) | MonitorKind::Push(_) | MonitorKind::Exec(_) => false,
+            MonitorKind::Dns(_)
+            | MonitorKind::Push(_)
+            | MonitorKind::Exec(_)
+            | MonitorKind::Mqtt(_) => false,
         }
     }
 

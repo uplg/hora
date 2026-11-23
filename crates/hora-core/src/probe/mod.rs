@@ -57,6 +57,7 @@ use crate::status::CheckStatus;
 use dns::dns;
 use family::{DualStack, Family, dual_stack};
 use http::http;
+pub(crate) use http::{check_json, check_keyword};
 use icmp::icmp;
 use tcp::tcp;
 
