@@ -73,6 +73,7 @@ pub async fn run(config: &Config, config_path: &Path) -> Vec<Finding> {
     findings.extend(live_reload(
         config_path,
         &config_watch::caveats(config_path),
+        config_watch::trusted_filesystem(config_path).as_deref(),
     ));
     findings
 }
@@ -82,18 +83,24 @@ pub async fn run(config: &Config, config_path: &Path) -> Vec<Finding> {
 /// file mounted on its own is a warning, not a failure - the config in force
 /// is fine, it is the next deploy that will not arrive. Nothing is said
 /// where nothing was checked: the mount table is read on Linux only.
-fn live_reload(config_path: &Path, caveats: &[Caveat]) -> Option<Finding> {
+/// `trusted` is the filesystem type when its notifications are trusted.
+fn live_reload(config_path: &Path, caveats: &[Caveat], trusted: Option<&str>) -> Option<Finding> {
     if caveats.is_empty() {
         return cfg!(target_os = "linux").then(|| {
-            Finding::new(
-                "reload",
-                Status::Ok,
-                format!(
+            let detail = match trusted {
+                Some(fstype) => format!(
+                    "{} is watched through its directory ({fstype}), and re-read every {} s \
+                     only while a watch is missing",
+                    config_path.display(),
+                    config_watch::RECHECK.as_secs()
+                ),
+                None => format!(
                     "{} is watched through its directory, and re-read every {} s",
                     config_path.display(),
                     config_watch::RECHECK.as_secs()
                 ),
-            )
+            };
+            Finding::new("reload", Status::Ok, detail)
         });
     }
     let detail: Vec<String> = caveats.iter().map(ToString::to_string).collect();
@@ -398,7 +405,7 @@ mod tests {
         let caveats = [Caveat::SingleFileMount {
             file: path.to_path_buf(),
         }];
-        let finding = live_reload(path, &caveats).expect("a finding");
+        let finding = live_reload(path, &caveats, None).expect("a finding");
         assert_eq!((finding.name, finding.status), ("reload", Status::Warn));
         assert!(
             finding.detail.contains("Mount the directory instead"),
@@ -406,9 +413,15 @@ mod tests {
             finding.detail
         );
 
-        let clean = live_reload(path, &[]);
+        let clean = live_reload(path, &[], None);
         assert_eq!(clean.is_some(), cfg!(target_os = "linux"));
         assert!(clean.is_none_or(|finding| finding.status == Status::Ok));
+
+        // On a trusted filesystem the re-read waits for a missing watch.
+        let local = live_reload(path, &[], Some("ext4"));
+        assert!(local.is_none_or(|finding| {
+            finding.status == Status::Ok && finding.detail.contains("(ext4)")
+        }));
     }
 
     #[test]
