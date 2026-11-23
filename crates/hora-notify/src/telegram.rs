@@ -108,6 +108,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         });
         assert!(symptom.contains("caused by DB"));
 
@@ -119,6 +120,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         });
         assert!(root.contains("impacts 2") && root.contains("API"));
 
@@ -166,6 +168,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         });
         assert!(down.contains("<b>&lt;API&gt;</b>"));
         assert!(down.contains("<code>a&lt;b</code>"));

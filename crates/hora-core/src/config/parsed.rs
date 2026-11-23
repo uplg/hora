@@ -88,6 +88,11 @@ impl<T> Compiled<T> {
     pub fn raw(&self) -> &str {
         &self.raw
     }
+
+    /// A value parsed elsewhere, with the text it came from.
+    pub(crate) fn from_parsed(raw: String, value: T) -> Self {
+        Self { raw, value }
+    }
 }
 
 impl<T: ParseField> Compiled<T> {

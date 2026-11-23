@@ -55,6 +55,16 @@ rate_limit_burst = 30
 # client_ip_header is set (every connection then comes from your proxy).
 # 0 turns it off. Read once at startup.
 # max_connections_per_ip = 256
+# While nobody reads the status summary (pages, /api/summary, /metrics, the
+# peers' poll), it is rebuilt every this many seconds (default 30; 5..3600).
+# A request after a quiet stretch still waits up to 2 s for a fresh build once
+# the summary is older than 10 s, so a longer pause saves database reads at
+# no cost to a page someone opens. Read on every rebuild.
+# summary_idle_refresh_secs = 300
+# SQLite: page cache per connection (KiB, default 4000; 64..1048576) and the
+# connections of both pools together (a third for the daemon, the rest for
+# the status pages; default 9 = 3 + 6; 1..64). Read once at startup.
+# database = { cache_kib = 2048, max_connections = 4 }
 # The operator token: required to view private monitors (those with
 # `public = false`) and to call the write endpoints (/api/silence,
 # /api/maintenance, /api/announce, /api/event, /api/monitors/{id}/alert). Sent as
@@ -149,6 +159,15 @@ rate_limit_burst = 30
 # type = "pushover"                # Pushover notifications
 # token = "${PUSHOVER_TOKEN}"      # application API token
 # user = "${PUSHOVER_USER}"        # user key (recipient)
+# priority = 2                     # optional; -2..2 for every message of this
+#                                  # channel instead of the event's urgency
+#                                  # (digests stay quiet)
+# recovery_priority = 0            # optional; -2..2 for recoveries
+#                                  # (default: priority)
+# sound = "siren"                  # optional; the sound played (default: user's)
+# retry = 60                       # required once either priority is 2, else
+# expire = 3600                    # refused: repeat every 60 s until
+#                                  # acknowledged, for an hour
 
 # Alerting and retention policy, independent of any channel.
 [alerts]
@@ -202,6 +221,13 @@ default_retention_days = 90
 # minutes; once they no longer all see it up, the real down alert goes out.
 # notify_unconfirmed = ["ntfy-low"]   # a quiet channel instead
 # notify_unconfirmed = []             # record only, notify nobody
+#
+# Still-down reminders: while a confirmed outage lasts, say so again every
+# this many seconds ("API is still DOWN (for 2 h)"), to the channels the down
+# went to, until it recovers. 0, the default, sends none; a monitor may set
+# its own, 0 included. None while muted (maintenance, silence), for a down
+# folded into its root cause's, or for an unconfirmed local-only one.
+# repeat_alert_secs = 3600
 
 # --- Weekly digest ----------------------------------------------------------
 # A recap of the last 7 days through the notification channels: "99.97 %
@@ -228,6 +254,16 @@ default_retention_days = 90
 # title = "DB upgrade"
 # start = "2026-06-08T00:00:00Z"   # RFC 3339, quoted
 # end   = "2026-06-08T02:00:00Z"
+# monitors = ["database"]
+#
+# A recurring window: from every run of a five-field cron on the wall clock
+# of `timezone` (IANA, default UTC; daylight saving time followed), for
+# duration_secs (at most a week). Not combined with start/end.
+# [[maintenance]]
+# title = "Weekly backup"
+# cron = "0 3 * * 0"
+# timezone = "America/New_York"
+# duration_secs = 7200
 # monitors = ["database"]
 #
 # A window can also be planned while the daemon runs, with no config edit:
@@ -294,6 +330,8 @@ depends_on = ["api"]
 #                         # number_regex. No other method: Hora sends no body.
 # fail_threshold = 1      # optional; consecutive failed checks before THIS monitor
 #                         # is down, instead of [alerts] fail_threshold. Any kind.
+# repeat_alert_secs = 900 # optional; still-down reminders every this many
+#                         # seconds, instead of [alerts]'s (0 = none)
 # degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)
 # slo_latency_ms = 500    # optional; the 24 h p95 is flagged met/breached against this
 # slo_uptime = 99.9        # optional; availability SLO (%). Shows the error budget
@@ -413,6 +451,9 @@ allow_unauthenticated = true     # accepts heartbeats from anyone: example only
 # schedule = "0 3 * * *"     # five-field cron, UTC (not local time: DST moves a
 #                            # local crontab by an hour); replaces the fixed-gap rule
 # grace_secs = 1800          # how late a scheduled ping may be (default 30 min)
+# kuma_push = true           # also accept Uptime Kuma's URL for producers set
+#                            # up for Kuma: GET/POST /api/push/<push_token>
+#                            # ?status=up|down&msg=...&ping=... (needs push_token)
 
 # Exec monitor: run an external check, monitoring-plugins convention (exit
 # 0 = up, 1 = degraded, anything else = down; first stdout line = message).

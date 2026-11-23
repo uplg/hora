@@ -139,6 +139,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         });
         // The headline is the title; the body does not say it again.
         assert_eq!(push.title, "API is DOWN");

@@ -40,6 +40,10 @@ pub(crate) struct RawMonitor {
     /// failure is already worth a page, more for one that is known to flap.
     #[serde(default)]
     pub(crate) fail_threshold: Option<u32>,
+    /// Remind of a confirmed outage every this many seconds while it lasts,
+    /// instead of `[alerts] repeat_alert_secs`; 0 turns reminders off.
+    #[serde(default)]
+    pub(crate) repeat_alert_secs: Option<u64>,
     #[serde(default)]
     pub(crate) degraded_over_ms: Option<i64>,
     /// Latency SLO objective in ms: the 24h p95 is flagged met/breached against it.
@@ -137,6 +141,13 @@ pub(crate) struct RawMonitor {
     /// secrets, so anyone who can reach `/api/push` can then forge them.
     #[serde(default)]
     pub(crate) allow_unauthenticated: Option<bool>,
+    /// Push monitor with a `push_token`: also accept Uptime Kuma's push URL,
+    /// `GET`/`POST /api/push/<push_token>?status=up&msg=…&ping=…`, where the
+    /// token itself is the path - for producers that were set up for Kuma
+    /// and cannot send a header. Off by default: a token in a URL ends up in
+    /// proxy logs and shell histories.
+    #[serde(default)]
+    pub(crate) kuma_push: Option<bool>,
     /// Push monitor only: a five-field cron expression (UTC) for when heartbeats
     /// are expected (e.g. `"0 3 * * *"` for a nightly job). The monitor goes
     /// down only when a scheduled run misses its `grace_secs`
@@ -253,6 +264,7 @@ impl Default for RawMonitor {
             expected_status: None,
             method: None,
             fail_threshold: None,
+            repeat_alert_secs: None,
             degraded_over_ms: None,
             slo_latency_ms: None,
             slo_uptime: None,
@@ -275,6 +287,7 @@ impl Default for RawMonitor {
             proxy: None,
             push_token: None,
             allow_unauthenticated: None,
+            kuma_push: None,
             schedule: None,
             grace_secs: None,
             check_cert: None,

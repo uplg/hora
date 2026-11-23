@@ -156,6 +156,10 @@ pub enum Event<'a> {
         /// Such a down is flagged; it goes to the monitor's channels, or to
         /// `alerts.notify_unconfirmed` when that is set.
         local_only: bool,
+        /// Set on a reminder of an outage that lasts (`repeat_alert_secs`):
+        /// how long it has been down, in seconds (0 when its start is not
+        /// known). `None` on the down itself.
+        down_for_secs: Option<u64>,
     },
     /// A monitor is up but degraded: slower than its `degraded_over_ms` budget.
     Degraded {
@@ -241,6 +245,7 @@ impl<'a> Event<'a> {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         }
     }
 }

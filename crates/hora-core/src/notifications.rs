@@ -136,11 +136,14 @@ fn build_channels(config: &Config, client: &Client) -> Vec<(String, Box<dyn Noti
                     url.as_ref().to_owned(),
                     token.as_ref().to_owned(),
                 )),
-                Channel::Pushover { token, user, .. } => Box::new(PushoverNotifier::new(
-                    client.clone(),
-                    token.as_ref().to_owned(),
-                    user.as_ref().to_owned(),
-                )),
+                Channel::Pushover { token, user, .. } => Box::new(
+                    PushoverNotifier::new(
+                        client.clone(),
+                        token.as_ref().to_owned(),
+                        user.as_ref().to_owned(),
+                    )
+                    .with_options(channel.pushover_options()),
+                ),
             };
             Some((channel.name().to_owned(), notifier))
         })

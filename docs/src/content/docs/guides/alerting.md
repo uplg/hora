@@ -21,7 +21,7 @@ each monitor to specific ones. Ten backends are built in:
 | `matrix` | `homeserver` + access `token` + `room_id` |
 | `ntfy` | topic `url`, optional `token` for private servers |
 | `gotify` | server `url` + application `token` |
-| `pushover` | application `token` + `user` key |
+| `pushover` | application `token` + `user` key; optional `priority`, `recovery_priority`, `sound`, `retry`, `expire` (below) |
 | `email` | SMTP: `host`, `port` (587 STARTTLS default, `implicit_tls` for 465), `from`, `to` |
 | `freemobile` | Free Mobile SMS: `user` + `pass` |
 | `webhook` | POSTs a structured JSON event (`{ event, monitor, … }`) to `url` (see below) |
@@ -50,6 +50,20 @@ On Gotify, ntfy and Pushover the notification's title is the event's headline
 ("API is DOWN") and its message the detail, so a phone's notification list
 names the monitor on every line.
 
+A Pushover channel may set its own `priority` (-2 to 2), which then applies
+to every message it sends - pushed alerts included - instead of the one the
+event's urgency (or a pushed alert's `severity`) picks, and a
+`sound` (`"none"` is silence). Recoveries are sent at `recovery_priority`
+(-2 to 2) when it is set, else at `priority` too; a digest stays quiet
+whatever the channel sets. Priority 2 (emergency)
+repeats until it is acknowledged and needs `retry` (seconds between repeats,
+at least 30) and `expire` (how long, at most 10800) as soon as `priority` or
+`recovery_priority` is 2; both are refused otherwise, and only messages
+actually sent as an emergency carry them. `priority = 2` with
+`recovery_priority = 0` pages for a down until acknowledged and announces
+the recovery once. Two channels with the same keys and different priorities
+route quiet and loud monitors apart.
+
 Every channel renders the same neutral message (`API is DOWN`,
 `API is slow (812 ms)`, `API recovered`) and only adds its own markup and
 priority, so the wording never drifts between channels. Email subjects read
@@ -74,7 +88,8 @@ that key is set (an empty list: nowhere). See
 `recovered`, `cert_expiring`, `cert_changed`, `cert_unreadable`,
 `domain_expiring`, `release_available`, `peer_link_degraded`,
 `budget_burn`, `digest`, `alert`) and `monitor`, plus the fields that event
-carries: `message`, `cause`, `impacted`, `vantage` and `change` on a down;
+carries: `message`, `cause`, `impacted`, `vantage` and `change` on a down,
+and `down_for_secs` on a [still-down reminder](#still-down-reminders);
 `local_only` (bool) on `down` and `recovered`; `days_left` and `secs_left`
 on expiry events (`days_left` is rounded down: 0 during the last day, -1
 once the expiry has passed; `secs_left` is the exact figure, negative once
@@ -176,6 +191,45 @@ that flaps entirely inside the window sends nothing at all.
 group_window_secs = 30   # 0 restores one-alert-per-monitor
 ```
 
+## Still-down reminders
+
+One alert, then quiet, is the default. For an outage that must not be
+forgotten, `repeat_alert_secs` sends the down again every so many seconds
+while it lasts, until it recovers:
+
+```
+API is still DOWN (for 2 h)
+```
+
+```toml
+[alerts]
+repeat_alert_secs = 3600 # every hour; 0 (the default) sends none
+
+[[monitors]]
+id = "payments"
+# ...
+repeat_alert_secs = 900  # its own cadence; 0 turns them off for this monitor
+```
+
+A reminder goes out with the first check after it is due, to the channels
+the down went to, with the same detail (the error, what it impacts). There
+is none:
+
+- while the monitor is muted by a [maintenance window](#maintenance-windows)
+  or a [silence](#ad-hoc-silences-deploy-hooks). One that came due goes out
+  when the mute ends, once, never a backlog;
+- for a monitor whose cause (a monitor it depends on) is down as well: the
+  cause's reminder speaks for it, naming what it takes down. Once the cause
+  is back, a monitor still down reminds for itself;
+- for a [local-only down](../peers/#local-only-downs) the peers have not
+  confirmed. Once they do, the reminders count from the down that then goes
+  out.
+
+The time of the last one is kept in the database: a restart neither sends
+a reminder early nor forgets one. Separately, and with or without
+reminders, a down that no channel took (every one failed) is sent again
+after 10 minutes: that is delivery, not a reminder.
+
 ## Maintenance windows
 
 Scheduled windows mute alerts for the affected monitors; checks keep being
@@ -192,6 +246,25 @@ monitors = ["database"]          # empty = all monitors
 
 `monitors` takes monitor ids and the `listen_id` of watched
 [peers](../peers/), so a planned reboot of another node stays quiet too.
+
+A window that comes back - a weekly backup, nightly updates - takes a
+`cron` instead of `start` and `end`, read on the wall clock of `timezone`
+(an IANA name, UTC by default, daylight saving time included), and lasts
+`duration_secs` (up to a week) from each run:
+
+```toml
+[[maintenance]]
+title = "Weekly backup"
+cron = "0 3 * * 0"               # Sundays 03:00 ...
+timezone = "America/New_York"    # ... New York time, summer and winter
+duration_secs = 7200             # 2 h from each run
+monitors = ["database"]
+```
+
+A wall-clock time that happens twice when the clocks go back is one run,
+at the first; one skipped when they go forward runs when the clocks jump.
+Like a fixed window, each run includes its last second. The page and the
+report list the runs like any other window.
 
 ### Planned at runtime
 

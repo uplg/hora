@@ -51,6 +51,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         slo_window_days: raw.slo_window_days,
         probe_retries: raw.probe_retries,
         fail_threshold: raw.fail_threshold,
+        repeat_alert_secs: raw.repeat_alert_secs,
         notify: raw.notify,
         check_cert: raw.check_cert,
         retention_days: raw.retention_days,
@@ -161,6 +162,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
                 }),
                 None => None,
             },
+            kuma_push: raw.kuma_push.unwrap_or(false),
         }),
         Kind::Exec => {
             let mut command = std::mem::take(&mut raw.command).into_iter();
@@ -605,6 +607,14 @@ fn validate_schedule_and_slo(monitor: &RawMonitor) -> anyhow::Result<()> {
             )
         })?;
     }
+    // The token is the credential of the Kuma URL: without one the monitor
+    // has nothing to be found by.
+    anyhow::ensure!(
+        monitor.kuma_push != Some(true)
+            || (monitor.kind == Kind::Push && monitor.push_token.is_some()),
+        "monitor {}: kuma_push requires a push monitor with a push_token",
+        monitor.id
+    );
     anyhow::ensure!(
         monitor.schedule.is_some() || monitor.grace_secs.is_none(),
         "monitor {}: grace_secs requires a schedule",

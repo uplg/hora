@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[server] summary_idle_refresh_secs`**: how long the status summary
+  waits before its next rebuild while nobody reads it (default 30 s, as
+  before; 5..3600). A longer pause saves database reads on an idle node;
+  the first request after a quiet stretch still waits for a fresh build.
+- **`[server] database = { cache_kib, max_connections }`** sizes the two
+  SQLite pools: the page cache of each connection, and the connections of
+  both pools together (a third for the daemon, the rest for the status
+  pages). Unset, as before: 4000 KiB for each of 3 + 6 connections. A
+  small container can trade page throughput for memory. `hora` commands
+  open the database with the same sizing.
+- **Recurring maintenance windows.** A `[[maintenance]]` window takes a
+  five-field `cron` instead of `start` and `end`, read on the wall clock of
+  `timezone` (an IANA name, UTC by default), and lasts `duration_secs` (up
+  to a week) from each run: a weekly backup no longer needs a window per
+  week. Daylight saving time is followed. Muting, the cards, the daily bars,
+  the report and the upcoming window on the page read each run like a fixed
+  window. The time zone database is compiled in, so the container image
+  needs none. Fixed windows are unchanged.
+- **Uptime Kuma's push URL, opt-in.** A push monitor with
+  `kuma_push = true` (and a `push_token`) is also reached the way Kuma's
+  producers call it: `GET` or `POST /api/push/<push_token>?status=&msg=&ping=`,
+  the token in place of the id, `{"ok":true}` back. A fractional `ping` is
+  rounded, an empty one ignored, a body never read. The header form keeps
+  working for the same monitor, and `?token=` on a write stays refused.
+  `hora import kuma` sets it on the push monitors it imports, so migrated
+  producers need no change. The token must be URL-safe, unique among
+  `kuma_push` monitors and never equal a monitor id or a peer's
+  `listen_id`. A push path that does not end in a known id is logged as
+  `/api/push/[redacted]`, so a token never reaches Hora's log.
+- **Pushover priority and sound per channel.** A `pushover` channel may set
+  `priority` (-2 to 2), used for every message it sends instead of the one
+  the event's urgency picks, `recovery_priority` (-2 to 2) for recoveries
+  (unset: `priority`), and `sound` (`"none"` is silence). A digest stays
+  quiet whatever the channel sets. Priority 2
+  (emergency) repeats until acknowledged and needs `retry` (at least 30 s)
+  and `expire` (at most 10800 s), as Pushover's API does, as soon as either
+  priority is 2; both are refused otherwise and are sent only with an
+  emergency. A channel without these keys sends exactly what it sent
+  before.
+- **"Still down" reminders.** `repeat_alert_secs` in `[alerts]`, or on a
+  monitor (which wins, 0 included), says so again every that many seconds
+  while a confirmed outage lasts: "API is still DOWN (for 2 h)", to the
+  channels the down went to, with the same detail, until it recovers. None
+  while the monitor is muted by a maintenance window or a silence (one that
+  came due goes out when the mute ends, never a backlog), for a monitor
+  whose cause is down as well (the cause's reminder names it), or for a
+  local-only down the peers have not confirmed. The time of the last one is kept in the database, so a restart
+  neither repeats nor forgets one. The webhook payload of a reminder is a
+  `down` with `down_for_secs`. Off by default; no migration.
 - **jq assertions on http monitors.** `jq` runs a jq expression (with
   [jaq](https://github.com/01mf02/jaq)) on a JSON body and compares its one
   result with `jq_expected` (default `true`) by `jq_operator` (`==`, `!=`,
@@ -19,6 +68,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   definitions and loops (`repeat`, `until`, `while`, `range`, `recurse(f)`)
   are refused, so that an expression always ends. No result, several, `null`, an array or an object
   fail the check. On the public page, a failure reads "content check failed".
+
+### Changed
+
+- **A healthy push monitor is looked at when a heartbeat comes and when its
+  deadline passes**, instead of every minute: the push endpoint wakes the
+  monitor's task once the heartbeat is stored, and a heartbeat that does not
+  come is down on the second its interval (or its schedule's grace) runs
+  out, instead of up to a minute later. Anything short of healthy - down,
+  degraded, recovered during a maintenance window, a burn-rate alert to
+  re-arm - is still looked at every minute (every `interval_secs` when
+  shorter), and a heartbeat is never looked at sooner than one such period
+  after the previous look, so a burst of `status=down` pushes confirms no
+  faster than before. No new config key.
 
 ## [0.12.3] - 2026-11-23
 
