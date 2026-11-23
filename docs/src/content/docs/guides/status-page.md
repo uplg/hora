@@ -184,7 +184,8 @@ For a live view that also acts (announce, silence), use
 
 - **Badges**: `/api/badge/{id}/status` and `/api/badge/{id}/uptime` are SVG
   badges for a README. See [Badges](../../reference/api/#badges).
-- **JSON**: `/api/summary` has everything the page shows.
+- **JSON**: `/api/summary` has everything the page shows, and the `version`
+  of the Hora that answers (the page's footer shows it too).
 - **Prometheus**: `/metrics`.
 
 ## Behind a reverse proxy

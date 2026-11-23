@@ -209,6 +209,7 @@ pub(crate) async fn build_summary(
         peers,
         channels: channel_views(channel_health),
         storage: storage_view(store).await,
+        version: hora_core::updates::RUNNING,
         events: events.into(),
         recent: Vec::new(),
         recent_pool: Vec::new(),
@@ -400,6 +401,7 @@ pub(crate) fn derive(built: &Built, config: &Config, visibility: &Visibility<'_>
         peers: operator.peers.clone(),
         channels: Vec::new(),
         storage: None,
+        version: hora_core::updates::RUNNING,
         events: Arc::from([]),
         recent: Vec::new(),
         recent_pool: Vec::new(),
@@ -665,6 +667,7 @@ pub(crate) fn for_group(summary: &Summary, config: &Config, group: &str) -> Opti
         peers: Vec::new(),
         channels: Vec::new(),
         storage: None,
+        version: hora_core::updates::RUNNING,
         events: Arc::clone(&summary.events),
         // From the whole pool, not from the page-wide cut: the newest
         // incidents overall may all belong to other groups.

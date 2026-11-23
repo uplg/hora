@@ -20,7 +20,7 @@ Editor...) at it.
 | `GET /incident/{id}` | One incident as a post-mortem page, with the raw markdown to copy. Visitors get the sanitized view; a private monitor's incident is a 404. |
 | `GET /timeline` | The unified chronology of the last 7 days: downs and recoveries, events, pushed alerts, announcements, silences, planned maintenance. Visitors see public incidents and announcements only. |
 | `GET /report/{YYYY-MM}` | Printable monthly SLA report; `?group=` scopes it to one group. Months older than the 12-month aggregate retention answer 400. |
-| `GET /api/summary` | All monitors: status, 24 h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents. |
+| `GET /api/summary` | All monitors: status, 24 h uptime (per-mille), p50/p95/p99 latency, cert days left, daily history; plus active incidents and the running `version`. |
 | `GET /api/monitors/{id}/latency?hours=24` | Latency samples `[{ "t", "latency_ms" }]` (404 if unknown). |
 | `POST /api/push/{id}` | Record a heartbeat for a push monitor or a watched peer. A peer's may carry the [maintenance windows it plans](../../guides/peers/#planned-maintenance-of-a-host), as a JSON body. |
 | `POST /api/monitors/{id}/alert` | Push an ad-hoc alert to a monitor's channels (a producer's own failure); records a timeline line, never changes the monitor's status. |
