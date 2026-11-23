@@ -39,6 +39,9 @@ pub(crate) struct Summary {
     /// The database's size (operator only; absent for every other audience).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) storage: Option<StorageView>,
+    /// The Hora that answers, `0.12.2`: for every audience, as in
+    /// `/api/openapi.json`.
+    pub(crate) version: &'static str,
     /// The last 24 h's event markers ("deploy api v2.3"), drawn on the
     /// monitor charts: an operator stream, empty for every other audience.
     #[serde(skip)]

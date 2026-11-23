@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The running version, on the page.** The footer reads "Watched over by
+  Hora 0.12.2", and `/api/summary` carries `version`: no more reading it
+  from `/api/openapi.json`
+  ([#41](https://github.com/uplg/hora/issues/41)).
+
 ### Changed
 
 - **An idle daemon no longer wakes up every minute to re-read its config**

@@ -361,6 +361,7 @@ details.why > summary .tag { font: var(--t-meta); color: var(--ink-muted); }
    like the type it replaces (2.62 em wide for 0.765 em of cap height) */
 .wm { display: block; flex: none; width: 2.62em; height: 0.765em; overflow: visible; }
 .watched .wm { font-size: 1.05rem; color: var(--ink); }
+.watched .ver { font-variant-numeric: tabular-nums; }
 
 /* --- the owl: pose = state; it moves only when the state changes, once --- */
 .owl { overflow: visible; flex: none; }

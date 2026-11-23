@@ -511,6 +511,35 @@ async fn only_the_operator_summary_carries_the_database_size() {
     assert!(json.get("storage").is_none(), "{json}");
 }
 
+/// The running version signs every page's footer and the summary, for
+/// every audience (the `OpenAPI` document tells it anyway).
+#[tokio::test]
+async fn the_running_version_is_shown_to_everyone() {
+    let app = test_app().await;
+    let running = hora_core::updates::RUNNING;
+    let footer = format!(r#"<span class="ver">{running}</span>"#);
+
+    for query in ["", "?token=0123456789abcdef"] {
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/summary{query}")))
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body_text(res).await).unwrap();
+        assert_eq!(json["version"], running, "{json}");
+
+        for path in ["/", "/history", "/timeline"] {
+            let res = app
+                .clone()
+                .oneshot(get(&format!("{path}{query}")))
+                .await
+                .unwrap();
+            let page = body_text(res).await;
+            assert!(page.contains(&footer), "{path}{query}: {page}");
+        }
+    }
+}
+
 /// Pages, JSON and the stylesheet are gzipped for a client that accepts it;
 /// fonts (already compressed) and a credentialed viewer's own responses are
 /// sent as they are.

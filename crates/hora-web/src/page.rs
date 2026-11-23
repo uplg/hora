@@ -203,6 +203,7 @@ fn site_footer(chrome: &Chrome) -> Markup {
                 img src={ "/assets/mark.svg?v=" (chrome.v) } alt="" width="22" height="22";
                 span { "Watched over by" }
                 svg.wm viewBox="0 0 89 26" role="img" aria-label="Hora" { use href="#w-hora" {} }
+                span.ver { (hora_core::updates::RUNNING) }
             }
         } }
     }
