@@ -144,6 +144,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    validate_tuning(config)?;
 
     for window in &config.maintenance {
         if let super::MaintenanceTime::Fixed { start, end } = &window.time {
@@ -235,6 +236,33 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         config.alerts.notify_unconfirmed.as_deref(),
         &channel_names,
     )?;
+    Ok(())
+}
+
+/// The server's tuning keys - the summary's idle pause, the database
+/// sizing - are checked for sense.
+fn validate_tuning(config: &Config) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config
+            .server
+            .summary_idle_refresh_secs
+            .is_none_or(|secs| (5..=3600).contains(&secs)),
+        "server.summary_idle_refresh_secs must be between 5 and 3600"
+    );
+    if let Some(database) = &config.server.database {
+        anyhow::ensure!(
+            database
+                .cache_kib
+                .is_none_or(|kib| (64..=1_048_576).contains(&kib)),
+            "server.database.cache_kib must be between 64 and 1048576"
+        );
+        anyhow::ensure!(
+            database
+                .max_connections
+                .is_none_or(|connections| (1..=64).contains(&connections)),
+            "server.database.max_connections must be between 1 and 64"
+        );
+    }
     Ok(())
 }
 

@@ -1,5 +1,7 @@
 //! The scheduler: one independent probing loop per monitor, plus alert state.
 
+mod push;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -12,7 +14,6 @@ use tracing::{error, info, warn};
 
 use crate::coalesce::{AlertMsg, DownAlert};
 use crate::config::{Config, Monitor, MonitorKind, NetworkProbe};
-use crate::heartbeat::{HeartbeatWatch, heartbeat_outcome_for};
 use crate::notifications::Notifiers;
 use crate::probe::Outcome;
 use crate::status::MonitorState;
@@ -227,10 +228,11 @@ pub fn spawn_monitor(
 /// toolchain: a monitor keeps its phase across restarts, reloads and upgrades.
 /// How often a monitor's loop runs. A probe runs at its interval. A push
 /// monitor's interval is something else - the longest silence it tolerates -
-/// and judging a stored heartbeat costs one indexed read, so its loop runs
-/// at least every minute: ticking once per interval let a nightly job's
-/// missed heartbeat go unnoticed for up to a whole interval after its
-/// deadline, and then wait `fail_threshold` more of them - days.
+/// so short of healthy it is looked at at least every minute: ticking once
+/// per interval let a nightly job's missed heartbeat go unnoticed for up to
+/// a whole interval after its deadline, and then wait `fail_threshold` more
+/// of them - days. A healthy one waits for its next heartbeat or its
+/// deadline instead (see `push`).
 fn evaluation_interval(monitor: &Monitor) -> std::time::Duration {
     match monitor.spec {
         MonitorKind::Push(_) => monitor.interval().min(PUSH_EVALUATION_MAX),
@@ -330,16 +332,26 @@ async fn run(
     alert_state.set(state);
     // Push monitors are judged from stored heartbeats against their cadence,
     // counted from the first heartbeat expected (persisted, so a monitor that
-    // never pinged still alerts across restarts).
-    let heartbeat = match &monitor.spec {
-        MonitorKind::Push(push) => Some(HeartbeatWatch::for_monitor(&store, &monitor, push).await),
+    // never pinged still alerts across restarts): when one comes, when it is
+    // late, or every `every` while it is not healthy.
+    let mut heartbeat = match &monitor.spec {
+        MonitorKind::Push(push) => {
+            Some(push::PushDriver::new(&store, &monitor, push, every, offset).await)
+        }
         _ => None,
     };
 
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = shutdown.changed() => break,
+        if let Some(push) = heartbeat.as_mut() {
+            tokio::select! {
+                () = push.wait(&last_tick) => {}
+                _ = shutdown.changed() => break,
+            }
+        } else {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = shutdown.changed() => break,
+            }
         }
         // Liveness beacon: record that this scheduler loop iterated, independent of
         // the probe outcome (a hung probe never reaches here, so the timestamp goes
@@ -357,7 +369,7 @@ async fn run(
             &store,
             &monitor,
             exec_dir.as_deref(),
-            heartbeat.as_ref(),
+            heartbeat.as_mut(),
         )
         .await
         else {
@@ -407,6 +419,9 @@ async fn run(
         }
 
         if muted {
+            if let Some(push) = heartbeat.as_mut() {
+                push.plan(&outcome, state == AlertState::default());
+            }
             // Checks are still recorded above; only alert transitions are skipped.
             continue;
         }
@@ -507,6 +522,9 @@ async fn run(
         // Written back right after the side effect, with no `.await` in
         // between: see [`AlertCell`].
         alert_state.set(state);
+        if let Some(push) = heartbeat.as_mut() {
+            push.plan(&outcome, state == AlertState::default());
+        }
     }
 }
 
@@ -810,22 +828,11 @@ async fn tick_outcome(
     store: &Store,
     monitor: &Monitor,
     exec_dir: Option<&std::path::Path>,
-    heartbeat: Option<&HeartbeatWatch>,
+    heartbeat: Option<&mut push::PushDriver>,
 ) -> Option<Outcome> {
     let outcome = match &monitor.spec {
-        MonitorKind::Push(_) => {
-            // Built with the task for every push monitor.
-            let watch = heartbeat?;
-            return heartbeat_outcome_for(
-                store,
-                &monitor.id,
-                &watch.cadence,
-                watch.expected_since,
-                i64::try_from(monitor.interval_secs).unwrap_or(i64::MAX),
-                jiff::Timestamp::now().as_second(),
-            )
-            .await;
-        }
+        // Built with the task for every push monitor.
+        MonitorKind::Push(_) => return heartbeat?.evaluate(store, monitor).await,
         MonitorKind::Exec(spec) => match exec_dir {
             Some(dir) => crate::exec::run(dir, monitor, spec)
                 .await
@@ -1708,6 +1715,11 @@ mod tests {
             next_alert(&mut alerts_rx, Duration::from_secs(5)).await,
             Some(("recovered", "job".to_owned()))
         );
+        // Still reporting: its deadline is looked at on the second, so the
+        // two-second interval would otherwise run out within the wait.
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
         assert_eq!(
             next_alert(&mut alerts_rx, Duration::from_millis(1500)).await,
             None
@@ -2127,5 +2139,179 @@ mod tests {
         fail("cache", 3..5).await;
         let (cause, _) = down_context(&config, &store, &monitor("edge")).await;
         assert_eq!(cause, Some(("cache".to_owned(), "Cache".to_owned())));
+    }
+
+    /// A healthy push monitor is looked at when a heartbeat comes, not at
+    /// every polling period: dozens of periods go by here, and its latest
+    /// heartbeat is read once at the start and once per heartbeat. The
+    /// liveness beacon ticks on meanwhile. The task's own loop, with a short
+    /// polling period, for a monitor whose alert state is at rest.
+    #[tokio::test]
+    async fn a_healthy_push_monitor_is_read_on_its_heartbeats_only() {
+        let store = Store::in_memory().await;
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "job"
+            name = "Job"
+            kind = "push"
+            allow_unauthenticated = true
+            interval_secs = 3600
+            "#,
+        )
+        .expect("config");
+        let monitor = config.monitors[0].clone();
+        let MonitorKind::Push(spec) = &monitor.spec else {
+            unreachable!("a push monitor")
+        };
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
+        let every = Duration::from_millis(20);
+        let mut driver = push::PushDriver::new(&store, &monitor, spec, every, Duration::ZERO).await;
+        let last_tick = AtomicU64::new(0);
+        let looks = async {
+            loop {
+                driver.wait(&last_tick).await;
+                let outcome = driver
+                    .evaluate(&store, &monitor)
+                    .await
+                    .expect("a heartbeat");
+                driver.plan(&outcome, true);
+            }
+        };
+        let heartbeats = async {
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                db::insert_push(&store, "job", CheckStatus::Up, None, None)
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        };
+        tokio::select! {
+            () = looks => {}
+            () = heartbeats => {}
+        }
+        // Polling would have read it at each of some 45 periods.
+        let reads = reads(&store);
+        assert!((2..=6).contains(&reads), "{reads} reads for 5 heartbeats");
+        assert!(last_tick.load(Ordering::Relaxed) > 0, "the beacon stopped");
+    }
+
+    fn reads(store: &Store) -> u64 {
+        store
+            .heartbeat_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A healthy job's missing heartbeat is down on its deadline, with no
+    /// look in between: nothing polls it, however short its interval.
+    #[tokio::test]
+    async fn a_missing_heartbeat_is_down_at_its_deadline_without_polling() {
+        let store = Store::in_memory().await;
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 1
+            [[monitors]]
+            id = "job"
+            name = "Job"
+            kind = "push"
+            allow_unauthenticated = true
+            interval_secs = 3
+            "#,
+        )
+        .expect("config");
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
+        let pushed = std::time::Instant::now();
+        let task = push_task(
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+        assert_eq!(
+            next_alert(&mut alerts_rx, Duration::from_secs(6)).await,
+            Some(("down", "job".to_owned()))
+        );
+        // Late strictly after three seconds, counted from the stored second.
+        let after = pushed.elapsed();
+        assert!(
+            after > Duration::from_secs(2) && after < Duration::from_secs(5),
+            "{after:?}"
+        );
+        // The first look, and the one at the deadline.
+        assert_eq!(reads(&store), 2);
+        task.abort();
+    }
+
+    /// A burst of `status=down` pushes is looked at once per polling
+    /// period (here the two-second interval), as polling did: it cannot
+    /// confirm a threshold of 2 in less.
+    #[tokio::test]
+    async fn a_burst_of_down_pushes_does_not_speed_up_the_threshold() {
+        let store = Store::in_memory().await;
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [alerts]
+            fail_threshold = 2
+            [[monitors]]
+            id = "job"
+            name = "Job"
+            kind = "push"
+            allow_unauthenticated = true
+            interval_secs = 2
+            "#,
+        )
+        .expect("config");
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
+        let task = push_task(
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+        // Healthy and looked at once (the first look is phase-shifted by
+        // under a second for this id), before its deadline.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(reads(&store), 1);
+        let began = std::time::Instant::now();
+        let alert = loop {
+            db::insert_push(&store, "job", CheckStatus::Down, None, Some("failed"))
+                .await
+                .unwrap();
+            if let Some(alert) = next_alert(&mut alerts_rx, Duration::from_millis(50)).await {
+                break alert;
+            }
+            assert!(began.elapsed() < Duration::from_secs(8), "never confirmed");
+        };
+        assert_eq!(alert, ("down", "job".to_owned()));
+        // Two looks a polling period apart, however many pushes came.
+        assert!(
+            began.elapsed() >= Duration::from_millis(1900),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(reads(&store), 3);
+        task.abort();
     }
 }

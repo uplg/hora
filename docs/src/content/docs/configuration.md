@@ -151,8 +151,8 @@ pause, so there is no window where nothing is watching.
 
 A few `[server]` settings are read once at startup and need a restart:
 `bind`, `allowed_origins`, the rate limit (`rate_limit_burst`,
-`rate_limit_refill_secs`), `client_ip_header`, `max_connections` and
-`max_connections_per_ip`.
+`rate_limit_refill_secs`), `client_ip_header`, `max_connections`,
+`max_connections_per_ip` and `database`.
 
 ### Connections and memory
 
@@ -183,6 +183,39 @@ one after three minutes.
 If the host itself runs out of descriptors or memory, checks are skipped
 rather than recorded as failures, and the node reports itself degraded on
 `/healthz` until they run again.
+
+### Summary refresh
+
+```toml
+[server]
+summary_idle_refresh_secs = 300
+```
+
+The status summary (pages, `/api/summary`, `/metrics`, the peers' poll) is
+rebuilt every 5 s while someone reads it and every
+`summary_idle_refresh_secs` (default 30, 5..3600) while nobody does. The
+first request after a quiet stretch still waits up to 2 s for a fresh build
+once the summary is older than 10 s, so a longer pause saves database
+reads without serving an old page. Read on every rebuild.
+
+### Database pools
+
+```toml
+[server]
+database = { cache_kib = 2048, max_connections = 4 }
+```
+
+Hora opens two connection pools on its database: its own (checks,
+heartbeats, alerts) and one for the status pages' reads, so a busy page
+never delays an alert. Each connection keeps a page cache of `cache_kib`
+(default 4000 KiB, 64..1048576). `max_connections` (1..64) is both pools
+together - not to be confused with the HTTP connections of
+`[server] max_connections`: a third, rounded up, for Hora's own, the rest
+for the pages', at least one each. Unset, that is 3 + 6 connections: at
+most 36 MiB of page cache. The example above is 2 + 2 connections at
+2 MiB, at most 8 MiB, for a small container; the pages then queue their
+parallel queries on two connections. What falls out of the cache is still
+in the OS page cache. Read at startup.
 
 As a guide, the image with 300 monitors and a year of history uses about
 18 MiB at rest and 45 MiB at the worst of a connection flood: a 64 MiB

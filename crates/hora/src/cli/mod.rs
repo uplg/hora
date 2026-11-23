@@ -234,7 +234,8 @@ pub(crate) async fn open_database_with(
         })?;
         let _ = WRITERS_LOCK.set(lock);
     }
-    let store = hora_core::db::connect(path)
+    let sizing = hora_core::db::PoolSizing::from_settings(config.server.database.as_ref());
+    let store = hora_core::db::connect_sized(path, sizing)
         .await
         .context("opening database")?;
     Ok((config, store))
