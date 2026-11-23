@@ -308,12 +308,13 @@ fn apply_reload(
             tx.send_modify(|current| {
                 let mut kept = Config::clone(current);
                 kept.issues.retain(|issue| issue.item != RELOAD_ISSUE);
+                // Not the error itself: a TOML error quotes the line it stops
+                // at, which may hold a token, and this goes out as an alert
+                // and onto the page. The log line above has it.
                 kept.issues.push(config::ConfigIssue::new(
                     RELOAD_ISSUE,
-                    format!(
-                        "cannot be loaded ({err:#}); the monitors keep running the configuration \
-                         loaded before"
-                    ),
+                    "cannot be loaded (the log says why); the monitors keep running the \
+                     configuration loaded before",
                 ));
                 *current = Arc::new(kept);
             });

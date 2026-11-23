@@ -288,8 +288,9 @@ What has no partial form:
 - **The file cannot be read, is not valid TOML, or a global section
   (`[server]`, `[alerts]`, `[health]`, `[[peers]]`, ...) is invalid.** At
   startup Hora does not exit (a container would restart it in a loop): it
-  answers every request with `503` and the reason, and reads the file again
-  every 5 s until it loads. On a live reload the monitors and channels keep
+  answers every request with `503` (the reason is in its log, not in the
+  answer, which anyone can read), and reads the file again every 5 s until it
+  loads. On a live reload the monitors and channels keep
   running as loaded before, and `hora-config` says the file cannot be loaded.
 - **No channel or no monitor could be loaded**, of the ones configured. Hora
   cannot alert anybody itself, so it withholds its external heartbeat

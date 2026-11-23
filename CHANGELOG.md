@@ -98,8 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left, the external heartbeat is withheld.
 - **A file that cannot be loaded at all no longer ends the process at
   startup** (a TOML syntax error, an invalid global section, an unreadable
-  file): Hora answers every request with `503` and the reason, and reads the
-  file again every 5 s until it loads. On a live reload the previous
+  file): Hora answers every request with `503`, logs the reason, and reads
+  the file again every 5 s until it loads. On a live reload the previous
   configuration keeps running, as before, and `hora-config` says so.
 - **`hora check` names every faulty entry**, not just the first, and still
   fails while there is one.

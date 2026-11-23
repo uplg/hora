@@ -158,12 +158,14 @@ const CONFIG_RETRY: Duration = Duration::from_secs(5);
 /// entries are left out and logged, the rest starts. A file that cannot be
 /// loaded at all (unreadable, TOML syntax, invalid global settings) does not
 /// end the process - a container would only restart it in a loop: Hora
-/// answers every request with 503 and the reason, and reads the file again
+/// answers every request with 503 (the reason is in the log, never in the
+/// answer: it quotes the file), and reads the file again
 /// every [`CONFIG_RETRY`] until it loads. `None`: shut down while waiting.
 async fn load_initial(path: &std::path::Path) -> Option<config::Config> {
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
-    let reason = Arc::new(std::sync::Mutex::new(String::new()));
+    // The reason last logged: said once, however often the file fails.
+    let mut logged = String::new();
     let mut error_page = None;
     loop {
         match config::load_lenient_from(path) {
@@ -174,25 +176,16 @@ async fn load_initial(path: &std::path::Path) -> Option<config::Config> {
             }
             Err(err) => {
                 let message = format!("{err:#}");
-                let changed = {
-                    let mut current = reason
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let changed = *current != message;
-                    if changed {
-                        current.clone_from(&message);
-                    }
-                    changed
-                };
-                if changed {
+                if logged != message {
                     tracing::error!(
                         "configuration cannot be loaded, reading it again every {} s until it \
                          loads: {message}",
                         CONFIG_RETRY.as_secs()
                     );
+                    logged = message;
                 }
                 if error_page.is_none() {
-                    error_page = serve_config_error(Arc::clone(&reason)).await;
+                    error_page = serve_config_error().await;
                 }
             }
         }
@@ -211,10 +204,10 @@ type ErrorPage = (
     tokio::sync::oneshot::Sender<()>,
 );
 
-/// While waiting for a configuration that loads: 503 and the reason on every
+/// While waiting for a configuration that loads: 503 on every
 /// path (so `/healthz` and the container health check fail visibly), bound
 /// where the daemon will listen (`HORA_BIND`, else its default).
-async fn serve_config_error(reason: Arc<std::sync::Mutex<String>>) -> Option<ErrorPage> {
+async fn serve_config_error() -> Option<ErrorPage> {
     let bind = std::env::var("HORA_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(listener) => listener,
@@ -223,10 +216,7 @@ async fn serve_config_error(reason: Arc<std::sync::Mutex<String>>) -> Option<Err
             return None;
         }
     };
-    let app = axum::Router::new().fallback(move || {
-        let reason = Arc::clone(&reason);
-        async move { config_error_answer(&reason) }
-    });
+    let app = axum::Router::new().fallback(|| async { config_error_answer() });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, app)
@@ -239,16 +229,15 @@ async fn serve_config_error(reason: Arc<std::sync::Mutex<String>>) -> Option<Err
 }
 
 /// The answer to every request while the configuration cannot be loaded.
-fn config_error_answer(reason: &std::sync::Mutex<String>) -> (axum::http::StatusCode, String) {
-    let reason = reason
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+/// It does not say why: a TOML error quotes the line it stops at, which may
+/// hold a token, and this page answers anyone who can reach the port. The
+/// reason is in the log.
+fn config_error_answer() -> (axum::http::StatusCode, String) {
     (
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         format!(
-            "Hora cannot load its configuration:\n\n{reason}\n\nIt reads the file again every \
-             {} s and starts as soon as it loads.\n",
+            "Hora cannot load its configuration; its log says why.\n\nIt reads the file \
+             again every {} s and starts as soon as it loads.\n",
             CONFIG_RETRY.as_secs()
         ),
     )
@@ -477,14 +466,14 @@ mod tests {
         assert!(!colours_logs(false, Some(OsStr::new(""))));
     }
 
-    /// While no configuration loads, every request is told why, with a 503
-    /// a health check sees.
+    /// While no configuration loads, every request gets a 503 a health check
+    /// sees, and is sent to the log for the reason: the answer itself never
+    /// quotes the file.
     #[test]
-    fn the_config_error_answer_is_a_503_with_the_reason() {
-        let reason = std::sync::Mutex::new("parsing config TOML: expected `]`".to_owned());
-        let (status, body) = super::config_error_answer(&reason);
+    fn the_config_error_answer_is_a_503_that_points_at_the_log() {
+        let (status, body) = super::config_error_answer();
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        assert!(body.contains("expected `]`"), "{body}");
+        assert!(body.contains("its log says why"), "{body}");
         assert!(body.contains("every 5 s"), "{body}");
     }
 
