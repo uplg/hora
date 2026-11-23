@@ -3240,7 +3240,6 @@ fn kuma_push_requires_unique_url_safe_tokens_that_are_no_id() {
         .is_err()
     );
 }
-}
 
 /// A Pushover channel's priority, sound and emergency settings, as the API
 /// takes them.
