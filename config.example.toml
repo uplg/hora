@@ -247,6 +247,16 @@ default_retention_days = 90
 # check = true               # false: never ask, no banner, no message
 # notify = ["ops-telegram"]  # optional; default: every channel; [] = banner only
 
+# --- The configuration monitor ---------------------------------------------
+# The built-in monitor `hora-config` is down while an entry of this file was
+# left out (invalid, or a duplicate), naming each one. It always exists; the
+# section is optional and every key in it too.
+# [config_monitor]
+# name = "Config valid"      # default: "Hora configuration"
+# group = "Watchdog"         # status-page group
+# notify = ["ops-telegram"]  # default: every channel
+# public = true              # default: false - on the operator's view only
+
 # --- Scheduled maintenance ------------------------------------------------
 # Alerts are muted for the affected monitors during the window (checks still
 # recorded; the card shows a "maintenance" badge). `monitors` empty = all.

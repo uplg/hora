@@ -21,6 +21,7 @@ documents every option; this page covers the mechanics.
 | `[[incidents]]` | Manual announcements shown as a status page banner |
 | `[[monitors]]` | The monitors themselves |
 | `[health]` / `[[peers]]` | Mutual surveillance ([dead-man's switch](../guides/peers/)) |
+| `[config_monitor]` | Name, group and routes of the built-in configuration monitor (optional) |
 
 ## Secrets stay in the environment
 
@@ -222,8 +223,9 @@ As a guide, the image with 300 monitors and a year of history uses about
 18 MiB at rest and 45 MiB at the worst of a connection flood: a 64 MiB
 limit is comfortable. A small fleet (ten monitors) stays under 20 MiB.
 
-A reload that fails validation is refused: Hora logs why and keeps running
-with the previous config.
+A reload is validated like a start: a faulty entry is left out and reported
+(see [below](#a-faulty-entry-does-not-stop-the-daemon)); a file that cannot be
+loaded at all is refused, and Hora keeps running with the previous config.
 
 ## Validation
 
@@ -237,8 +239,65 @@ pre-deploy hooks. What the loader only warns about is printed and counted
 ("config.toml is valid, 2 warnings."): a `${VAR}` that is not set and a
 channel disabled by an empty secret are among them. Validation is strict: inverted maintenance windows, cyclic
 `depends_on` graphs, private monitors without a viewer token, short or empty
-tokens and malformed cron schedules are all rejected at load, not discovered
-at 3 a.m.
+tokens and malformed cron schedules are all rejected, not discovered at
+3 a.m. `hora check` names every faulty entry, not just the first, and fails
+while there is one.
+
+### A faulty entry does not stop the daemon
+
+The daemon loads on top of the same validation, leniently: each monitor,
+channel and maintenance window is checked on its own, a faulty one is left
+out with an `ERROR` line naming it and the reason, and everything else
+starts - ten monitors with one typo start nine. What the removal leaves
+dangling is fixed rather than failed:
+
+| Problem | Result |
+| --- | --- |
+| Monitor invalid (type error, unknown key, bad value, duplicate id) | Not loaded; of duplicates the first one is |
+| Channel invalid (or a duplicate name) | Not loaded; routes to it are removed (one issue per channel) |
+| Maintenance window invalid | Not loaded |
+| `depends_on` names a monitor that is not loaded, or forms a cycle | That dependency is ignored |
+| `server.group_tokens` group without a loaded monitor | Token ignored |
+| `[digest]` invalid, logo unreadable | Digest not sent, no logo shown |
+
+A live reload follows the same rules: an entry edited into an invalid state
+stops until it is fixed. An older version of an entry you changed is never
+kept running.
+
+The built-in monitor **`hora-config`** ("Hora configuration") is down while
+anything was left out, with every issue in its message, and alerts like any
+monitor at the first failure. It recovers with the first load without
+issues. Hora alone feeds it: it takes no push, and no monitor (nor a peer's
+`listen_id`) may use the id. It is private by default: the operator's view
+shows it, a visitor's does not, and its alerts go out either way. The
+optional `[config_monitor]` section names, groups, routes and shows it:
+
+```toml
+[config_monitor]
+name = "Config valid"      # default: "Hora configuration"
+group = "Watchdog"         # status-page group; default: none
+notify = ["ops"]           # default: every channel
+public = true              # default: false (the operator's view only)
+```
+
+Its `notify` is checked like a monitor's: a channel that is not configured
+fails `hora check`, and in the daemon a route to a channel that is not
+loaded is removed and reported. A section the monitor cannot be built from
+is reported too, and the defaults are used.
+
+What has no partial form:
+
+- **The file cannot be read, is not valid TOML, or a global section
+  (`[server]`, `[alerts]`, `[health]`, `[[peers]]`, ...) is invalid.** At
+  startup Hora does not exit (a container would restart it in a loop): it
+  answers every request with `503` (the reason is in its log, not in the
+  answer, which anyone can read), and reads the file again every 5 s until it
+  loads. On a live reload the monitors and channels keep
+  running as loaded before, and `hora-config` says the file cannot be loaded.
+- **No channel or no monitor could be loaded**, of the ones configured. Hora
+  cannot alert anybody itself, so it withholds its external heartbeat
+  (`[health] heartbeat_url`, and the peers') and the dead-man service raises
+  the alarm.
 
 ### Bounds
 
