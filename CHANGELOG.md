@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-11-23
+
+The running version on the page, and an idle daemon that stays asleep where
+file notifications can be trusted. No migration, no new config key.
+
 ### Added
 
 - **The running version, on the page.** The footer reads "Watched over by
-  Hora 0.12.2", and `/api/summary` carries `version`: no more reading it
+  Hora 0.12.3", and `/api/summary` carries `version`: no more reading it
   from `/api/openapi.json`
   ([#41](https://github.com/uplg/hora/issues/41)).
 
@@ -25,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlay, a single-file mount, any platform without a readable mount table),
   comes back while a watch cannot be placed, and stays on once the
   notification backend reported an error. `hora doctor` names the filesystem
-  it trusts.
+  it trusts. By `@Jakob-Gliwa`
+  ([#43](https://github.com/uplg/hora/pull/43)).
 
 ## [0.12.2] - 2026-11-22
 
@@ -1979,7 +1985,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.12.3...HEAD
+[0.12.3]: https://github.com/uplg/hora/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/uplg/hora/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/uplg/hora/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/uplg/hora/compare/v0.11.5...v0.12.0
