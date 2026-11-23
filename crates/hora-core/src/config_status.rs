@@ -20,7 +20,7 @@ use crate::status::CheckStatus;
 const REFRESH: Duration = Duration::from_hours(6);
 /// The stored message is bounded (its count says how many issues there
 /// are); the log has every issue in full.
-const MAX_MESSAGE_CHARS: usize = 1000;
+pub(crate) const MAX_MESSAGE_CHARS: usize = 1000;
 
 /// Feed the configuration monitor until `shutdown`.
 #[must_use]

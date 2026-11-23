@@ -44,6 +44,7 @@ use crate::config_watch;
 use crate::mesh::peer::spawn_watch;
 use crate::notifications::{self, Notifiers};
 use crate::scheduler::{self, AlertCell};
+use crate::self_check::SelfHealth;
 
 /// A running task and the spec (monitor or peer) it was spawned for.
 struct Running<T> {
@@ -95,7 +96,7 @@ impl<T: PartialEq> Fleet<T> {
     /// for a loop that ended by mistake; a panic reaches it only in a build
     /// that unwinds (debug, tests) - in a release build it has already aborted
     /// the process (see the module docs).
-    async fn reap_dead(&mut self, what: &str) -> bool {
+    async fn reap_dead(&mut self, what: &str, health: &SelfHealth) -> bool {
         let dead: Vec<String> = self
             .running
             .iter()
@@ -112,6 +113,7 @@ impl<T: PartialEq> Fleet<T> {
                     .err()
                     .map_or_else(|| "it returned".to_owned(), |err| err.to_string());
                 error!(id = %id, "{what} task stopped unexpectedly ({cause}); restarting it");
+                health.task_died(what, id, jiff::Timestamp::now().as_second());
             }
         }
         !dead.is_empty()
@@ -146,6 +148,8 @@ struct Deps {
     /// gets a clone.
     alerts: mpsc::UnboundedSender<AlertMsg>,
     last_tick: Arc<AtomicU64>,
+    /// Reaped tasks and a dead coalescer, for the self-check and the heartbeat.
+    self_health: Arc<SelfHealth>,
 }
 
 /// A handle to the running supervisor: the live config and the hot-swappable
@@ -153,6 +157,8 @@ struct Deps {
 pub struct Handle {
     pub config: watch::Receiver<Arc<Config>>,
     pub notifier: Notifiers,
+    /// Reaped tasks and a dead coalescer, for the self-check and the heartbeat.
+    pub self_health: Arc<SelfHealth>,
     /// The supervise task; await it on shutdown to drain the monitor tasks.
     pub task: JoinHandle<()>,
 }
@@ -187,7 +193,9 @@ pub fn start(
         notifier: Arc::clone(&notifier),
         alerts: alerts_tx,
         last_tick,
+        self_health: Arc::default(),
     };
+    let self_health = Arc::clone(&deps.self_health);
     let supervisor_rx = rx.clone();
     let task = tokio::spawn(async move {
         supervise(tx, supervisor_rx, config_path, deps, coalescer, shutdown).await;
@@ -197,6 +205,7 @@ pub fn start(
     Handle {
         config: rx,
         notifier,
+        self_health,
         task,
     }
 }
@@ -229,14 +238,15 @@ async fn supervise(
                 if *shutdown.borrow() {
                     break;
                 }
-                if monitors.reap_dead("monitor").await {
+                if monitors.reap_dead("monitor", &deps.self_health).await {
                     reconcile(&mut monitors, &rx, &deps, &shutdown);
                 }
-                if peers.reap_dead("peer watch").await {
+                if peers.reap_dead("peer watch", &deps.self_health).await {
                     reconcile_peers(&mut peers, &rx, &deps, &shutdown);
                 }
                 if coalescer.is_finished() && !coalescer_dead_logged {
                     coalescer_dead_logged = true;
+                    deps.self_health.coalescer_died();
                     error!("the alert coalescer stopped: down and recovered alerts can no longer be delivered until Hora is restarted");
                 }
                 continue;
@@ -493,9 +503,11 @@ mod tests {
         fleet
             .running
             .insert("api".to_owned(), Running { spec: 1, task });
-        assert!(fleet.reap_dead("monitor").await);
+        let health = SelfHealth::default();
+        assert!(fleet.reap_dead("monitor", &health).await);
         assert!(fleet.running.is_empty());
-        assert!(!fleet.reap_dead("monitor").await);
+        assert!(!fleet.reap_dead("monitor", &health).await);
+        assert!(!health.cannot_deliver(), "a task is not the coalescer");
     }
 
     /// The docs of this module, of `AlertCell` and of the status refresher say

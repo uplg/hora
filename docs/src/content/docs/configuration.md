@@ -21,7 +21,7 @@ documents every option; this page covers the mechanics.
 | `[[incidents]]` | Manual announcements shown as a status page banner |
 | `[[monitors]]` | The monitors themselves |
 | `[health]` / `[[peers]]` | Mutual surveillance ([dead-man's switch](../guides/peers/)) |
-| `[config_monitor]` | Name, group and routes of the built-in configuration monitor (optional) |
+| `[config_monitor]` / `[self_monitor]` | Name, group and routes of the built-in [configuration](#a-faulty-entry-does-not-stop-the-daemon) and [self-check](../guides/peers/#the-self-check-monitor) monitors (optional) |
 
 ## Secrets stay in the environment
 
@@ -313,7 +313,7 @@ Values that cannot work are refused too:
 | `fail_threshold` on a monitor | at least 1 |
 | `retry_interval_secs` on a monitor | from 1 to its `interval_secs`; not on a push monitor |
 | A `[[maintenance]]` window | `start` and `end`, or a `cron` with `duration_secs` from 1 to a week (604800) and an IANA `timezone` |
-| `repeat_alert_secs`, in `[alerts]` or on a monitor | 0 (off) or at most 30 days (2592000) |
+| `repeat_alert_secs`, in `[alerts]`, on a monitor, in `[config_monitor]` or `[self_monitor]` | 0 (off) or at most 30 days (2592000) |
 | An IPv6 `tcp` target | bracketed: `[::1]:80`, not `::1:80` |
 | `dns_resolver` | an IP and a port (`8.8.8.8:53`, `[2620:fe::fe]:53`), not a hostname |
 | A broker's `url` | `mqtt://host:port` or `mqtts://host:port`, no credentials, path or query in it |

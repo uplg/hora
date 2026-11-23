@@ -26,6 +26,48 @@ The node POSTs to each peer's `ping_url` every `interval_secs` - but **only
 while it is locally healthy** (its scheduler is ticking and its database is
 writable). A hung process stops pinging, and the receiver notices.
 
+Healthy also means "able to alert": the heartbeat stops while checks are
+being skipped for lack of file descriptors or memory, while every
+notification channel is failing, while the alert coalescer (the task that
+delivers down and recovered alerts) has stopped, and when the config load
+kept no channel or no monitor of the ones configured.
+
+### The self-check monitor
+
+The heartbeat is all or nothing: it sees a node that cannot work or cannot
+alert at all, not one that mostly works. That part the built-in monitor
+**`hora-self`** reports, on the status page and as an alert. Every minute
+it looks for:
+
+- a monitor without a check for three of its periods (interval or timeout,
+  whichever is longer) plus a minute - push monitors, which have their own
+  deadline, and monitors added within that time excepted;
+- a monitor or peer-watch task the supervisor restarted within the last
+  hour;
+- a channel at `alerts.channel_fail_threshold` failures in a row, even while
+  others still deliver;
+- a stopped alert coalescer;
+- checks skipped for lack of file descriptors or memory (what `/healthz`
+  reports as `probes_ok: false`).
+
+While anything is found it is down with every finding in its message and
+alerts like any monitor; it recovers by itself. Its state is recorded when
+it changes and every 6 hours. Hora alone feeds it: `/api/push/hora-self` is
+refused, and no monitor (nor a peer's `listen_id`) may take the id. It is
+private by default: the operator's view shows it, a visitor's does not, and
+its alerts go out either way. The optional `[self_monitor]` section names,
+groups, routes and shows it, with the same keys and checks as
+[`[config_monitor]`](../../configuration/#a-faulty-entry-does-not-stop-the-daemon):
+
+```toml
+[self_monitor]
+name = "Self-check"        # default: "Hora self-check"
+group = "Watchdog"         # status-page group; default: none
+notify = ["ops"]           # default: every channel
+public = true              # default: false (the operator's view only)
+repeat_alert_secs = 86400  # "still down" reminders; default: [alerts], 0 = none
+```
+
 ## Peers: two independent halves
 
 Each `[[peers]]` entry can declare either or both directions:

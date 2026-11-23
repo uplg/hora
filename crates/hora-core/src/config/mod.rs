@@ -19,8 +19,8 @@ mod validate;
 
 pub use channel::Channel;
 pub use lenient::{
-    BuiltinMonitor, CONFIG_MONITOR_ID, ConfigIssue, load_lenient_from, parse_lenient,
-    parse_lenient_at,
+    BuiltinMonitor, CONFIG_MONITOR_ID, ConfigIssue, SELF_MONITOR_ID, load_lenient_from,
+    parse_lenient, parse_lenient_at,
 };
 pub use maintenance::{Maintenance, MaintenanceTime, Recurrence};
 pub use monitor::{
@@ -86,6 +86,9 @@ pub struct Config {
     /// lenient load; a strict one adds no built-in monitor).
     #[serde(default)]
     pub config_monitor: Option<BuiltinMonitor>,
+    /// The same for the built-in self-check monitor ([`SELF_MONITOR_ID`]).
+    #[serde(default)]
+    pub self_monitor: Option<BuiltinMonitor>,
     /// What a lenient load ([`parse_lenient`]) left out or changed, and what
     /// the daemon adds to it (a reload that failed). Empty after a strict
     /// load.

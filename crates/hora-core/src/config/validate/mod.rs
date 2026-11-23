@@ -246,29 +246,35 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         &channel_names,
     )?;
     validate_reserved_ids(config)?;
-    if let Some(builtin) = &config.config_monitor {
-        validate_routes("config_monitor", builtin.notify.as_deref(), &channel_names)?;
-        if let Some(secs) = builtin.repeat_alert_secs.filter(|secs| *secs > 0) {
-            validate_period("config_monitor.repeat_alert_secs", secs)?;
+    for (section, builtin) in [
+        ("config_monitor", &config.config_monitor),
+        ("self_monitor", &config.self_monitor),
+    ] {
+        if let Some(builtin) = builtin {
+            validate_routes(section, builtin.notify.as_deref(), &channel_names)?;
+            if let Some(secs) = builtin.repeat_alert_secs.filter(|secs| *secs > 0) {
+                validate_period(&format!("{section}.repeat_alert_secs"), secs)?;
+            }
         }
     }
     Ok(())
 }
 
-/// The built-in configuration monitor's id is its own: no configured
-/// monitor may take it, nor a watched peer's `listen_id` (both would be
-/// pushed to at `/api/push/{id}`, which refuses it).
+/// The built-in monitors' ids are their own: no configured monitor may take
+/// one, nor a watched peer's `listen_id` (both would be pushed to at
+/// `/api/push/{id}`, which refuses it).
 fn validate_reserved_ids(config: &Config) -> anyhow::Result<()> {
-    let reserved = super::CONFIG_MONITOR_ID;
-    if config.find_monitor(reserved).is_some() {
-        anyhow::bail!("monitor {reserved}: the id is reserved for a built-in monitor");
-    }
-    for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
-        anyhow::ensure!(
-            peer.listen_id() != reserved,
-            "peer {}: listen_id {reserved:?} is reserved for a built-in monitor",
-            peer.id
-        );
+    for reserved in [super::CONFIG_MONITOR_ID, super::SELF_MONITOR_ID] {
+        if config.find_monitor(reserved).is_some() {
+            anyhow::bail!("monitor {reserved}: the id is reserved for a built-in monitor");
+        }
+        for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
+            anyhow::ensure!(
+                peer.listen_id() != reserved,
+                "peer {}: listen_id {reserved:?} is reserved for a built-in monitor",
+                peer.id
+            );
+        }
     }
     Ok(())
 }

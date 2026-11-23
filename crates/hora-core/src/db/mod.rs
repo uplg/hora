@@ -72,8 +72,8 @@ pub use certs::{
 };
 pub use checks::{
     CheckSample, Heartbeat, Latest, check_samples, derive_status, derive_status_by_threshold,
-    insert_check, insert_heartbeat_miss, insert_push, last_check_time, last_heartbeat,
-    last_heartbeat_time, recent_checks,
+    insert_check, insert_heartbeat_miss, insert_push, last_check_time, last_check_times,
+    last_heartbeat, last_heartbeat_time, recent_checks,
 };
 pub use compact::{
     Compacted, DbLock, LockError, ObjectSize, SizeReport, StoreSize, apply_retention,

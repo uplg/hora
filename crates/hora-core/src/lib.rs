@@ -32,6 +32,7 @@ mod rdap;
 mod release;
 pub mod report;
 pub mod scheduler;
+pub mod self_check;
 pub mod silence;
 pub mod slo;
 pub mod status;

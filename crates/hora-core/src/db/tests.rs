@@ -135,6 +135,28 @@ async fn availability_latest_and_series() {
     assert_eq!(series[0].latency_ms, 10);
 }
 
+/// One statement answers for every requested monitor: the latest check of
+/// each, monitors with none (or not asked for) absent.
+#[tokio::test]
+async fn last_check_times_seek_each_requested_monitor() {
+    let store = Store::in_memory().await;
+    insert(&store, "a", 100, 1, None).await;
+    insert(&store, "a", 300, 0, None).await;
+    insert(&store, "b", 200, 1, None).await;
+    insert(&store, "other", 900, 1, None).await;
+
+    let times = last_check_times(&store, &["a", "b", "never"])
+        .await
+        .unwrap();
+    assert_eq!(times.len(), 2);
+    assert_eq!(times["a"], 300);
+    assert_eq!(times["b"], 200);
+    for (id, time) in &times {
+        assert_eq!(last_check_time(&store, id).await.unwrap(), Some(*time));
+    }
+    assert!(last_check_times(&store, &[]).await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn last_heartbeat_ignores_recorded_misses() {
     let store = Store::in_memory().await;
