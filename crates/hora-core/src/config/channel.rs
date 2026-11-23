@@ -83,8 +83,9 @@ pub enum Channel {
         /// Pushover user key (recipient).
         user: Secret,
         /// Pushover priority (-2 to 2) for every message of this channel
-        /// (recoveries: `recovery_priority`, if set), instead of one picked
-        /// by the event; 2 (emergency) needs `retry` and `expire`.
+        /// (recoveries: `recovery_priority`, if set; digests stay quiet),
+        /// instead of one picked by the event; 2 (emergency) needs `retry`
+        /// and `expire`.
         #[serde(default)]
         priority: Option<i8>,
         /// Pushover priority (-2 to 2) for recoveries; unset = `priority`.

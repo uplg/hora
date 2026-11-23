@@ -51,10 +51,11 @@ On Gotify, ntfy and Pushover the notification's title is the event's headline
 names the monitor on every line.
 
 A Pushover channel may set its own `priority` (-2 to 2), which then applies
-to every message it sends - digests and pushed alerts included - instead of
-the one the event's urgency (or a pushed alert's `severity`) picks, and a
+to every message it sends - pushed alerts included - instead of the one the
+event's urgency (or a pushed alert's `severity`) picks, and a
 `sound` (`"none"` is silence). Recoveries are sent at `recovery_priority`
-(-2 to 2) when it is set, else at `priority` too. Priority 2 (emergency)
+(-2 to 2) when it is set, else at `priority` too; a digest stays quiet
+whatever the channel sets. Priority 2 (emergency)
 repeats until it is acknowledged and needs `retry` (seconds between repeats,
 at least 30) and `expire` (how long, at most 10800) as soon as `priority` or
 `recovery_priority` is 2; both are refused otherwise, and only messages

@@ -151,6 +151,7 @@ rate_limit_burst = 30
 # user = "${PUSHOVER_USER}"        # user key (recipient)
 # priority = 2                     # optional; -2..2 for every message of this
 #                                  # channel instead of the event's urgency
+#                                  # (digests stay quiet)
 # recovery_priority = 0            # optional; -2..2 for recoveries
 #                                  # (default: priority)
 # sound = "siren"                  # optional; the sound played (default: user's)

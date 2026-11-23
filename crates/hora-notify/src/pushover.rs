@@ -21,8 +21,9 @@ pub struct PushoverNotifier {
 }
 
 /// A channel's own settings, on top of the event's urgency: Pushover's
-/// `priority` (-2 to 2) for every message the channel sends, a
-/// `recovery_priority` for recoveries (unset = `priority`), the `sound`
+/// `priority` (-2 to 2) for every message the channel sends but a digest
+/// (a report, never an alert: it stays quiet), a `recovery_priority` for
+/// recoveries (unset = `priority`), the `sound`
 /// the recipient hears, and for an emergency (priority 2) how often
 /// Pushover repeats it until acknowledged (`retry`, seconds) and for how
 /// long (`expire`). Unset, the urgency picks the priority and the
@@ -55,16 +56,18 @@ impl PushoverNotifier {
     }
 
     /// What is posted for `event`: the message, with the channel's
-    /// priority over the event's (its recovery priority for a recovery),
-    /// its sound, and the emergency settings when sent as an emergency.
+    /// priority over the event's (its recovery priority for a recovery,
+    /// none for a digest), its sound, and the emergency settings when sent
+    /// as an emergency.
     fn payload(&self, event: Event<'_>) -> serde_json::Value {
-        let recovery = matches!(event, Event::Recovered { .. });
-        let (title, message, priority) = Self::message(event);
-        let own = if recovery {
-            self.options.recovery_priority.or(self.options.priority)
-        } else {
-            self.options.priority
+        let own = match event {
+            // A report, not an alert: a channel that pages for a down does
+            // not page, let alone until acknowledged, for the weekly digest.
+            Event::Digest { .. } => None,
+            Event::Recovered { .. } => self.options.recovery_priority.or(self.options.priority),
+            _ => self.options.priority,
         };
+        let (title, message, priority) = Self::message(event);
         let priority = own.unwrap_or(priority);
         let mut payload = serde_json::json!({
             "token": self.token,
@@ -163,7 +166,7 @@ mod tests {
         assert_eq!(priority, -1);
     }
 
-    /// A channel's priority wins over the event's, for every event; its
+    /// A channel's priority wins over the event's, except for a digest; its
     /// sound and emergency settings ride along, and nothing unset does.
     #[test]
     fn channel_options_shape_the_payload() {
@@ -186,11 +189,19 @@ mod tests {
                 expire: Some(3600),
             },
         );
-        let payload = emergency.payload(digest());
+        let payload = emergency.payload(Event::CertChanged {
+            monitor: "API",
+            old_fingerprint: "aa",
+            new_fingerprint: "bb",
+        });
         assert_eq!(payload["priority"], 2);
         assert_eq!(payload["sound"], "siren");
         assert_eq!(payload["retry"], 60);
         assert_eq!(payload["expire"], 3600);
+        // The digest stays the quiet report it is, on a channel that pages.
+        let payload = emergency.payload(digest());
+        assert_eq!(payload["priority"], -1);
+        assert!(payload.get("retry").is_none() && payload.get("expire").is_none());
         let quiet = PushoverNotifier::new(Client::new(), "t".into(), "u".into()).with_options(
             PushoverOptions {
                 priority: Some(-1),
@@ -257,7 +268,7 @@ mod tests {
             period: "week",
             summary: "ok",
         };
-        assert_eq!(loud_up.payload(digest)["priority"], 1);
+        assert_eq!(loud_up.payload(digest)["priority"], -1);
         // Neither set: the urgency mapping, recoveries quiet.
         assert_eq!(channel(None, None).payload(recovered)["priority"], -1);
     }
