@@ -278,6 +278,7 @@ name = "Config valid"      # default: "Hora configuration"
 group = "Watchdog"         # status-page group; default: none
 notify = ["ops"]           # default: every channel
 public = true              # default: false (the operator's view only)
+repeat_alert_secs = 86400  # "still down" reminders; default: [alerts], 0 = none
 ```
 
 Its `notify` is checked like a monitor's: a channel that is not configured

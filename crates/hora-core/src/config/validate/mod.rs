@@ -248,6 +248,9 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     validate_reserved_ids(config)?;
     if let Some(builtin) = &config.config_monitor {
         validate_routes("config_monitor", builtin.notify.as_deref(), &channel_names)?;
+        if let Some(secs) = builtin.repeat_alert_secs.filter(|secs| *secs > 0) {
+            validate_period("config_monitor.repeat_alert_secs", secs)?;
+        }
     }
     Ok(())
 }
