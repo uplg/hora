@@ -136,6 +136,8 @@ const LIVENESS_CHECK: Duration = Duration::from_secs(30);
 /// liveness beacon.
 struct Deps {
     store: Store,
+    /// The shared MQTT connections, one per used broker.
+    mqtt: Arc<crate::mqtt::MqttHub>,
     client: Client,
     /// The monitors' probe clients, one per proxy (see [`ProbeClients`]).
     probe_clients: Mutex<ProbeClients>,
@@ -176,22 +178,22 @@ pub fn start(
         alerts_rx,
         shutdown.clone(),
     );
+    let (mqtt, mqtt_task) = crate::mqtt::spawn(rx.clone(), shutdown.clone());
     let deps = Deps {
         store,
+        mqtt,
         client,
         probe_clients: Mutex::default(),
         notifier: Arc::clone(&notifier),
         alerts: alerts_tx,
         last_tick,
     };
-    let task = tokio::spawn(supervise(
-        tx,
-        rx.clone(),
-        config_path,
-        deps,
-        coalescer,
-        shutdown,
-    ));
+    let supervisor_rx = rx.clone();
+    let task = tokio::spawn(async move {
+        supervise(tx, supervisor_rx, config_path, deps, coalescer, shutdown).await;
+        // The connections close on the same shutdown signal.
+        let _ = mqtt_task.await;
+    });
     Handle {
         config: rx,
         notifier,
@@ -249,6 +251,7 @@ async fn supervise(
         else {
             continue;
         };
+        log_issues(&config);
         reconcile(&mut monitors, &rx, &deps, &shutdown);
         reconcile_peers(&mut peers, &rx, &deps, &shutdown);
         info!(
@@ -269,14 +272,18 @@ async fn supervise(
     let _ = coalescer.await;
 }
 
-/// Parse the re-read config text and, if it loads, put it in force: the
+/// Parse the re-read config text leniently and put what loads in force: the
 /// channels are rebuilt (so credential and channel changes apply live, with
 /// the per-channel failure counters carried over so a channel that has been
-/// failing survives the reload) and the new config is published. A text that
-/// does not load - a syntax error, a value validation refuses - changes
-/// nothing: the node keeps watching and alerting on the config it had, and
-/// says so. What the loader only warns about (a `${VAR}` that is not set, a
-/// channel it leaves disabled) applies, with its warning.
+/// failing survives the reload) and the new config is published. An entry
+/// that does not validate is left out ([`config::parse_lenient`]) - never
+/// kept in an older version - and the configuration monitor reports it.
+/// A text with no partial form - a syntax error, invalid global settings -
+/// changes no monitor and no channel: the node keeps watching and alerting
+/// on the config it had, says so, and the configuration monitor is down
+/// until a text loads (`None` is returned, nothing is to reconcile). What
+/// the loader only warns about (a `${VAR}` that is not set, a channel it
+/// leaves disabled) applies, with its warning.
 fn apply_reload(
     raw: &str,
     config_path: &Path,
@@ -284,7 +291,7 @@ fn apply_reload(
     notifier: &Notifiers,
     client: &Client,
 ) -> Option<Arc<Config>> {
-    match config::parse_at(raw, config_path) {
+    match config::parse_lenient_at(raw, config_path) {
         Ok(config) => {
             let config = Arc::new(config);
             let health = notifier.load().health();
@@ -299,9 +306,38 @@ fn apply_reload(
             Some(config)
         }
         Err(err) => {
-            warn!("config reload failed, keeping current config: {err:#}");
+            error!("config reload failed, monitors keep their previous configuration: {err:#}");
+            tx.send_modify(|current| {
+                let mut kept = Config::clone(current);
+                kept.issues.retain(|issue| issue.item != RELOAD_ISSUE);
+                // Not the error itself: a TOML error quotes the line it stops
+                // at, which may hold a token, and this goes out as an alert
+                // and onto the page. The log line above has it.
+                kept.issues.push(config::ConfigIssue::new(
+                    RELOAD_ISSUE,
+                    "cannot be loaded (the log says why); the monitors keep running the \
+                     configuration loaded before",
+                ));
+                *current = Arc::new(kept);
+            });
             None
         }
+    }
+}
+
+/// The issue a config file that cannot be loaded at all stands under.
+const RELOAD_ISSUE: &str = "config file";
+
+/// One ERROR line per entry a lenient load left out or changed.
+pub fn log_issues(config: &Config) {
+    for issue in &config.issues {
+        error!("config: {issue}");
+    }
+    if config.cannot_alert {
+        error!(
+            "config: no notification channel or no monitor could be loaded - Hora cannot \
+             alert by itself and withholds its external heartbeat"
+        );
     }
 }
 
@@ -340,6 +376,7 @@ fn reconcile(
                 rx.clone(),
                 scheduler::MonitorDeps {
                     store: deps.store.clone(),
+                    mqtt: Arc::clone(&deps.mqtt),
                     client,
                     confirm_client: deps.client.clone(),
                     notifier: Arc::clone(&deps.notifier),
@@ -477,14 +514,16 @@ mod tests {
     const RELOAD_BEFORE: &str = "[page]\n[server]\n[[channels]]\nname = \"ops\"\n\
          type = \"discord\"\nwebhook_url = \"https://discord.example/hook\"\n";
 
-    /// A reload that does not load (here: a duplicate channel name, then text
-    /// that is not TOML) leaves the config and the channels in force exactly
-    /// as they were; the next good one applies.
+    /// A reload with a faulty entry (here: a duplicate channel name) applies
+    /// the rest and lists the entry; text that does not load at all (not
+    /// TOML) leaves the monitors and the channels exactly as they were and
+    /// says so through the configuration monitor; the next good one applies
+    /// and clears both.
     #[test]
     fn a_failed_reload_keeps_the_config_and_the_channels() {
         let path = Path::new("config.toml");
         let client = Client::new();
-        let initial = Arc::new(config::parse(RELOAD_BEFORE).unwrap());
+        let initial = Arc::new(config::parse_lenient(RELOAD_BEFORE).unwrap());
         let notifier = notifications::shared(&initial, &client);
         let (tx, rx) = watch::channel(Arc::clone(&initial));
 
@@ -492,17 +531,66 @@ mod tests {
             "{RELOAD_BEFORE}[[channels]]\nname = \"ops\"\ntype = \"slack\"\n\
              webhook_url = \"https://slack.example/hook\"\n"
         );
-        assert!(apply_reload(&broken, path, &tx, &notifier, &client).is_none());
-        assert!(Arc::ptr_eq(&rx.borrow(), &initial));
+        let applied = apply_reload(&broken, path, &tx, &notifier, &client).expect("loads in part");
         assert_eq!(notifier.load().names().collect::<Vec<_>>(), ["ops"]);
-        // Not TOML at all: the same.
+        assert_eq!(applied.channels.len(), 1);
+        assert_eq!(applied.issues.len(), 1, "{:?}", applied.issues);
+        assert!(applied.issues[0].reason.contains("duplicate channel name"));
+
+        // Not TOML at all: nothing changes but the issue.
         assert!(apply_reload("[page", path, &tx, &notifier, &client).is_none());
-        assert!(Arc::ptr_eq(&rx.borrow(), &initial));
+        let kept = rx.borrow().clone();
+        assert_eq!(kept.channels.len(), 1);
+        assert_eq!(kept.monitors, applied.monitors);
+        assert_eq!(
+            kept.issues.last().map(|issue| issue.item.as_str()),
+            Some(RELOAD_ISSUE)
+        );
+        assert_eq!(notifier.load().names().collect::<Vec<_>>(), ["ops"]);
+        // Said once however often it fails.
+        assert!(apply_reload("[page!", path, &tx, &notifier, &client).is_none());
+        let kept = rx.borrow().clone();
+        let failures = kept
+            .issues
+            .iter()
+            .filter(|i| i.item == RELOAD_ISSUE)
+            .count();
+        assert_eq!(failures, 1);
 
         let renamed = RELOAD_BEFORE.replace("\"ops\"", "\"oncall\"");
         let applied = apply_reload(&renamed, path, &tx, &notifier, &client).expect("loads");
         assert!(Arc::ptr_eq(&rx.borrow(), &applied));
         assert_eq!(notifier.load().names().collect::<Vec<_>>(), ["oncall"]);
+        assert_eq!(applied.issues, []);
+    }
+
+    /// An entry edited into an invalid state stops: no older version of it
+    /// keeps running, and the rest applies.
+    #[test]
+    fn a_monitor_edited_into_an_invalid_state_is_not_kept() {
+        let path = Path::new("config.toml");
+        let client = Client::new();
+        let monitors = "[[monitors]]\nid = \"a\"\nname = \"A\"\ntarget = \"https://a.example\"\n\
+             interval_secs = 60\n[[monitors]]\nid = \"b\"\nname = \"B\"\n\
+             target = \"https://b.example\"\ninterval_secs = 60\n";
+        let initial =
+            Arc::new(config::parse_lenient(&format!("{RELOAD_BEFORE}{monitors}")).unwrap());
+        let notifier = notifications::shared(&initial, &client);
+        let (tx, _rx) = watch::channel(Arc::clone(&initial));
+
+        let edited = format!(
+            "{RELOAD_BEFORE}{}",
+            monitors.replacen("interval_secs = 60", "interval_secs = 0", 1)
+        );
+        let applied = apply_reload(&edited, path, &tx, &notifier, &client).expect("loads in part");
+        assert!(
+            applied.find_monitor("a").is_none(),
+            "the old version of a is gone"
+        );
+        assert!(applied.find_monitor("b").is_some());
+        assert!(applied.find_monitor(config::CONFIG_MONITOR_ID).is_some());
+        assert_eq!(applied.issues.len(), 1, "{:?}", applied.issues);
+        assert_eq!(applied.issues[0].item, "monitor a");
     }
 
     /// A variable that is not set is no reason to refuse a reload: the config
@@ -512,7 +600,7 @@ mod tests {
     fn a_reload_with_an_unset_variable_applies_with_its_warnings() {
         let path = Path::new("config.toml");
         let client = Client::new();
-        let initial = Arc::new(config::parse(RELOAD_BEFORE).unwrap());
+        let initial = Arc::new(config::parse_lenient(RELOAD_BEFORE).unwrap());
         let notifier = notifications::shared(&initial, &client);
         let (tx, rx) = watch::channel(Arc::clone(&initial));
 

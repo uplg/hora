@@ -361,6 +361,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "bytestring"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca79160522b4aed4a69bab673bee78d3884d44240c78c96cb04b7557d532b4dc"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1455,6 +1464,7 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "jiff",
+ "mqtt-glide",
  "nix 0.31.3",
  "notify",
  "regex",
@@ -2277,6 +2287,30 @@ dependencies = [
  "smallvec",
  "tagptr",
  "uuid",
+]
+
+[[package]]
+name = "mqtt-glide"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d3f80cf2f77b31cd10bcbacbd8b86d0184772f691688d67c00b9d59be1821c5"
+dependencies = [
+ "arc-swap",
+ "bitflags 2.13.2",
+ "bytes",
+ "bytestring",
+ "futures-util",
+ "memchr",
+ "nonzero_ext",
+ "rustls",
+ "rustls-native-certs",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

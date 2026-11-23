@@ -164,6 +164,12 @@ impl ParseField for JqProgram {
 }
 
 impl JqProgram {
+    /// Whether both run the same compiled filter.
+    #[cfg(test)]
+    pub(crate) fn shares_filter_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Run the filter on a JSON body and return its one result as text: a
     /// string's content, a number or boolean as JSON writes it. Only the
     /// first two outputs are ever asked for, so a filter that streams many

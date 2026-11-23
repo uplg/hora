@@ -24,6 +24,16 @@ pub(crate) struct RawMonitor {
     /// hostname for DNS). Unused for push monitors.
     #[serde(default)]
     pub(crate) target: String,
+    /// MQTT monitor: the `[[brokers]]` entry its topic is read from.
+    #[serde(default)]
+    pub(crate) broker: Option<String>,
+    /// MQTT monitor: the topic (concrete, no `+`/`#` wildcards).
+    #[serde(default)]
+    pub(crate) topic: Option<String>,
+    /// MQTT monitor: the latest message must be at most this many seconds
+    /// old - for periodic topics; omit for retained state.
+    #[serde(default)]
+    pub(crate) max_age_secs: Option<u64>,
     pub(crate) interval_secs: u64,
     #[serde(default = "default_timeout")]
     pub(crate) timeout_secs: u64,
@@ -62,13 +72,14 @@ pub(crate) struct RawMonitor {
     /// only. Values are redacted in `Debug` (a header may carry a credential).
     #[serde(default)]
     pub(crate) headers: HashMap<String, Secret>,
-    /// HTTP body assertion: the response body must contain this text.
+    /// HTTP body (or MQTT payload) assertion: it must contain this text.
     #[serde(default)]
     pub(crate) keyword: Option<String>,
     /// Invert the `keyword` check: the body must *not* contain it.
     #[serde(default)]
     pub(crate) keyword_invert: bool,
-    /// HTTP body assertion: a `JSONPath` (RFC 9535) evaluated against a JSON response.
+    /// HTTP body (or MQTT payload) assertion: a `JSONPath` (RFC 9535)
+    /// evaluated against a JSON response.
     #[serde(default)]
     pub(crate) json_query: Option<Parsed<serde_json_path::JsonPath>>,
     /// Value the `json_query` result must equal (string compare).
@@ -106,6 +117,7 @@ pub(crate) struct RawMonitor {
     pub(crate) number_max: Option<i64>,
     /// Cap (KiB) on the response body read for keyword/JSON assertions
     /// (default 1024 = 1 MiB). Raise for large JSON endpoints, with care.
+    /// On an MQTT monitor: the largest payload its assertions accept.
     #[serde(default)]
     pub(crate) max_body_kb: Option<u32>,
     /// Immediate re-probes after a failed check before recording it (default
@@ -266,6 +278,9 @@ impl Default for RawMonitor {
             name: String::new(),
             kind: Kind::default(),
             target: String::new(),
+            broker: None,
+            topic: None,
+            max_age_secs: None,
             interval_secs: 60,
             timeout_secs: default_timeout(),
             expected_status: None,

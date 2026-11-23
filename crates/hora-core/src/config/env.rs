@@ -198,10 +198,10 @@ fn is_variable_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Reading back what a piece of code warned about, for the tests of the
+/// Reading back what a piece of code warned about: for the tests of the
 /// warnings that replace a silent default (an unset variable, a channel left
-/// without its secret).
-#[cfg(test)]
+/// without its secret), and for the lenient load, which validates a file more
+/// than once and says the warnings of the attempt that held only.
 pub(crate) mod capture {
     use std::sync::{Arc, Mutex};
 
@@ -212,7 +212,11 @@ pub(crate) mod capture {
     pub(crate) fn captured_warnings<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
         let collected = Arc::new(Mutex::new(Vec::new()));
         let result = tracing::subscriber::with_default(Capture(Arc::clone(&collected)), run);
-        let warnings = std::mem::take(&mut *collected.lock().expect("capture lock"));
+        let warnings = std::mem::take(
+            &mut *collected
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         (result, warnings)
     }
 
@@ -235,7 +239,10 @@ pub(crate) mod capture {
         fn event(&self, event: &tracing::Event<'_>) {
             let mut message = Message(String::new());
             event.record(&mut message);
-            self.0.lock().expect("capture lock").push(message.0);
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(message.0);
         }
 
         fn enter(&self, _span: &span::Id) {}

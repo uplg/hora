@@ -9,7 +9,9 @@ use reqwest::{Client, RequestBuilder};
 
 use super::snapshot::{MAX_SNAPSHOT_BODY_CHARS, render_snapshot, snapshot_head, snippet};
 use super::{Outcome, millis, over_threshold};
-use crate::config::{HttpSpec, JqAssert, JqOperator, JsonAssert, Monitor, NumberAssert, Secret};
+use crate::config::{
+    HttpSpec, JqAssert, JqOperator, JsonAssert, KeywordAssert, Monitor, NumberAssert, Secret,
+};
 use crate::http::{RedirectGuard, is_downgrade};
 
 pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) -> Outcome {
@@ -254,15 +256,10 @@ pub(super) fn same_origin(target: &reqwest::Url, url: &reqwest::Url) -> bool {
 /// fails returns its reason. `None` means every assertion passed.
 pub(super) fn check_assertions(spec: &HttpSpec, body: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(body);
-    if let Some(keyword) = &spec.keyword {
-        let found = text.contains(keyword.text.as_str());
-        if found == keyword.invert {
-            return Some(if keyword.invert {
-                format!("keyword present: {}", keyword.text)
-            } else {
-                format!("keyword missing: {}", keyword.text)
-            });
-        }
+    if let Some(keyword) = &spec.keyword
+        && let Some(failure) = check_keyword(keyword, &text)
+    {
+        return Some(failure);
     }
     if let Some(json) = &spec.json
         && let Some(failure) = check_json(json, &text)
@@ -312,8 +309,21 @@ pub(super) fn check_number(number: &NumberAssert, body: &str) -> Option<String> 
     None
 }
 
+/// The keyword assertion on a body (or an MQTT payload): its failure reason,
+/// or `None`.
+pub(crate) fn check_keyword(keyword: &KeywordAssert, text: &str) -> Option<String> {
+    let found = text.contains(keyword.text.as_str());
+    (found == keyword.invert).then(|| {
+        if keyword.invert {
+            format!("keyword present: {}", keyword.text)
+        } else {
+            format!("keyword missing: {}", keyword.text)
+        }
+    })
+}
+
 /// Evaluate a `JSONPath` against the body. Returns a failure reason or `None`.
-pub(super) fn check_json(json: &JsonAssert, body: &str) -> Option<String> {
+pub(crate) fn check_json(json: &JsonAssert, body: &str) -> Option<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return Some("response is not valid JSON".to_owned());
     };
@@ -334,7 +344,7 @@ pub(super) fn check_json(json: &JsonAssert, body: &str) -> Option<String> {
 /// expected value: as numbers when both sides read as numbers, as text
 /// otherwise; the ordering operators need numbers. Returns a failure reason
 /// or `None`.
-pub(super) fn check_jq(jq: &JqAssert, body: &[u8]) -> Option<String> {
+pub(crate) fn check_jq(jq: &JqAssert, body: &[u8]) -> Option<String> {
     let query = jq.query.raw();
     let result = match jq.query.evaluate(body) {
         Ok(result) => result,

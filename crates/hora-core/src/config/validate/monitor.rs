@@ -3,7 +3,7 @@
 
 use crate::config::monitor::{
     DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JqAssert, JsonAssert, KeywordAssert, Monitor,
-    MonitorKind, NumberAssert, PushSchedule, PushSpec, Starttls, TcpSpec,
+    MonitorKind, MqttSpec, NumberAssert, PushSchedule, PushSpec, Starttls, TcpSpec,
 };
 use crate::config::raw::RawMonitor;
 use crate::config::{
@@ -32,7 +32,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         domain.make_ascii_lowercase();
     }
     anyhow::ensure!(
-        matches!(raw.kind, Kind::Push | Kind::Exec) || !raw.target.is_empty(),
+        matches!(raw.kind, Kind::Push | Kind::Exec | Kind::Mqtt) || !raw.target.is_empty(),
         "monitor {}: target must not be empty",
         raw.id
     );
@@ -93,28 +93,9 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
                 None => HttpMethod::Get,
             },
             headers: std::mem::take(&mut raw.headers),
-            keyword: raw.keyword.take().map(|text| KeywordAssert {
-                text,
-                invert: raw.keyword_invert,
-            }),
-            json: match raw.json_query.take() {
-                Some(query) => Some(JsonAssert {
-                    query: query.compiled().ok_or_else(|| compiled("json_query"))?,
-                    expected: raw.json_expected.take(),
-                }),
-                None => None,
-            },
-            jq: match raw.jq.take() {
-                Some(query) => Some(JqAssert {
-                    query: query.compiled().ok_or_else(|| compiled("jq"))?,
-                    expected: raw.jq_expected.take(),
-                    operator: match &raw.jq_operator {
-                        Some(operator) => *operator.get().ok_or_else(|| compiled("jq_operator"))?,
-                        None => JqOperator::Eq,
-                    },
-                }),
-                None => None,
-            },
+            keyword: keyword_of(raw),
+            json: json_of(raw)?,
+            jq: jq_of(raw)?,
             number: match raw.number_regex.take() {
                 Some(regex) => Some(NumberAssert {
                     regex: regex.compiled().ok_or_else(|| compiled("number_regex"))?,
@@ -165,6 +146,15 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             },
             kuma_push: raw.kuma_push.unwrap_or(false),
         }),
+        Kind::Mqtt => MonitorKind::Mqtt(MqttSpec {
+            broker: raw.broker.take().ok_or_else(|| compiled("broker"))?,
+            topic: raw.topic.take().ok_or_else(|| compiled("topic"))?,
+            max_age_secs: raw.max_age_secs,
+            keyword: keyword_of(raw),
+            json: json_of(raw)?,
+            jq: jq_of(raw)?,
+            max_body_kb: raw.max_body_kb,
+        }),
         Kind::Exec => {
             let mut command = std::mem::take(&mut raw.command).into_iter();
             MonitorKind::Exec(ExecSpec {
@@ -173,6 +163,43 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             })
         }
     })
+}
+
+/// `keyword` / `keyword_invert`, moved out of the raw table.
+fn keyword_of(raw: &mut RawMonitor) -> Option<KeywordAssert> {
+    raw.keyword.take().map(|text| KeywordAssert {
+        text,
+        invert: raw.keyword_invert,
+    })
+}
+
+/// `json_query` / `json_expected`, moved out of the raw table.
+fn json_of(raw: &mut RawMonitor) -> anyhow::Result<Option<JsonAssert>> {
+    let Some(query) = raw.json_query.take() else {
+        return Ok(None);
+    };
+    Ok(Some(JsonAssert {
+        query: query
+            .compiled()
+            .ok_or_else(|| anyhow::anyhow!("monitor {}: invalid json_query", raw.id))?,
+        expected: raw.json_expected.take(),
+    }))
+}
+
+/// `jq` / `jq_expected` / `jq_operator`, moved out of the raw table.
+fn jq_of(raw: &mut RawMonitor) -> anyhow::Result<Option<JqAssert>> {
+    let Some(query) = raw.jq.take() else {
+        return Ok(None);
+    };
+    let invalid = |field: &str| anyhow::anyhow!("monitor {}: invalid {field}", raw.id);
+    Ok(Some(JqAssert {
+        query: query.compiled().ok_or_else(|| invalid("jq"))?,
+        expected: raw.jq_expected.take(),
+        operator: match &raw.jq_operator {
+            Some(operator) => *operator.get().ok_or_else(|| invalid("jq_operator"))?,
+            None => JqOperator::Eq,
+        },
+    }))
 }
 
 /// How late a scheduled push may arrive by default: 30 minutes.
@@ -189,7 +216,7 @@ fn warn_ignored(raw: &RawMonitor) {
         ("headers", raw.kind != Kind::Http && !raw.headers.is_empty()),
         (
             "max_body_kb",
-            raw.kind != Kind::Http && raw.max_body_kb.is_some(),
+            !matches!(raw.kind, Kind::Http | Kind::Mqtt) && raw.max_body_kb.is_some(),
         ),
         (
             "keyword_invert",
@@ -209,6 +236,33 @@ fn warn_ignored(raw: &RawMonitor) {
             );
         }
     }
+}
+
+/// MQTT monitors: a `broker` and a concrete `topic` instead of a `target`
+/// (the broker's existence is checked with the rest of the config); the
+/// MQTT-only keys are refused on every other kind.
+fn validate_mqtt_io(monitor: &RawMonitor) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        monitor.target.is_empty(),
+        "monitor {}: mqtt monitors take a `broker` and a `topic`, not a `target`",
+        monitor.id
+    );
+    anyhow::ensure!(
+        monitor.broker.as_ref().is_some_and(|name| !name.is_empty()),
+        "monitor {}: mqtt monitors need a `broker`",
+        monitor.id
+    );
+    anyhow::ensure!(
+        monitor.topic.as_ref().is_some_and(|topic| !topic.is_empty()
+            && topic.len() <= 65535
+            && !topic.contains(['#', '+', '\0'])),
+        "monitor {}: mqtt monitors need a concrete `topic` (no + or # wildcards)",
+        monitor.id
+    );
+    if let Some(secs) = monitor.max_age_secs {
+        super::validate_period(&format!("monitor {} max_age_secs", monitor.id), secs)?;
+    }
+    Ok(())
 }
 
 /// Exec monitors: a `command` argv instead of a `target`, with `command[0]`
@@ -268,9 +322,18 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
             );
         }
         Kind::Push => {}
+        Kind::Mqtt => validate_mqtt_io(monitor)?,
         Kind::Exec => validate_exec_io(monitor)?,
         Kind::Dns => validate_dns_io(monitor)?,
     }
+    anyhow::ensure!(
+        monitor.kind == Kind::Mqtt
+            || (monitor.broker.is_none()
+                && monitor.topic.is_none()
+                && monitor.max_age_secs.is_none()),
+        "monitor {}: broker/topic/max_age_secs require an mqtt monitor",
+        monitor.id
+    );
     anyhow::ensure!(
         monitor.kind == Kind::Exec || monitor.command.is_empty(),
         "monitor {}: `command` requires kind = \"exec\"",
@@ -317,15 +380,6 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
             monitor.id
         );
     }
-    anyhow::ensure!(
-        monitor.kind == Kind::Http
-            || (monitor.keyword.is_none()
-                && monitor.json_query.is_none()
-                && monitor.number_regex.is_none()
-                && monitor.proxy.is_none()),
-        "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
-        monitor.id
-    );
     validate_body_assertions(monitor)?;
     if let Some(proxy) = &monitor.proxy {
         reqwest::Proxy::all(proxy)
@@ -411,12 +465,30 @@ fn validate_http_request(monitor: &RawMonitor) -> anyhow::Result<()> {
 /// number bounds only make sense with a regex to extract the number and in
 /// min <= max order.
 fn validate_body_assertions(monitor: &RawMonitor) -> anyhow::Result<()> {
+    // keyword / json_query / jq read an MQTT payload as they read an http body.
+    if monitor.kind == Kind::Mqtt {
+        anyhow::ensure!(
+            monitor.number_regex.is_none() && monitor.proxy.is_none(),
+            "monitor {}: number_regex/proxy require an http monitor",
+            monitor.id
+        );
+    } else {
+        anyhow::ensure!(
+            monitor.kind == Kind::Http
+                || (monitor.keyword.is_none()
+                    && monitor.json_query.is_none()
+                    && monitor.number_regex.is_none()
+                    && monitor.proxy.is_none()),
+            "monitor {}: keyword/json_query/number_regex/proxy require an http monitor",
+            monitor.id
+        );
+    }
     if let Some(err) = monitor.json_query.as_ref().and_then(Parsed::error) {
         anyhow::bail!("monitor {}: invalid json_query: {err}", monitor.id);
     }
     anyhow::ensure!(
-        monitor.kind == Kind::Http || monitor.jq.is_none(),
-        "monitor {}: jq requires an http monitor",
+        matches!(monitor.kind, Kind::Http | Kind::Mqtt) || monitor.jq.is_none(),
+        "monitor {}: jq requires an http or mqtt monitor",
         monitor.id
     );
     if let Some(err) = monitor.jq.as_ref().and_then(Parsed::error) {

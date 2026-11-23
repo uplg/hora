@@ -21,7 +21,7 @@ use crate::error::AppError;
     security(("push_token" = [])),
     responses(
         (status = 200, description = "This vantage's verdict on the target", body = hora_core::mesh::wire::ProbeResponse),
-        (status = 400, description = "Exec and push monitors are not network probes"),
+        (status = 400, description = "Exec, push and mqtt monitors are not network probes"),
         (status = 401, description = "Unknown requesting peer, or missing/wrong X-Push-Token"),
         (status = 404, description = "The target is not in this node's configuration, or not checked the way the request's `check` says")
     )
@@ -36,12 +36,12 @@ pub(crate) async fn peer_probe(
     // be known here with a listen_token, and the header must match.
     authorize_peer(&config, &headers, &request.from)?;
 
-    // Exec and push monitors have no network target: every exec monitor has
+    // Exec, push and mqtt monitors have no network target: every exec monitor has
     // the same empty one, so matching it would run *some* local exec monitor
     // and answer its verdict (or a bogus "down") for another node's check.
-    if matches!(request.kind, Kind::Exec | Kind::Push) {
+    if matches!(request.kind, Kind::Exec | Kind::Push | Kind::Mqtt) {
         return Err(AppError::BadRequest(
-            "exec and push monitors are not network probes",
+            "exec, push and mqtt monitors are not network probes",
         ));
     }
 
@@ -91,7 +91,7 @@ pub(crate) async fn peer_probe(
     // The kind check above leaves only the kinds with a live probe.
     let Some(probe) = probe_monitor.spec.network() else {
         return Err(AppError::BadRequest(
-            "exec and push monitors are not network probes",
+            "exec, push and mqtt monitors are not network probes",
         ));
     };
     let outcome = match tokio::time::timeout(
@@ -168,7 +168,7 @@ pub(crate) async fn peer_monitors(
     let monitors = config
         .monitors
         .iter()
-        .filter(|monitor| !matches!(monitor.kind(), Kind::Push | Kind::Exec))
+        .filter(|monitor| !matches!(monitor.kind(), Kind::Push | Kind::Exec | Kind::Mqtt))
         .map(|monitor| {
             let view = views.get(monitor.id.as_str());
             hora_core::mesh::wire::PeerMonitor {

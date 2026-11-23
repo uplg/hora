@@ -58,6 +58,10 @@ pub enum FailureKind {
     NoHeartbeatYet,
     /// A push reported down or degraded; the detail is the job's own message.
     Pushed,
+    /// MQTT: no message on the topic yet, or the last one is older than
+    /// `max_age_secs`. A sample like any failed check (unlike a missed
+    /// heartbeat): the monitor's `fail_threshold` still applies.
+    NoMessage,
     /// The check could not run for lack of resources on this host (file
     /// descriptors, memory): nothing is known about the target. Never
     /// stored: the scheduler skips such a check (see `probe::local`).
@@ -67,7 +71,7 @@ pub enum FailureKind {
 }
 
 impl FailureKind {
-    pub(crate) const ALL: [Self; 27] = [
+    pub(crate) const ALL: [Self; 28] = [
         Self::Timeout,
         Self::ConnectionFailed,
         Self::ConnectionTimedOut,
@@ -93,6 +97,7 @@ impl FailureKind {
         Self::MissedSchedule,
         Self::NoHeartbeatYet,
         Self::Pushed,
+        Self::NoMessage,
         Self::Local,
         Self::Other,
     ];
@@ -138,6 +143,7 @@ impl FailureKind {
             Self::MissedSchedule => "missed_schedule",
             Self::NoHeartbeatYet => "no_heartbeat_yet",
             Self::Pushed => "pushed",
+            Self::NoMessage => "no_message",
             Self::Local => "local",
             Self::Other => "other",
         }
@@ -216,6 +222,7 @@ pub fn public_reason(kind: Option<FailureKind>, reason: &str) -> &str {
         // "(was due 03:00 UTC + 30 min grace)" reveals the job's schedule.
         FailureKind::MissedSchedule => "missed scheduled heartbeat",
         FailureKind::NoHeartbeatYet => "no heartbeat received yet",
+        FailureKind::NoMessage => "no recent message",
         // The job's message is free text from whoever holds the push token.
         FailureKind::Local => "check could not run",
         FailureKind::Pushed | FailureKind::Other => "check failed",
