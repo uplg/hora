@@ -475,7 +475,7 @@ fn maintenance_window_mutes_selected_monitor() {
         "#,
     );
     let parse_dt = |s: &str| s.parse::<jiff::Timestamp>().unwrap();
-    let schedule = crate::planned::Schedule::merged(&config, &[]);
+    let schedule = crate::planned::Schedule::merged(&config, &[], 0, i64::MAX);
     assert!(schedule.in_maintenance("db", parse_dt("2026-06-08T01:00:00Z")));
     // Outside the window, or a monitor not listed.
     assert!(!schedule.in_maintenance("db", parse_dt("2026-06-08T03:00:00Z")));
@@ -633,8 +633,11 @@ fn config_dates_keep_their_looser_spellings() {
             at = " 2026-06-07T12:00:00Z "
         "#,
     );
-    assert_eq!(config.maintenance[0].start.as_second(), 1_780_876_800);
-    assert_eq!(config.maintenance[0].end.as_second(), 1_780_884_000);
+    let MaintenanceTime::Fixed { start, end } = config.maintenance[0].time else {
+        panic!("a fixed window");
+    };
+    assert_eq!(start.as_second(), 1_780_876_800);
+    assert_eq!(end.as_second(), 1_780_884_000);
     assert_eq!(
         config.incidents[0].at.map(jiff::Timestamp::as_second),
         Some(1_780_833_600)

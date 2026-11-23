@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pages). Unset, as before: 4000 KiB for each of 3 + 6 connections. A
   small container can trade page throughput for memory. `hora` commands
   open the database with the same sizing.
+- **Recurring maintenance windows.** A `[[maintenance]]` window takes a
+  five-field `cron` instead of `start` and `end`, read on the wall clock of
+  `timezone` (an IANA name, UTC by default), and lasts `duration_secs` (up
+  to a week) from each run: a weekly backup no longer needs a window per
+  week. Daylight saving time is followed. Muting, the cards, the daily bars,
+  the report and the upcoming window on the page read each run like a fixed
+  window. The time zone database is compiled in, so the container image
+  needs none. Fixed windows are unchanged.
 
 ### Changed
 

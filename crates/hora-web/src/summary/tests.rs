@@ -344,7 +344,7 @@ fn maintenance_banners_name_only_what_the_audience_may_see() {
     .expect("config");
     let now = "2026-01-01T12:00:00Z".parse().expect("time");
 
-    let schedule = hora_core::planned::Schedule::merged(&config, &[]);
+    let schedule = hora_core::planned::Schedule::merged(&config, &[], 0, i64::MAX);
 
     // The operator's view: both windows, every monitor named.
     let operator = Audience::Operator;

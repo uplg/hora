@@ -103,6 +103,103 @@ impl croner::CronDateTime for CronTime {
     }
 }
 
+/// An instant in unix seconds read on the wall clock of `tz`, for a cron
+/// schedule written in local time (a recurring maintenance window): croner
+/// then follows daylight saving time - a wall clock time that happens twice
+/// is one occurrence (the first), one that never happens falls on the
+/// moment the clocks jump.
+#[derive(Debug, Clone)]
+pub struct LocalCronTime {
+    pub at: i64,
+    pub tz: jiff::tz::TimeZone,
+}
+
+impl LocalCronTime {
+    fn wall(&self) -> DateTime {
+        let at = at(self.at).unwrap_or(if self.at < 0 {
+            Timestamp::MIN
+        } else {
+            Timestamp::MAX
+        });
+        self.tz.to_datetime(at)
+    }
+}
+
+impl croner::CronDateTime for LocalCronTime {
+    fn to_civil(&self) -> croner::CivilDateTime {
+        let wall = self.wall();
+        let part = |value: i8| u32::from(value.unsigned_abs());
+        croner::CivilDateTime::new(
+            croner::CivilDate::from_parts_unchecked(
+                i32::from(wall.year()),
+                part(wall.month()),
+                part(wall.day()),
+            ),
+            croner::CivilTime::from_parts_unchecked(
+                part(wall.hour()),
+                part(wall.minute()),
+                part(wall.second()),
+            ),
+        )
+    }
+
+    fn civil_weekday(&self) -> croner::Weekday {
+        let from_sunday = self.wall().weekday().to_sunday_zero_offset();
+        croner::Weekday::from_days_from_sunday(u32::from(from_sunday.unsigned_abs()))
+    }
+
+    fn resolve_civil(
+        &self,
+        civil: croner::CivilDateTime,
+    ) -> Result<croner::Resolution<Self>, croner::errors::CronError> {
+        use jiff::tz::AmbiguousOffset;
+
+        let part = |value: u32| i8::try_from(value).ok();
+        let wall = (|| {
+            DateTime::new(
+                i16::try_from(civil.year()).ok()?,
+                part(civil.month())?,
+                part(civil.day())?,
+                part(civil.hour())?,
+                part(civil.minute())?,
+                part(civil.second())?,
+                0,
+            )
+            .ok()
+        })()
+        .ok_or(croner::errors::CronError::InvalidDate)?;
+        let ambiguous = self.tz.to_ambiguous_timestamp(wall);
+        let local = |at: Result<Timestamp, jiff::Error>| {
+            at.map(|at| Self {
+                at: at.as_second(),
+                tz: self.tz.clone(),
+            })
+            .map_err(|_| croner::errors::CronError::InvalidTime)
+        };
+        Ok(match ambiguous.offset() {
+            AmbiguousOffset::Unambiguous { .. } => {
+                croner::Resolution::Single(local(ambiguous.unambiguous())?)
+            }
+            AmbiguousOffset::Fold { .. } => croner::Resolution::Ambiguous(
+                local(ambiguous.earlier())?,
+                local(ambiguous.later())?,
+            ),
+            AmbiguousOffset::Gap { .. } => croner::Resolution::Gap,
+        })
+    }
+
+    fn checked_add_seconds(&self, seconds: i64) -> Option<Self> {
+        self.at.checked_add(seconds).map(|at| Self {
+            at,
+            tz: self.tz.clone(),
+        })
+    }
+
+    fn cmp_instant(&self, other: &Self) -> std::cmp::Ordering {
+        self.at.cmp(&other.at)
+    }
+}
+
 /// `at` moved by `seconds`, stopping at the ends of the supported range
 /// instead of overflowing.
 #[must_use]
