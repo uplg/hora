@@ -55,13 +55,22 @@ fn interleave(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
 
 /// Race the connects to `addrs` (see [`connect`]).
 pub(crate) async fn race(addrs: Vec<SocketAddr>) -> io::Result<TcpStream> {
+    race_with(addrs, TcpStream::connect).await
+}
+
+/// [`race`], with the connect to one address handed in: a test decides which
+/// address answers and which never does, whatever the network it runs on.
+async fn race_with<T, F>(addrs: Vec<SocketAddr>, connect: impl Fn(SocketAddr) -> F) -> io::Result<T>
+where
+    F: Future<Output = io::Result<T>>,
+{
     let mut queue = addrs.into_iter();
     let mut attempts = FuturesUnordered::new();
     let mut last_error = None;
     loop {
         if attempts.is_empty() {
             match queue.next() {
-                Some(addr) => attempts.push(TcpStream::connect(addr)),
+                Some(addr) => attempts.push(connect(addr)),
                 None => {
                     return Err(last_error.unwrap_or_else(|| {
                         io::Error::new(io::ErrorKind::NotFound, "no address for host")
@@ -77,13 +86,13 @@ pub(crate) async fn race(addrs: Vec<SocketAddr>) -> io::Result<TcpStream> {
                 Err(err) => {
                     last_error = Some(err);
                     if let Some(addr) = queue.next() {
-                        attempts.push(TcpStream::connect(addr));
+                        attempts.push(connect(addr));
                     }
                 }
             },
             () = tokio::time::sleep(ATTEMPT_DELAY), if more => {
                 if let Some(addr) = queue.next() {
-                    attempts.push(TcpStream::connect(addr));
+                    attempts.push(connect(addr));
                 }
             }
         }
@@ -116,15 +125,24 @@ mod tests {
         );
     }
 
-    /// A first address that never answers (TEST-NET-1 is not routed) does
-    /// not keep the probe from the working second one.
+    /// A first address that never answers does not keep the probe from the
+    /// working second one. The silence is played here, not left to the
+    /// network: TEST-NET-1 is not routed, but a network that intercepts
+    /// connections answers for it.
     #[tokio::test]
     async fn a_blackholed_address_does_not_eat_the_timeout() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let good = listener.local_addr().unwrap();
         let dead: SocketAddr = format!("192.0.2.1:{}", good.port()).parse().unwrap();
         let start = std::time::Instant::now();
-        let stream = tokio::time::timeout(Duration::from_secs(5), race(vec![dead, good]))
+        let connect = |addr: SocketAddr| async move {
+            if addr == dead {
+                std::future::pending::<()>().await;
+            }
+            TcpStream::connect(addr).await
+        };
+        let racing = race_with(vec![dead, good], connect);
+        let stream = tokio::time::timeout(Duration::from_secs(5), racing)
             .await
             .expect("well within the timeout")
             .expect("connected");
