@@ -330,6 +330,8 @@ depends_on = ["api"]
 #                         # number_regex. No other method: Hora sends no body.
 # fail_threshold = 1      # optional; consecutive failed checks before THIS monitor
 #                         # is down, instead of [alerts] fail_threshold. Any kind.
+# retry_interval_secs = 20 # optional; next check this soon after a failure that
+#                         # has not reached fail_threshold yet (not on push)
 # repeat_alert_secs = 900 # optional; still-down reminders every this many
 #                         # seconds, instead of [alerts]'s (0 = none)
 # degraded_over_ms = 800  # optional; up but slower than this = degraded (yellow)

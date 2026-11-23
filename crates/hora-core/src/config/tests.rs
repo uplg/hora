@@ -3356,3 +3356,20 @@ fn rejects_jq_on_tcp() {
     let error = load(src).unwrap_err().to_string();
     assert_eq!(error, "monitor db: jq requires an http monitor");
 }
+
+/// The re-check of an unconfirmed failure: unset by default, at most the
+/// interval, and refused on a push monitor, which has no check to repeat.
+#[test]
+fn retry_interval_secs_is_bounded_by_the_interval_and_refused_on_push() {
+    assert_eq!(parse(MINIMAL).monitors[0].retry_interval_secs, None);
+    let config = load(&format!("{MINIMAL}\nretry_interval_secs = 10")).unwrap();
+    assert_eq!(config.monitors[0].retry_interval_secs, Some(10));
+    assert!(load(&format!("{MINIMAL}\nretry_interval_secs = 60")).is_ok());
+    for bad in ["retry_interval_secs = 0", "retry_interval_secs = 61"] {
+        assert!(load(&format!("{MINIMAL}\n{bad}")).is_err(), "{bad}");
+    }
+    let push = "[page]\n[server]\n[[monitors]]\nid = 'job'\nname = 'Job'\nkind = 'push'\n\
+                allow_unauthenticated = true\ninterval_secs = 3600\nretry_interval_secs = 60\n";
+    let err = load(push).unwrap_err().to_string();
+    assert!(err.contains("does not apply to a push monitor"), "{err}");
+}

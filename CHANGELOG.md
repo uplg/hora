@@ -68,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   definitions and loops (`repeat`, `until`, `while`, `range`, `recurse(f)`)
   are refused, so that an expression always ends. No result, several, `null`, an array or an object
   fail the check. On the public page, a failure reads "content check failed".
+- **`retry_interval_secs` on a monitor**: after a failed check that has not
+  reached `fail_threshold` yet, the next one runs that many seconds later
+  instead of a whole `interval_secs` later, so an outage is confirmed
+  sooner while a healthy service is still checked at its interval. Back on
+  its interval (and its phase) once the outage is confirmed or a check
+  passes; never while muted. At most `interval_secs`, refused on a push
+  monitor. `hora import kuma` keeps Kuma's `retryInterval`.
 
 ### Changed
 

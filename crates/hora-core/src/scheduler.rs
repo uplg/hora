@@ -152,6 +152,13 @@ impl AlertState {
         self.level != AlertLevel::Healthy
     }
 
+    /// Whether a failed check, not counted yet, leaves the outage still to
+    /// confirm: the threshold not reached with it, and nothing announced.
+    fn confirming(&self, threshold: u32) -> bool {
+        (self.level != AlertLevel::Down || self.rearmed)
+            && self.consecutive_down.saturating_add(1) < threshold
+    }
+
     /// Whether the confirmed outage is due a reminder, `every` seconds after
     /// it was last sent. A local-only down is not reminded of: the peers
     /// are asked again instead, and it becomes a real down if they agree.
@@ -273,6 +280,53 @@ fn stagger_offset(id: &str, interval: std::time::Duration) -> std::time::Duratio
     span.mul_f64(f64::from(u32::try_from(fnv1a(id.as_bytes()) % 1000).unwrap_or(0)) / 1000.0)
 }
 
+/// When a probed monitor's checks run: every interval on its phase, or
+/// `retry_interval_secs` after a failure that has not confirmed the outage
+/// yet. Once the retries are over, the cadence goes back to the phase it
+/// started on, as if they had never happened.
+struct Cadence {
+    ticker: tokio::time::Interval,
+    start: tokio::time::Instant,
+    every: std::time::Duration,
+    retrying: bool,
+}
+
+impl Cadence {
+    fn new(start: tokio::time::Instant, every: std::time::Duration) -> Self {
+        let mut ticker = tokio::time::interval_at(start, every);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Self {
+            ticker,
+            start,
+            every,
+            retrying: false,
+        }
+    }
+
+    async fn tick(&mut self) {
+        self.ticker.tick().await;
+    }
+
+    /// The next check `retry` from now, or - `None` - on the phase again.
+    fn retry(&mut self, retry: Option<std::time::Duration>) {
+        match retry {
+            Some(retry) => {
+                self.ticker.reset_after(retry);
+                self.retrying = true;
+            }
+            None if self.retrying => {
+                let now = tokio::time::Instant::now();
+                let into = now.saturating_duration_since(self.start).as_nanos()
+                    % self.every.as_nanos().max(1);
+                let into = std::time::Duration::from_nanos(u64::try_from(into).unwrap_or(0));
+                self.ticker.reset_at(now + self.every.saturating_sub(into));
+                self.retrying = false;
+            }
+            None => {}
+        }
+    }
+}
+
 /// 64-bit FNV-1a: tiny, fixed forever, good enough to spread ids over phases.
 fn fnv1a(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -317,8 +371,7 @@ async fn run(
     // first check within a minute of starting.
     let every = evaluation_interval(&monitor);
     let offset = stagger_offset(&monitor.id, every);
-    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + offset, every);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut cadence = Cadence::new(tokio::time::Instant::now() + offset, every);
     // The exec directory comes from the environment (immutable for the process
     // lifetime), so one read outlives every config reload.
     let exec_dir = config.borrow().exec_dir.clone();
@@ -384,7 +437,7 @@ async fn run(
             }
         } else {
             tokio::select! {
-                _ = ticker.tick() => {}
+                () = cadence.tick() => {}
                 _ = shutdown.changed() => break,
             }
         }
@@ -431,6 +484,17 @@ async fn run(
         // /api/silence): both read fresh each tick, so they apply at once and
         // stop muting the moment they end.
         let muted = muted(&store, &config, &monitor.id).await;
+        // A failed check short of confirming the outage is run again sooner
+        // (`retry_interval_secs`), unless muted: nothing would be confirmed.
+        // A push monitor has no check to repeat.
+        if heartbeat.is_none() {
+            cadence.retry(
+                monitor
+                    .retry_interval_secs
+                    .filter(|_| !muted && !outcome.is_up() && state.confirming(threshold))
+                    .map(std::time::Duration::from_secs),
+            );
+        }
         // A heartbeat that did not come is confirmed as it is: its interval
         // (or its schedule's grace) was the tolerance. The anti-flap
         // threshold is for checks that ran and failed, and still applies to
@@ -1565,6 +1629,48 @@ mod tests {
         assert_eq!(quiet.lock().unwrap()[0]["local_only"], true);
     }
 
+    /// While retrying, a check runs `retry_interval_secs` after the last;
+    /// afterwards the monitor is back on the phase it started on.
+    #[tokio::test(start_paused = true)]
+    async fn retries_run_sooner_and_then_the_phase_comes_back() {
+        let start = tokio::time::Instant::now() + Duration::from_secs(7);
+        let mut cadence = Cadence::new(start, Duration::from_mins(5));
+        cadence.tick().await;
+        assert_eq!(tokio::time::Instant::now(), start);
+        cadence.retry(Some(Duration::from_secs(20)));
+        cadence.tick().await;
+        assert_eq!(start.elapsed(), Duration::from_secs(20));
+        cadence.retry(Some(Duration::from_secs(20)));
+        cadence.tick().await;
+        assert_eq!(start.elapsed(), Duration::from_secs(40));
+        // Recovered (or confirmed): the next check is where it would have
+        // been without the retries, and the interval goes on from there.
+        cadence.retry(None);
+        cadence.tick().await;
+        assert_eq!(start.elapsed(), Duration::from_mins(5));
+        cadence.retry(None);
+        cadence.tick().await;
+        assert_eq!(start.elapsed(), Duration::from_mins(10));
+    }
+
+    #[test]
+    fn only_a_failure_short_of_the_threshold_is_retried() {
+        let mut state = AlertState::default();
+        assert!(state.confirming(3), "first failure of three");
+        assert!(!state.observe_down(3));
+        assert!(state.confirming(3), "second failure of three");
+        assert!(!state.observe_down(3));
+        assert!(!state.confirming(3), "the third confirms: no retry");
+        assert!(state.observe_down(3));
+        state.level = AlertLevel::Down;
+        assert!(!state.confirming(3), "confirmed: back to the interval");
+        // A threshold of one confirms on the first failure.
+        assert!(!AlertState::default().confirming(1));
+        // An outage that ended while muted: a new one is confirmed again.
+        state.outage_ended();
+        assert!(state.confirming(3));
+    }
+
     #[test]
     fn stagger_hash_is_fixed_across_toolchains() {
         // The published FNV-1a 64 test vectors: phases never move on upgrade.
@@ -2134,6 +2240,50 @@ mod tests {
             "waited for the global: {failures:?}"
         );
         assert!(failures["lenient"] >= 3, "did not wait: {failures:?}");
+    }
+
+    /// A failure short of the threshold is checked again after
+    /// `retry_interval_secs`, not a whole interval later.
+    #[tokio::test]
+    async fn an_unconfirmed_failure_is_checked_again_after_the_retry_interval() {
+        let port = closed_port().await;
+        let config = crate::config::parse(&format!(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "retry"
+            name = "Retry"
+            kind = "tcp"
+            target = "127.0.0.1:{port}"
+            interval_secs = 3600
+            timeout_secs = 1
+            probe_retries = 0
+            fail_threshold = 3
+            retry_interval_secs = 1
+            "#
+        ))
+        .expect("config");
+        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
+        let store = Store::in_memory().await;
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (alerts_tx, mut alerts_rx) = mpsc::unbounded_channel();
+        let task = monitor_task(
+            0,
+            &store,
+            &config_rx,
+            &alerts_tx,
+            &AlertCell::default(),
+            &shutdown_rx,
+        );
+        // Three checks in seconds, not hours (the first is phase-shifted by
+        // at most a minute, see `stagger_offset`).
+        let offset = stagger_offset("retry", Duration::from_hours(1));
+        assert_eq!(
+            next_alert(&mut alerts_rx, offset + Duration::from_secs(10)).await,
+            Some(("down", "retry".to_owned()))
+        );
+        task.abort();
     }
 
     /// One tcp monitor on `port`, checked every second and confirmed down

@@ -51,6 +51,7 @@ pub(crate) fn monitor_from_raw(mut raw: RawMonitor) -> anyhow::Result<Monitor> {
         slo_window_days: raw.slo_window_days,
         probe_retries: raw.probe_retries,
         fail_threshold: raw.fail_threshold,
+        retry_interval_secs: raw.retry_interval_secs,
         repeat_alert_secs: raw.repeat_alert_secs,
         notify: raw.notify,
         check_cert: raw.check_cert,
@@ -302,6 +303,7 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         "monitor {}: fail_threshold must be at least 1",
         monitor.id
     );
+    validate_retry_interval(monitor)?;
     validate_http_request(monitor)?;
     // Catch header typos / CR-LF injection at load rather than at send time.
     for (name, value) in &monitor.headers {
@@ -346,6 +348,32 @@ fn validate_monitor_io(monitor: &RawMonitor) -> anyhow::Result<()> {
         validate_dual_stack(monitor)?;
     }
     validate_schedule_and_slo(monitor)?;
+    Ok(())
+}
+
+/// `retry_interval_secs`: a push monitor has no check to run again (its
+/// heartbeats are judged as they come), and a retry slower than the
+/// interval would only delay the confirmation it is for.
+fn validate_retry_interval(monitor: &RawMonitor) -> anyhow::Result<()> {
+    let Some(secs) = monitor.retry_interval_secs else {
+        return Ok(());
+    };
+    // A new key has no file to keep loading: said at once, not ignored.
+    anyhow::ensure!(
+        monitor.kind != Kind::Push,
+        "monitor {}: retry_interval_secs does not apply to a push monitor",
+        monitor.id
+    );
+    anyhow::ensure!(
+        secs > 0,
+        "monitor {}: retry_interval_secs must be > 0",
+        monitor.id
+    );
+    anyhow::ensure!(
+        secs <= monitor.interval_secs,
+        "monitor {}: retry_interval_secs must not exceed interval_secs",
+        monitor.id
+    );
     Ok(())
 }
 
