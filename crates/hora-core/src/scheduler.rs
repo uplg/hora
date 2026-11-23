@@ -2141,78 +2141,64 @@ mod tests {
         assert_eq!(cause, Some(("cache".to_owned(), "Cache".to_owned())));
     }
 
-    /// Thirty push monitors over a simulated hour, every job healthy: ten
-    /// report every 5 min, ten hourly, ten nightly ones not at all within
-    /// the hour. Returns the pushes and the latest-heartbeat reads the tasks
-    /// made for them.
-    async fn healthy_push_hour() -> (u64, u64) {
-        use std::fmt::Write as _;
-        let mut toml = String::from("[page]\n[server]\n");
-        let fleet: [(u64, Option<u64>); 3] =
-            [(600, Some(300)), (7_200, Some(3_600)), (93_600, None)];
-        let mut pushes = Vec::new();
-        for (interval, every) in fleet {
-            for n in 0..10 {
-                let id = format!("p{interval}-{n}");
-                let _ = write!(
-                    toml,
-                    "[[monitors]]\nid = \"{id}\"\nname = \"{id}\"\nkind = \"push\"\n\
-                     interval_secs = {interval}\npush_token = \"0123456789abcdef\"\n"
-                );
-                pushes.push((id, every));
-            }
-        }
-        let config = crate::config::parse(&toml).expect("config");
-        let store = Store::in_memory().await;
-        for (id, _) in &pushes {
-            db::insert_push(&store, id, CheckStatus::Up, None, None)
-                .await
-                .unwrap();
-        }
-        let (_config_tx, config_rx) = watch::channel(Arc::new(config));
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (alerts_tx, _alerts_rx) = mpsc::unbounded_channel();
-        // Opened first: the pool's own timeouts must not run on the paused clock.
-        tokio::time::pause();
-        let tasks: Vec<_> = (0..pushes.len())
-            .map(|index| {
-                monitor_task(
-                    index,
-                    &store,
-                    &config_rx,
-                    &alerts_tx,
-                    &AlertCell::default(),
-                    &shutdown_rx,
-                )
-            })
-            .collect();
-        let mut heartbeats = 0_u64;
-        for second in 1..=3_600_u64 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            for (id, every) in &pushes {
-                if every.is_some_and(|every| second % every == 0) {
-                    db::insert_push(&store, id, CheckStatus::Up, None, None)
-                        .await
-                        .unwrap();
-                    heartbeats += 1;
-                }
-            }
-        }
-        tokio::time::resume();
-        for task in tasks {
-            task.abort();
-        }
-        (heartbeats, reads(&store))
-    }
-
-    /// Looking every minute read each push monitor's latest heartbeat 60
-    /// times an hour, 1 800 reads for 130 heartbeats. Healthy ones are read
-    /// on their heartbeats now.
+    /// A healthy push monitor is looked at when a heartbeat comes, not at
+    /// every polling period: dozens of periods go by here, and its latest
+    /// heartbeat is read once at the start and once per heartbeat. The
+    /// liveness beacon ticks on meanwhile. The task's own loop, with a short
+    /// polling period, for a monitor whose alert state is at rest.
     #[tokio::test]
-    async fn an_hour_of_healthy_push_monitors_reads_only_what_came() {
-        let (pushed, reads) = healthy_push_hour().await;
-        // One look at start per monitor, one per heartbeat.
-        assert!(reads <= pushed + 30, "{reads} reads for {pushed} pushes");
+    async fn a_healthy_push_monitor_is_read_on_its_heartbeats_only() {
+        let store = Store::in_memory().await;
+        let config = crate::config::parse(
+            r#"
+            [page]
+            [server]
+            [[monitors]]
+            id = "job"
+            name = "Job"
+            kind = "push"
+            allow_unauthenticated = true
+            interval_secs = 3600
+            "#,
+        )
+        .expect("config");
+        let monitor = config.monitors[0].clone();
+        let MonitorKind::Push(spec) = &monitor.spec else {
+            unreachable!("a push monitor")
+        };
+        db::insert_push(&store, "job", CheckStatus::Up, None, None)
+            .await
+            .unwrap();
+        let every = Duration::from_millis(20);
+        let mut driver = push::PushDriver::new(&store, &monitor, spec, every, Duration::ZERO).await;
+        let last_tick = AtomicU64::new(0);
+        let looks = async {
+            loop {
+                driver.wait(&last_tick).await;
+                let outcome = driver
+                    .evaluate(&store, &monitor)
+                    .await
+                    .expect("a heartbeat");
+                driver.plan(&outcome, true);
+            }
+        };
+        let heartbeats = async {
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                db::insert_push(&store, "job", CheckStatus::Up, None, None)
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        };
+        tokio::select! {
+            () = looks => {}
+            () = heartbeats => {}
+        }
+        // Polling would have read it at each of some 45 periods.
+        let reads = reads(&store);
+        assert!((2..=6).contains(&reads), "{reads} reads for 5 heartbeats");
+        assert!(last_tick.load(Ordering::Relaxed) > 0, "the beacon stopped");
     }
 
     fn reads(store: &Store) -> u64 {
