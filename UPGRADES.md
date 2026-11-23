@@ -4,6 +4,13 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.12.2 → 0.12.3
+
+No migration and no new config key. Pull the new image and recreate the
+container. On Linux, with the config on a local filesystem, Hora no longer
+re-reads it every 60 s: a saved change still applies about a second later,
+and `hora doctor` says which case applies to your setup.
+
 ## 0.12.1 → 0.12.2
 
 No migration and no new config key. Pull the new image and recreate the
