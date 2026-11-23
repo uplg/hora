@@ -120,7 +120,9 @@ fn validate_routes(
     Ok(())
 }
 
-pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
+/// The server's tokens: each one strong enough, the read-only one apart from
+/// the operator's, and a group token for a group that exists.
+fn validate_tokens(config: &Config) -> anyhow::Result<()> {
     validate_token("server.auth_token", config.server.auth_token.as_ref())?;
     validate_token("server.view_token", config.server.view_token.as_ref())?;
     // The same secret in both would make the "read-only" token the operator's:
@@ -143,6 +145,11 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
             "server.group_tokens: no monitor belongs to group {group:?}"
         );
     }
+    Ok(())
+}
+
+pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
+    validate_tokens(config)?;
     let channel_names = validate_channels(config)?;
     crate::mqtt::validate(config)?;
     validate_tuning(config)?;
