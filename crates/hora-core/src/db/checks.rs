@@ -200,7 +200,10 @@ pub(super) async fn insert_push_at(
             source: CheckSource::Push,
         },
     )
-    .await
+    .await?;
+    // Only once it is stored, so the woken task reads it.
+    store.push_updates.notify(monitor_id);
+    Ok(())
 }
 
 /// The last `limit` checks for a monitor, newest first. One query serves both the
@@ -297,6 +300,10 @@ pub struct Heartbeat {
 ///
 /// Returns an error if the query fails.
 pub async fn last_heartbeat(store: &Store, monitor_id: &str) -> sqlx::Result<Option<Heartbeat>> {
+    #[cfg(test)]
+    store
+        .heartbeat_reads
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     sqlx::query_as::<_, Heartbeat>(
         "SELECT time, status, latency_ms, error FROM checks \
          WHERE monitor_id = ? AND (source = 'push' OR (source = 'probe' AND status != 0)) \
