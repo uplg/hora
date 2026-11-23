@@ -20,6 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   small container can trade page throughput for memory. `hora` commands
   open the database with the same sizing.
 
+### Changed
+
+- **A healthy push monitor is looked at when a heartbeat comes and when its
+  deadline passes**, instead of every minute: the push endpoint wakes the
+  monitor's task once the heartbeat is stored, and a heartbeat that does not
+  come is down on the second its interval (or its schedule's grace) runs
+  out, instead of up to a minute later. Anything short of healthy - down,
+  degraded, recovered during a maintenance window, a burn-rate alert to
+  re-arm - is still looked at every minute (every `interval_secs` when
+  shorter), and a heartbeat is never looked at sooner than one such period
+  after the previous look, so a burst of `status=down` pushes confirms no
+  faster than before. No new config key.
+
 ## [0.12.3] - 2026-11-23
 
 The running version on the page, and an idle daemon that stays asleep where

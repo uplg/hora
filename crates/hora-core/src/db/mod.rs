@@ -48,6 +48,7 @@ mod checks;
 mod compact;
 mod incidents;
 mod maintenance;
+mod push_updates;
 mod release;
 mod retention;
 #[cfg(test)]
@@ -90,6 +91,7 @@ pub use maintenance::{
     insert_maintenance_window, maintenance_window, maintenance_windows_between,
     maintenance_windows_since, pending_maintenance_windows,
 };
+pub(crate) use push_updates::PushSubscription;
 pub use release::{StoredRelease, mark_release_notified, release_watch, upsert_release_watch};
 pub(crate) use retention::prune;
 pub use retention::{
@@ -127,9 +129,33 @@ pub struct Store {
     /// [`Store::pages`]). `None` where one pool is all there is: an
     /// in-memory database, a one-shot command.
     pages: Option<SqlitePool>,
+    /// Wakes a push monitor's task when one of its heartbeats is stored
+    /// (see [`Store::subscribe_push`]); shared by every clone.
+    push_updates: std::sync::Arc<push_updates::PushUpdates>,
+    /// How often a push monitor's latest heartbeat was read, for the tests
+    /// that count what an evaluation strategy costs.
+    #[cfg(test)]
+    pub(crate) heartbeat_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Store {
+    fn from_pools(pool: SqlitePool, pages: Option<SqlitePool>) -> Self {
+        Self {
+            pool,
+            pages,
+            push_updates: std::sync::Arc::default(),
+            #[cfg(test)]
+            heartbeat_reads: std::sync::Arc::default(),
+        }
+    }
+
+    /// A wakeup for every heartbeat stored for `id` from now on (by the push
+    /// endpoint, a peer). It carries nothing: the
+    /// database stays the record, the task reads it when woken.
+    pub(crate) fn subscribe_push(&self, id: &str) -> PushSubscription {
+        self.push_updates.subscribe(id)
+    }
+
     /// The sqlx pool, for the query functions of this module only.
     pub(crate) fn sqlx(&self) -> &SqlitePool {
         &self.pool
@@ -160,6 +186,9 @@ impl Store {
         Self {
             pool: self.pages.clone().unwrap_or_else(|| self.pool.clone()),
             pages: None,
+            push_updates: std::sync::Arc::clone(&self.push_updates),
+            #[cfg(test)]
+            heartbeat_reads: std::sync::Arc::clone(&self.heartbeat_reads),
         }
     }
 
@@ -192,7 +221,7 @@ impl Store {
             .run(&pool)
             .await
             .expect("migrate in-memory database");
-        Self { pool, pages: None }
+        Self::from_pools(pool, None)
     }
 
     /// The raw pool, for test fixtures that insert rows no public function
@@ -332,10 +361,7 @@ pub async fn connect_sized(database_path: &str, sizing: PoolSizing) -> anyhow::R
         // query then degrades just that card, not the whole page.
         .acquire_timeout(Duration::from_secs(10))
         .connect_lazy_with(options);
-    Ok(Store {
-        pool,
-        pages: Some(pages),
-    })
+    Ok(Store::from_pools(pool, Some(pages)))
 }
 
 /// Create the database file with owner-only (0600) permissions before sqlx opens
