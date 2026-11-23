@@ -310,6 +310,7 @@ Values that cannot work are refused too:
 | `method` | `"GET"` or `"HEAD"`, on an http monitor; no `"HEAD"` with `keyword`, `json_query`, `jq` or `number_regex` |
 | `jq_operator` | `==`, `!=`, `<`, `<=`, `>` or `>=`, with a `jq`; so is `jq_expected` |
 | `fail_threshold` on a monitor | at least 1 |
+| `retry_interval_secs` on a monitor | from 1 to its `interval_secs`; not on a push monitor |
 | A `[[maintenance]]` window | `start` and `end`, or a `cron` with `duration_secs` from 1 to a week (604800) and an IANA `timezone` |
 | `repeat_alert_secs`, in `[alerts]` or on a monitor | 0 (off) or at most 30 days (2592000) |
 | An IPv6 `tcp` target | bracketed: `[::1]:80`, not `::1:80` |

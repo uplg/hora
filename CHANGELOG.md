@@ -97,6 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the recommended companion. Part of the check fingerprint only when set,
   so peers keep agreeing on every other monitor. `hora import kuma` carries
   Kuma's `ignoreTls` over.
+- **`retry_interval_secs` on a monitor**: after a failed check that has not
+  reached `fail_threshold` yet, the next one runs that many seconds later
+  instead of a whole `interval_secs` later, so an outage is confirmed
+  sooner while a healthy service is still checked at its interval. Back on
+  its interval (and its phase) once the outage is confirmed or a check
+  passes; never while muted. At most `interval_secs`, refused on a push
+  monitor. `hora import kuma` keeps Kuma's `retryInterval`.
 
 ### Changed
 

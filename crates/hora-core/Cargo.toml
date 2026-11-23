@@ -47,7 +47,7 @@ x509-parser.workspace = true
 nix = { version = "0.31", default-features = false, features = ["signal", "process", "fs"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "process"] }
+tokio = { workspace = true, features = ["rt", "macros", "process", "test-util"] }
 
 [lints]
 workspace = true

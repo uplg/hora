@@ -133,6 +133,9 @@ pub struct Monitor {
     /// Consecutive failed checks before this monitor is confirmed down;
     /// unset = `[alerts] fail_threshold` (see [`Monitor::fail_threshold`]).
     pub fail_threshold: Option<u32>,
+    /// Seconds to the next check after a failure that has not confirmed the
+    /// outage yet; unset = `interval_secs`. Probed monitors only.
+    pub retry_interval_secs: Option<u64>,
     /// Reminder cadence of a confirmed outage; unset = `[alerts]
     /// repeat_alert_secs` (see [`Monitor::repeat_alert_secs`]).
     pub repeat_alert_secs: Option<u64>,
@@ -444,6 +447,7 @@ impl std::fmt::Debug for Monitor {
             .field("slo_window_days", &self.slo_window_days)
             .field("probe_retries", &self.probe_retries)
             .field("fail_threshold", &self.fail_threshold)
+            .field("retry_interval_secs", &self.retry_interval_secs)
             .field("repeat_alert_secs", &self.repeat_alert_secs)
             .field("notify", &self.notify)
             .field("check_cert", &self.check_cert)

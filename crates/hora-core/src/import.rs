@@ -21,6 +21,7 @@
 //! | `accepted_statuscodes`               | `expected_status`               |
 //! | `method` `HEAD`                      | `method = "HEAD"`               |
 //! | `maxretries`                         | `fail_threshold` (retries + 1)  |
+//! | `retryInterval` (with retries)       | `retry_interval_secs`           |
 //! | `expiryNotification = false`         | `check_cert = false`            |
 //! | `ignoreTls = true`                   | `ignore_tls = true`             |
 //! | `dnsResolveType` / `dnsResolveServer`| `dns_record` / `dns_resolver`   |
@@ -32,7 +33,7 @@
 //! `grpc-keyword`, `docker`, `real-browser`, `steam`, `gamedig`, `mqtt`,
 //! `sqlserver`, `postgres`, `mysql`, `mongodb`, `radius`, `redis`, `snmp`,
 //! `tailscale-ping`, `kafka-producer` and `rabbitmq`. Fields that are
-//! dropped (silently - they have no Hora counterpart): `retryInterval`,
+//! dropped (silently - they have no Hora counterpart):
 //! `resendInterval`, `upsideDown`, `maxredirects`, HTTP
 //! `body`/`httpBodyEncoding`, `authMethod`
 //! and its credentials (basic/NTLM/mTLS/OAuth2), `proxyId` (Hora proxies are
@@ -76,6 +77,8 @@ struct KumaMonitor {
     /// accept the camelCase form too.
     #[serde(default, alias = "maxretries")]
     max_retries: u32,
+    /// Seconds between Kuma's retries (`retryInterval`).
+    retry_interval: Option<u64>,
     keyword: Option<String>,
     /// Kuma's "keyword should NOT be present" toggle.
     #[serde(default)]
@@ -207,7 +210,8 @@ fn convert_monitor(
         _ => {}
     }
 
-    let _ = writeln!(out, "interval_secs = {}", monitor.interval.unwrap_or(60));
+    let interval = monitor.interval.unwrap_or(60);
+    let _ = writeln!(out, "interval_secs = {interval}");
     if let Some(timeout) = monitor.timeout.filter(|&t| t > 0) {
         let _ = writeln!(out, "timeout_secs = {timeout}");
     }
@@ -222,6 +226,15 @@ fn convert_monitor(
             monitor.max_retries.saturating_add(1),
             monitor.max_retries
         );
+        // Kuma's retries ran this far apart. Only kept when it is sooner
+        // than the interval (the same otherwise, and more is refused), and
+        // never on a push monitor, which has no check to run again.
+        if let Some(retry) = monitor
+            .retry_interval
+            .filter(|&retry| kind != "push" && retry > 0 && retry < interval)
+        {
+            let _ = writeln!(out, "retry_interval_secs = {retry}");
+        }
     }
     out.push('\n');
 }
@@ -576,6 +589,8 @@ mod tests {
                     "url": "https://api.example.com/",
                     "method": "HEAD",
                     "maxretries": 1,
+                    "interval": 60,
+                    "retryInterval": 20,
                     "accepted_statuscodes": ["200-299", "401"]
                 },
                 {
@@ -583,6 +598,7 @@ mod tests {
                     "type": "http",
                     "url": "https://classes.example.com/",
                     "method": "GET",
+                    "retryInterval": 20,
                     "accepted_statuscodes": ["300-399", "200"]
                 },
                 {
@@ -610,6 +626,12 @@ mod tests {
             toml.contains("fail_threshold = 2  # maxretries was 1 in Kuma"),
             "{toml}"
         );
+        // Kuma only retried with retries: one retry interval is kept.
+        assert_eq!(
+            toml.matches("retry_interval_secs = 20").count(),
+            1,
+            "{toml}"
+        );
         // What has no equivalent is said, never approximated.
         assert!(
             toml.contains("# accepted_statuscodes [\"301-302\"] not supported"),
@@ -622,6 +644,8 @@ mod tests {
             .expect("the converted monitors load");
         assert_eq!(config.fail_threshold("private-api"), 2, "{toml}");
         assert_eq!(config.fail_threshold("classes"), 3);
+        let api = config.monitors.iter().find(|m| m.id == "private-api");
+        assert_eq!(api.and_then(|m| m.retry_interval_secs), Some(20));
     }
 
     #[test]

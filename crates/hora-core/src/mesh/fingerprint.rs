@@ -387,6 +387,7 @@ mod tests {
         for (what, changed) in [
             ("timeout", format!("{API}\ntimeout_secs = 3")),
             ("retries", format!("{API}\nprobe_retries = 3")),
+            ("retry interval", format!("{API}\nretry_interval_secs = 10")),
             ("threshold", format!("{API}\ndegraded_over_ms = 200")),
             (
                 "proxy",

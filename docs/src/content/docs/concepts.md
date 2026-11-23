@@ -81,7 +81,9 @@ alert_on_degraded = false # set true to be told about slowness too
 
 Only `fail_threshold` failures **in a row** confirm the outage. With a
 60-second interval and the default of 3, a service that restarts in under
-two minutes never alerts. A single passing check resets the count.
+two minutes never alerts. A single passing check resets the count. A
+monitor's `retry_interval_secs` runs the checks in between sooner, so the
+threshold is reached in less than `fail_threshold` intervals.
 
 The value in `[alerts]` is the default; a monitor may set its own
 `fail_threshold` (`1` for a service whose first failure is already worth a

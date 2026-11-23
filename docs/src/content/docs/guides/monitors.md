@@ -41,6 +41,31 @@ heartbeat on a push monitor never waits for any threshold (see
 [push](#push-heartbeat)). [`hora tune`](../../reference/cli/#hora-tune) recommends a
 value per monitor from its recorded history.
 
+## Confirming an outage sooner: `retry_interval_secs`
+
+A threshold costs time: with `interval_secs = 300` and `fail_threshold = 3`,
+an outage is confirmed ten minutes after the first failed check.
+`retry_interval_secs` runs the next check sooner while the failures have
+not reached the threshold yet, and leaves a healthy service on its interval:
+
+```toml
+[[monitors]]
+id = "shop"
+name = "Shop"
+target = "https://shop.example.com/health"
+interval_secs = 300
+fail_threshold = 3
+retry_interval_secs = 30  # a real outage is confirmed a minute in
+```
+
+Once the outage is confirmed, or a check passes, the monitor is back on its
+interval, at the same phase as before. No retry runs while the monitor is
+muted (maintenance, silence): nothing would be confirmed. This is not
+`probe_retries`, which repeats one failed attempt a second later within
+the same check: a failure that survives those is what counts towards the
+threshold, and what `retry_interval_secs` checks again. At most
+`interval_secs`; not on a push monitor, which has no check to run again.
+
 ## Kinds
 
 ### `http` (default)

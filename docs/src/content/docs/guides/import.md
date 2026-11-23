@@ -30,9 +30,9 @@ config.
 - **Ignore TLS/SSL errors**: `ignoreTls` becomes `ignore_tls = true` on an
   http monitor.
 - **Retries**: `maxretries = N` becomes `fail_threshold = N + 1` on the
-  monitor, the same number of failed checks in a row. Kuma retries at its
-  own `retryInterval`, Hora at the monitor's interval; at 0 the line is left
-  out and `[alerts] fail_threshold` applies.
+  monitor, the same number of failed checks in a row, and a `retryInterval`
+  shorter than the interval becomes `retry_interval_secs`; at 0 retries
+  both are left out and `[alerts] fail_threshold` applies.
 - **Groups**: Kuma groups become Hora display groups on the status page.
 
 Anything Hora does not support comes out as a **commented stub** with the
