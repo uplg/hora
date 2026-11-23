@@ -88,6 +88,13 @@ probed from outside - and 400 on an unknown `status` or a negative `ping`.
 The token is required: only a monitor or peer that sets
 `allow_unauthenticated = true` accepts a heartbeat on its id alone.
 
+**Uptime Kuma's push URL.** A push monitor with `kuma_push = true` also
+answers `GET` or `POST /api/push/<push_token>`, the token in place of the id
+and no header, with `{"ok":true}` - so a producer set up for Kuma keeps its
+URL. A fractional `ping` is rounded, an empty one ignored. Hora logs a push
+path that does not end in a known id as `/api/push/[redacted]`, and a `GET`
+reaches nothing but such a token. See [push monitors](../../guides/monitors/#push-heartbeat).
+
 The `status` is the job's verdict and drives alerting: `down` counts as a
 failure with `msg` as the reason (confirmed down after `fail_threshold`),
 `degraded` counts as degraded. Two pushes in the same second: the last one

@@ -87,9 +87,11 @@ fn has_query_token(uri: &Uri) -> bool {
 }
 
 /// Whether the request presents a credential at all: `Authorization`,
-/// `X-Push-Token` or `?token=`.
+/// `X-Push-Token`, `?token=` - or a push path, whose last segment may be a
+/// `kuma_push` monitor's token.
 pub(crate) fn presents_credential<B>(request: &axum::http::Request<B>) -> bool {
-    request.headers().contains_key(header::AUTHORIZATION)
+    request.uri().path().starts_with("/api/push/")
+        || request.headers().contains_key(header::AUTHORIZATION)
         || request.headers().contains_key(PUSH_TOKEN_HEADER)
         || has_query_token(request.uri())
 }

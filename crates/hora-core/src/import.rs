@@ -23,7 +23,7 @@
 //! | `maxretries`                         | `fail_threshold` (retries + 1)  |
 //! | `expiryNotification = false`         | `check_cert = false`            |
 //! | `dnsResolveType` / `dnsResolveServer`| `dns_record` / `dns_resolver`   |
-//! | `pushToken`                          | `push_token`                    |
+//! | `pushToken`                          | `push_token` + `kuma_push`      |
 //!
 //! # What does not
 //!
@@ -119,12 +119,13 @@ pub fn convert_kuma_to_hora(json_str: &str) -> Result<String> {
     // Kuma names need not be unique, Hora ids must be: a clash gets a numeric
     // suffix instead of producing a config that fails validation.
     let mut ids = HashSet::new();
+    let mut kuma_tokens = HashSet::new();
     for (idx, monitor) in backup.monitor_list.iter().enumerate() {
         if monitor.monitor_type == "group" {
             continue; // Folders become `group = "..."` on their children.
         }
         let id = unique_id(&sanitize_id(&monitor.name, idx), &mut ids);
-        convert_monitor(&mut out, monitor, &id, &group_names);
+        convert_monitor(&mut out, monitor, &id, &group_names, &mut kuma_tokens);
     }
 
     Ok(out)
@@ -135,6 +136,7 @@ fn convert_monitor(
     monitor: &KumaMonitor,
     id: &str,
     group_names: &HashMap<i64, &str>,
+    kuma_tokens: &mut HashSet<String>,
 ) {
     // Anything we cannot probe becomes a commented stub instead of a half
     // valid entry: emitting `kind = "http"` without a target would make the
@@ -178,6 +180,15 @@ fn convert_monitor(
             match &monitor.push_token {
                 Some(token) if token.chars().count() >= MIN_TOKEN_CHARS => {
                     let _ = writeln!(out, "push_token = {}", toml_string(token));
+                    // The producers keep the URL Kuma handed them, the token
+                    // in the path: Hora finds a monitor by it only when it is
+                    // URL-safe and no other monitor's.
+                    let url_safe = token
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                    if url_safe && kuma_tokens.insert(token.clone()) {
+                        let _ = writeln!(out, "kuma_push = true  # also /api/push/<push_token>");
+                    }
                 }
                 _ => {
                     let _ = writeln!(
@@ -470,6 +481,11 @@ mod tests {
                     "pushToken": "abc123abc123abc123abc123"
                 },
                 {
+                    "name": "Same token",
+                    "type": "push",
+                    "pushToken": "abc123abc123abc123abc123"
+                },
+                {
                     "name": "Short token",
                     "type": "push",
                     "pushToken": "abc123"
@@ -487,6 +503,8 @@ mod tests {
         // result loads.
         assert!(!toml.contains("push_token = \"abc123\""));
         assert_eq!(toml.matches("allow_unauthenticated = true").count(), 1);
+        // Kuma's URL keeps working, for the first monitor on a token only.
+        assert_eq!(toml.matches("kuma_push = true").count(), 1);
         crate::config::parse(&format!("[page]\n[server]\n{toml}"))
             .expect("the converted monitors load");
     }

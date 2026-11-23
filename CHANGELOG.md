@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the report and the upcoming window on the page read each run like a fixed
   window. The time zone database is compiled in, so the container image
   needs none. Fixed windows are unchanged.
+- **Uptime Kuma's push URL, opt-in.** A push monitor with
+  `kuma_push = true` (and a `push_token`) is also reached the way Kuma's
+  producers call it: `GET` or `POST /api/push/<push_token>?status=&msg=&ping=`,
+  the token in place of the id, `{"ok":true}` back. A fractional `ping` is
+  rounded, an empty one ignored, a body never read. The header form keeps
+  working for the same monitor, and `?token=` on a write stays refused.
+  `hora import kuma` sets it on the push monitors it imports, so migrated
+  producers need no change. The token must be URL-safe, unique among
+  `kuma_push` monitors and never equal a monitor id or a peer's
+  `listen_id`. A push path that does not end in a known id is logged as
+  `/api/push/[redacted]`, so a token never reaches Hora's log.
 
 ### Changed
 
