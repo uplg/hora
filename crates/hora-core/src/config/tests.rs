@@ -3157,3 +3157,29 @@ fn summary_idle_refresh_is_bounded() {
         assert!(at(bad).is_err(), "{bad}");
     }
 }
+
+/// The database sizing: unset by default, read inline, bounded when set.
+#[test]
+fn database_sizing_is_bounded() {
+    assert!(load(MINIMAL).unwrap().server.database.is_none());
+    let sized = MINIMAL.replace(
+        "[server]",
+        "[server]\ndatabase = { cache_kib = 2048, max_connections = 4 }",
+    );
+    let database = load(&sized).unwrap().server.database.expect("database");
+    assert_eq!(
+        (database.cache_kib, database.max_connections),
+        (Some(2048), Some(4))
+    );
+    for bad in [
+        "cache_kib = 0",
+        "cache_kib = 63",
+        "cache_kib = 1048577",
+        "max_connections = 0",
+        "max_connections = 65",
+        "pool = 3",
+    ] {
+        let toml = MINIMAL.replace("[server]", &format!("[server]\ndatabase = {{ {bad} }}"));
+        assert!(load(&toml).is_err(), "{bad}");
+    }
+}
