@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count of failing entries, arithmetic, or a number sent as a string. The
   expression is compiled at load and shared by the monitors that spell it the
   same; it has no access to the environment, files or modules, and function
-  definitions are refused. No result, several, `null`, an array or an object
+  definitions and loops (`repeat`, `until`, `while`, `range`, `recurse(f)`)
+  are refused, so that an expression always ends. No result, several, `null`, an array or an object
   fail the check. On the public page, a failure reads "content check failed".
 
 ## [0.12.3] - 2026-11-23

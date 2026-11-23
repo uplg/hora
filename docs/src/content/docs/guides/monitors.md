@@ -117,8 +117,9 @@ read as numbers (`"2.0"` equals `2`), as text otherwise; `<`, `<=`, `>` and
 
 The expression is part of the configuration and is trusted like the rest of
 it; the body it reads is the server's. Hora does not cap the time or memory
-an expression takes on a body, so keep it to a filter over that body
-(`range(1e18)` would keep a thread busy). Expressions are compiled once at load
+an expression takes on a body, so what could go on for ever is refused at
+load: `repeat`, `until`, `while`, `range` and `recurse(f)` (`recurse` alone
+and `..` walk the body and end with it). Expressions are compiled once at load
 and shared between monitors that spell them the same. They have no access to
 the environment, files, the clock or modules (`env`, `input`, `now`,
 `import` and `include` are not available), and jaq's regex and date functions

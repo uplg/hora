@@ -83,17 +83,33 @@ fn fromjson(cv: Cv<'_, Data>) -> ValXs<'_, Val> {
     })
 }
 
-/// Whether the tokens define a function. A recursive one can overflow the
-/// stack, which aborts the process rather than failing the check.
-fn defines_function(tokens: &[Token<&str>]) -> bool {
-    tokens.iter().any(|Token(text, tok)| match tok {
-        Tok::Word => *text == "def",
-        Tok::Block(inner) => defines_function(inner),
-        Tok::Str(parts) => parts.iter().any(|part| match part {
-            StrPart::Term(term) => defines_function(std::slice::from_ref(term)),
-            StrPart::Str(_) | StrPart::Char(_) => false,
-        }),
-        _ => false,
+/// The filters that go on for as long as they are told to, whatever the
+/// body holds: with one of them an expression may never end, and nothing
+/// stops an evaluation - it would hold its monitor's task, and a core, for
+/// good. `recurse` alone and `..` walk the body and end with it.
+const LOOPS: &[&str] = &["repeat", "until", "while", "range", "recurse"];
+
+/// Why the tokens are refused, if they are: a function definition (a
+/// recursive one can overflow the stack, which aborts the process rather
+/// than failing the check), or a call to one of [`LOOPS`]. A call is the
+/// word followed by its arguments: `{range: 1}` and `.range` name a field.
+fn refused(tokens: &[Token<&str>]) -> Option<&'static str> {
+    let mut next = tokens.iter().skip(1);
+    tokens.iter().find_map(|Token(text, tok)| {
+        let called = matches!(next.next(), Some(Token(_, Tok::Block(_))));
+        match tok {
+            Tok::Word if *text == "def" => Some("function definitions (def) are not available"),
+            Tok::Word if called && LOOPS.contains(text) => Some(
+                "repeat, until, while, range and recurse(f) are not available \
+                 (an expression must end)",
+            ),
+            Tok::Block(inner) => refused(inner),
+            Tok::Str(parts) => parts.iter().find_map(|part| match part {
+                StrPart::Term(term) => refused(std::slice::from_ref(term)),
+                StrPart::Str(_) | StrPart::Char(_) => None,
+            }),
+            _ => None,
+        }
     })
 }
 
@@ -108,11 +124,12 @@ impl ParseField for JqProgram {
             return Ok(Self(program));
         }
         programs.retain(|_, program| program.strong_count() > 0);
-        if Lexer::new(raw)
+        if let Some(reason) = Lexer::new(raw)
             .lex()
-            .is_ok_and(|tokens| defines_function(&tokens))
+            .ok()
+            .and_then(|tokens| refused(&tokens))
         {
-            return Err("function definitions (def) are not available".to_owned());
+            return Err(reason.to_owned());
         }
         let defs = jaq_core::defs()
             .chain(jaq_std::defs().filter(|def| STD_DEFS.contains(&def.name)))
@@ -213,8 +230,16 @@ mod tests {
         ] {
             assert!(run(query, body).is_err(), "{query} on {body}");
         }
-        // An endless stream is cut after its second value.
-        assert_eq!(run("repeat(1)", "null"), Err("more than one result"));
+        // A long stream is cut after its second value.
+        assert_eq!(run(".[]", "[1,2,3]"), Err("more than one result"));
+        // What walks the body ends with it, and a field may bear any name.
+        assert_eq!(run("[..] | length", "[[1],[2]]").as_deref(), Ok("5"));
+        assert_eq!(run("[recurse] | length", "[[1]]").as_deref(), Ok("3"));
+        assert_eq!(run(".range", r#"{"range":7}"#).as_deref(), Ok("7"));
+        assert_eq!(
+            run("{while: .until} | .while", r#"{"until":7}"#).as_deref(),
+            Ok("7")
+        );
         // A string nested deeper than the body may be fails, it does not
         // overflow the stack.
         let nested = format!(
@@ -244,6 +269,14 @@ mod tests {
             "def f: 1 + f; f",
             "[.[] | def f: .; f]",
             "\"\\(def f: .; f)\"",
+            // Nothing that may never end: no evaluation is ever stopped.
+            "until(false; .)",
+            "last(repeat(1))",
+            "repeat(1) | select(false)",
+            "[range(1e12)] | length",
+            "recurse(.) | select(false)",
+            "[.[] | while(true; .)]",
+            "\"\\(repeat(1))\"",
             "import \"secret\" as x; x::read",
             "include \"secret\"; .",
             "(",
