@@ -73,11 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from one connection per `[[brokers]]` entry (`mqtt://` or `mqtts://`,
   credentials in `username` / `password`), shared by every monitor that
   names it. Down when nothing arrived, when the message is older than
-  `max_age_secs`, when `keyword` or `json_query` fails on the payload, or
-  when the broker is unreachable; like any failed check it counts towards
+  `max_age_secs`, when `keyword`, `json_query` or `jq` fails on the payload,
+  or when the broker is unreachable; like any failed check it counts towards
   `fail_threshold` (public reason *no recent message*). A topic that is only
-  published periodically gets no verdict for one interval after a start or
-  a reconnect instead of a false down. Brokers reload live; a new
+  published periodically gets no verdict for one interval after a start or a
+  reconnect instead of a false down. Brokers reload live; a new
   `[[brokers]]` section, no change to existing configs.
 
 ### Changed

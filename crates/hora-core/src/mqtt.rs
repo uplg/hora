@@ -316,7 +316,7 @@ fn evaluate(
     }
     // Keyword-only checks are cheaper than memoization for tiny state strings.
     // Keep just the last JSON assertion result, never a payload or parsed tree.
-    if let Some(cache) = cache.filter(|_| spec.json.is_some()) {
+    if let Some(cache) = cache.filter(|_| spec.json.is_some() || spec.jq.is_some()) {
         if let Some(cached) = cache
             .as_ref()
             .filter(|c| c.generation == message.generation)
@@ -364,6 +364,11 @@ fn evaluate_content(spec: &MqttSpec, message: &Message) -> Outcome {
     }
     if let Some(json) = &spec.json
         && let Some(failure) = crate::probe::check_json(json, &text)
+    {
+        return Outcome::down(FailureKind::Content, failure);
+    }
+    if let Some(jq) = &spec.jq
+        && let Some(failure) = crate::probe::check_jq(jq, &message.payload)
     {
         return Outcome::down(FailureKind::Content, failure);
     }
@@ -648,6 +653,7 @@ mod tests {
                 invert: false,
             }),
             json: None,
+            jq: None,
             max_body_kb: None,
         }
     }
@@ -692,6 +698,67 @@ mod tests {
             let message = Message::new(payload, now);
             assert_eq!(evaluate(&spec, Some(&message), now, None).is_up(), up);
         }
+    }
+
+    #[test]
+    fn mqtt_reuses_jq_assertions_and_fails_bad_json() {
+        let now = Instant::now();
+        let mut spec = spec();
+        spec.keyword = None;
+        spec.jq = Some(crate::config::JqAssert {
+            query: crate::config::Compiled::parse("type == \"number\" and . > 100").unwrap(),
+            expected: None,
+            operator: crate::config::JqOperator::Eq,
+        });
+        for (payload, up) in [
+            (b"101".as_slice(), true),
+            (b"99".as_slice(), false),
+            (b"null".as_slice(), false),
+            (b"invalid".as_slice(), false),
+        ] {
+            let message = Message::new(payload, now);
+            assert_eq!(evaluate(&spec, Some(&message), now, None).is_up(), up);
+        }
+    }
+
+    /// Monitors spelling the same jq expression run one compiled filter, and
+    /// a task's evaluator runs it once per received message.
+    #[test]
+    fn an_unchanged_message_is_judged_once_by_a_shared_filter() {
+        let jq = |id: &str| {
+            format!(
+                "[[monitors]]\nid = \"{id}\"\nname = \"{id}\"\nkind = \"mqtt\"\n\
+                 broker = \"b\"\ntopic = \"t/{id}\"\ninterval_secs = 60\n\
+                 jq = \".power\"\njq_expected = \"100\"\njq_operator = \">\"\n"
+            )
+        };
+        let config = crate::config::parse(&format!(
+            "[page]\n[server]\n[[brokers]]\nname = \"b\"\nurl = \"mqtt://127.0.0.1:1883\"\n{}{}",
+            jq("a"),
+            jq("b")
+        ))
+        .expect("config");
+        let specs: Vec<&MqttSpec> = config
+            .monitors
+            .iter()
+            .map(|monitor| match &monitor.spec {
+                MonitorKind::Mqtt(spec) => spec,
+                _ => unreachable!(),
+            })
+            .collect();
+        let filter = |spec: &MqttSpec| spec.jq.as_ref().unwrap().query.clone();
+        assert!(filter(specs[0]).shares_filter_with(&filter(specs[1])));
+
+        let evaluations = || CONTENT_EVALUATIONS.with(std::cell::Cell::get);
+        let now = Instant::now();
+        let mut cache = None;
+        let message = Message::new(br#"{"power":230}"#, now);
+        let before = evaluations();
+        for tick in 0..10 {
+            let at = now + Duration::from_secs(tick);
+            assert!(evaluate(specs[0], Some(&message), at, Some(&mut cache)).is_up());
+        }
+        assert_eq!(evaluations() - before, 1);
     }
 
     #[test]

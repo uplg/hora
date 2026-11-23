@@ -329,7 +329,7 @@ pub(crate) fn check_json(json: &JsonAssert, body: &str) -> Option<String> {
 /// expected value: as numbers when both sides read as numbers, as text
 /// otherwise; the ordering operators need numbers. Returns a failure reason
 /// or `None`.
-pub(super) fn check_jq(jq: &JqAssert, body: &[u8]) -> Option<String> {
+pub(crate) fn check_jq(jq: &JqAssert, body: &[u8]) -> Option<String> {
     let query = jq.query.raw();
     let result = match jq.query.evaluate(body) {
         Ok(result) => result,

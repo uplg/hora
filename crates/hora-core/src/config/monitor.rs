@@ -45,7 +45,7 @@ pub enum Kind {
     /// The latest message on an MQTT topic (`broker`, `topic`), read from a
     /// connection shared by every monitor of that `[[brokers]]` entry: down
     /// when none arrived, when it is older than `max_age_secs`, or when an
-    /// assertion (`keyword`, `json_query`) fails on its payload.
+    /// assertion (`keyword`, `json_query`, `jq`) fails on its payload.
     Mqtt,
 }
 
@@ -264,6 +264,8 @@ pub struct MqttSpec {
     pub keyword: Option<KeywordAssert>,
     /// A `JSONPath` evaluated against a JSON payload.
     pub json: Option<JsonAssert>,
+    /// A jq expression evaluated against a JSON payload.
+    pub jq: Option<JqAssert>,
     /// Cap (KiB) on the payload the assertions accept; unset = the broker's
     /// packet limit.
     pub max_body_kb: Option<u32>,

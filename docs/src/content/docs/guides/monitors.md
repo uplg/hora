@@ -427,6 +427,7 @@ kind = "mqtt"
 broker = "sensors"
 topic = "home/sensor/temperature"
 json_query = "$.temperature"         # json_query / json_expected, as on http
+# jq = ".temperature < 60"           # or jq / jq_expected / jq_operator
 interval_secs = 60
 max_age_secs = 600
 ```
@@ -444,7 +445,7 @@ subscribe again, so retained topics come back at once. A topic that is only
 published periodically has nothing cached for a while after a start, a
 reconnect or a change to the broker's topic list: for one interval (or
 `max_age_secs`, when shorter) such a monitor gets no verdict and nothing is
-recorded, instead of reading as down. A JSON assertion's verdict is kept
+recorded, instead of reading as down. A JSON or jq assertion's verdict is kept
 for an unchanged message, so a frequently checked topic is parsed once per
 message. Two broker entries for the same endpoint and user are refused:
 monitors share one name. The peers of a mesh do not confirm MQTT monitors.

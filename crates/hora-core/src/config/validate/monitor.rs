@@ -95,17 +95,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             headers: std::mem::take(&mut raw.headers),
             keyword: keyword_of(raw),
             json: json_of(raw)?,
-            jq: match raw.jq.take() {
-                Some(query) => Some(JqAssert {
-                    query: query.compiled().ok_or_else(|| compiled("jq"))?,
-                    expected: raw.jq_expected.take(),
-                    operator: match &raw.jq_operator {
-                        Some(operator) => *operator.get().ok_or_else(|| compiled("jq_operator"))?,
-                        None => JqOperator::Eq,
-                    },
-                }),
-                None => None,
-            },
+            jq: jq_of(raw)?,
             number: match raw.number_regex.take() {
                 Some(regex) => Some(NumberAssert {
                     regex: regex.compiled().ok_or_else(|| compiled("number_regex"))?,
@@ -161,6 +151,7 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
             max_age_secs: raw.max_age_secs,
             keyword: keyword_of(raw),
             json: json_of(raw)?,
+            jq: jq_of(raw)?,
             max_body_kb: raw.max_body_kb,
         }),
         Kind::Exec => {
@@ -191,6 +182,22 @@ fn json_of(raw: &mut RawMonitor) -> anyhow::Result<Option<JsonAssert>> {
             .compiled()
             .ok_or_else(|| anyhow::anyhow!("monitor {}: invalid json_query", raw.id))?,
         expected: raw.json_expected.take(),
+    }))
+}
+
+/// `jq` / `jq_expected` / `jq_operator`, moved out of the raw table.
+fn jq_of(raw: &mut RawMonitor) -> anyhow::Result<Option<JqAssert>> {
+    let Some(query) = raw.jq.take() else {
+        return Ok(None);
+    };
+    let invalid = |field: &str| anyhow::anyhow!("monitor {}: invalid {field}", raw.id);
+    Ok(Some(JqAssert {
+        query: query.compiled().ok_or_else(|| invalid("jq"))?,
+        expected: raw.jq_expected.take(),
+        operator: match &raw.jq_operator {
+            Some(operator) => *operator.get().ok_or_else(|| invalid("jq_operator"))?,
+            None => JqOperator::Eq,
+        },
     }))
 }
 
@@ -437,7 +444,7 @@ fn validate_http_request(monitor: &RawMonitor) -> anyhow::Result<()> {
 /// number bounds only make sense with a regex to extract the number and in
 /// min <= max order.
 fn validate_body_assertions(monitor: &RawMonitor) -> anyhow::Result<()> {
-    // keyword / json_query read an MQTT payload as they read an http body.
+    // keyword / json_query / jq read an MQTT payload as they read an http body.
     if monitor.kind == Kind::Mqtt {
         anyhow::ensure!(
             monitor.number_regex.is_none() && monitor.proxy.is_none(),
@@ -459,8 +466,8 @@ fn validate_body_assertions(monitor: &RawMonitor) -> anyhow::Result<()> {
         anyhow::bail!("monitor {}: invalid json_query: {err}", monitor.id);
     }
     anyhow::ensure!(
-        monitor.kind == Kind::Http || monitor.jq.is_none(),
-        "monitor {}: jq requires an http monitor",
+        matches!(monitor.kind, Kind::Http | Kind::Mqtt) || monitor.jq.is_none(),
+        "monitor {}: jq requires an http or mqtt monitor",
         monitor.id
     );
     if let Some(err) = monitor.jq.as_ref().and_then(Parsed::error) {

@@ -3354,13 +3354,13 @@ fn rejects_jq_on_tcp() {
         jq = ".ok"
     "#;
     let error = load(src).unwrap_err().to_string();
-    assert_eq!(error, "monitor db: jq requires an http monitor");
+    assert_eq!(error, "monitor db: jq requires an http or mqtt monitor");
 }
 
 #[test]
 fn mqtt_config_rejects_unbounded_topics_and_unknown_brokers() {
     let prefix = "[page]\n[server]\n[[brokers]]\nname='test'\nurl='mqtt://localhost:1883'\n";
-    let monitor = "[[monitors]]\nid='sensor'\nname='Sensor'\nkind='mqtt'\nbroker='test'\ntopic='test/sensor'\ninterval_secs=60\njson_query='$.value'\nmax_age_secs=120";
+    let monitor = "[[monitors]]\nid='sensor'\nname='Sensor'\nkind='mqtt'\nbroker='test'\ntopic='test/sensor'\ninterval_secs=60\njq='.value >= 0'\nmax_age_secs=120";
     let config = load(&format!("{prefix}{monitor}")).unwrap();
     let MonitorKind::Mqtt(spec) = &config.monitors[0].spec else {
         panic!("an mqtt monitor")
@@ -3369,7 +3369,7 @@ fn mqtt_config_rejects_unbounded_topics_and_unknown_brokers() {
         (spec.broker.as_str(), spec.topic.as_str(), spec.max_age_secs),
         ("test", "test/sensor", Some(120))
     );
-    assert!(spec.json.is_some());
+    assert!(spec.jq.is_some());
     for (bad, says) in [
         (monitor.replace("test/sensor", "test/#"), "concrete `topic`"),
         (
