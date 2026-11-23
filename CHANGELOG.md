@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[server] summary_idle_refresh_secs`**: how long the status summary
+  waits before its next rebuild while nobody reads it (default 30 s, as
+  before; 5..3600). A longer pause saves database reads on an idle node;
+  the first request after a quiet stretch still waits for a fresh build.
+- **`[server] database = { cache_kib, max_connections }`** sizes the two
+  SQLite pools: the page cache of each connection, and the connections of
+  both pools together (a third for the daemon, the rest for the status
+  pages). Unset, as before: 4000 KiB for each of 3 + 6 connections. A
+  small container can trade page throughput for memory. `hora` commands
+  open the database with the same sizing.
+- **Recurring maintenance windows.** A `[[maintenance]]` window takes a
+  five-field `cron` instead of `start` and `end`, read on the wall clock of
+  `timezone` (an IANA name, UTC by default), and lasts `duration_secs` (up
+  to a week) from each run: a weekly backup no longer needs a window per
+  week. Daylight saving time is followed. Muting, the cards, the daily bars,
+  the report and the upcoming window on the page read each run like a fixed
+  window. The time zone database is compiled in, so the container image
+  needs none. Fixed windows are unchanged.
 - **Uptime Kuma's push URL, opt-in.** A push monitor with
   `kuma_push = true` (and a `push_token`) is also reached the way Kuma's
   producers call it: `GET` or `POST /api/push/<push_token>?status=&msg=&ping=`,
@@ -20,6 +38,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kuma_push` monitors and never equal a monitor id or a peer's
   `listen_id`. A push path that does not end in a known id is logged as
   `/api/push/[redacted]`, so a token never reaches Hora's log.
+
+### Changed
+
+- **A healthy push monitor is looked at when a heartbeat comes and when its
+  deadline passes**, instead of every minute: the push endpoint wakes the
+  monitor's task once the heartbeat is stored, and a heartbeat that does not
+  come is down on the second its interval (or its schedule's grace) runs
+  out, instead of up to a minute later. Anything short of healthy - down,
+  degraded, recovered during a maintenance window, a burn-rate alert to
+  re-arm - is still looked at every minute (every `interval_secs` when
+  shorter), and a heartbeat is never looked at sooner than one such period
+  after the previous look, so a burst of `status=down` pushes confirms no
+  faster than before. No new config key.
 
 ## [0.12.3] - 2026-11-23
 

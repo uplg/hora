@@ -21,6 +21,19 @@ pub(crate) enum Cadence {
 }
 
 impl Cadence {
+    /// The first second at which a heartbeat last seen at `since` is overdue
+    /// (see [`Cadence::overdue`]: late is strictly after the deadline), or
+    /// `None` when no such second can be computed (a schedule with no next
+    /// run, an overflow) - then nothing will ever be late.
+    pub(crate) fn late_at(&self, since: i64, seen: bool) -> Option<i64> {
+        let deadline = match self {
+            Self::Every(interval_secs) => since.checked_add(i64::try_from(*interval_secs).ok()?)?,
+            Self::Cron { cron, grace_secs } => cron_due(cron, since, seen.then_some(*grace_secs))?
+                .checked_add(i64::try_from(*grace_secs).ok()?)?,
+        };
+        deadline.checked_add(1)
+    }
+
     /// Why a heartbeat last seen at `since` is overdue at `now`, or `None`
     /// while it is on time. `seen` says whether `since` is a real heartbeat
     /// (or only when one was first expected): only a real one may count for
@@ -226,6 +239,32 @@ pub(crate) async fn heartbeat_outcome_for(
     record_every: i64,
     now: i64,
 ) -> Option<Outcome> {
+    heartbeat_evaluation_for(store, id, cadence, expected_since, record_every, now)
+        .await?
+        .outcome
+}
+
+/// What [`heartbeat_outcome_for`] found, and when its verdict changes next
+/// unless another heartbeat comes.
+pub(crate) struct HeartbeatEvaluation {
+    /// The outcome; `None` while the first heartbeat is not late yet.
+    pub(crate) outcome: Option<Outcome>,
+    /// The first second the latest heartbeat (or the wait for the first one)
+    /// is overdue: `None` when that never happens. Already past when it is.
+    pub(crate) late_at: Option<i64>,
+}
+
+/// [`heartbeat_outcome_for`], with the deadline it judged against: a push
+/// monitor's task sleeps until then instead of looking again and again.
+/// `None` on a read error (logged).
+pub(crate) async fn heartbeat_evaluation_for(
+    store: &Store,
+    id: &str,
+    cadence: &Cadence,
+    expected_since: i64,
+    record_every: i64,
+    now: i64,
+) -> Option<HeartbeatEvaluation> {
     let last = match db::last_heartbeat(store, id).await {
         Ok(last) => last,
         Err(err) => {
@@ -233,7 +272,11 @@ pub(crate) async fn heartbeat_outcome_for(
             return None;
         }
     };
-    match judge_heartbeat(cadence, last.as_ref(), expected_since, now) {
+    let late_at = cadence.late_at(
+        last.as_ref().map_or(expected_since, |beat| beat.time),
+        last.is_some(),
+    );
+    let outcome = match judge_heartbeat(cadence, last.as_ref(), expected_since, now) {
         HeartbeatVerdict::Unknown => None,
         HeartbeatVerdict::OnTime(outcome) => Some(outcome),
         HeartbeatVerdict::Overdue(kind, reason) => {
@@ -256,7 +299,8 @@ pub(crate) async fn heartbeat_outcome_for(
             }
             Some(Outcome::down(kind, reason))
         }
-    }
+    };
+    Some(HeartbeatEvaluation { outcome, late_at })
 }
 
 /// The cadence check for the fuzz targets in `fuzz/` (built with
@@ -294,6 +338,22 @@ pub mod fuzz {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The deadline a task sleeps until is exactly where polling would
+    /// have seen the verdict change: on time one second before, late at it.
+    #[test]
+    fn late_at_is_where_the_verdict_turns() {
+        for cadence in [Cadence::Every(60), nightly()] {
+            for since in [0, 86_400 + 3 * 3600 - 1, 86_400 + 3 * 3600 + 120] {
+                for seen in [false, true] {
+                    let late = cadence.late_at(since, seen).expect("a next deadline");
+                    assert!(cadence.overdue(since, seen, late - 1).is_none());
+                    assert!(cadence.overdue(since, seen, late).is_some());
+                }
+            }
+        }
+        assert_eq!(Cadence::Every(60).late_at(i64::MAX, true), None);
+    }
 
     #[test]
     fn the_grace_reads_as_configured() {
