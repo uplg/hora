@@ -117,7 +117,9 @@ changing, and three things tell it to look:
   changed is not parsed. On Linux, with the config on a local filesystem
   (ext4, xfs, btrfs, ZFS, tmpfs, Unraid's user shares, mergerfs, ...) and
   not mounted as a single file, the re-read is off, so an idle Hora does not
-  wake up for it. It comes back on by itself for as long as a watch cannot
+  wake up for it, and a link higher up the path (a `current` directory
+  swapped from one release to the next) is followed like the config's own.
+  It comes back on by itself for as long as a watch cannot
   be placed (a directory of the path does not exist yet, the watch limit is
   reached), and for good once the notification backend reports an error.
   `hora doctor` says which case applies. A write that goes around a FUSE

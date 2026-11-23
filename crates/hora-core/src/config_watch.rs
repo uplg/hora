@@ -21,7 +21,9 @@
 //!   On a local filesystem ([`trusted_filesystem`]) the re-read is off while
 //!   every watch is in place, so an idle daemon does not wake for it; it is
 //!   back on for as long as a watch is missing, and for good once the backend
-//!   reported an error.
+//!   reported an error. The link chain then takes in the links higher up the
+//!   path as well (a `current` directory swapped from one release to the
+//!   next), which only the re-read found before.
 //!
 //! What no source can fix is a config bind-mounted as a single file: the
 //! container holds the inode, and a file replaced on the host is a different
@@ -525,13 +527,24 @@ struct Plan {
 /// directory that holds that, and for a directory that is itself a link (the
 /// `..data` of a `ConfigMap`) its name in its parent. Replacing any of those
 /// names changes what the config path leads to.
-fn plan(config_path: &Path, file_itself: bool) -> Plan {
+///
+/// With `above`, a link anywhere higher up the path is followed the same way
+/// (`current` in `current/conf/config.toml`, swapped from one release to the
+/// next): where the periodic re-read is off, nothing else finds that swap.
+/// Elsewhere the re-read does, and the watch is not worth its events - it
+/// sits where the link is, and on macOS `/var` is one.
+fn plan(config_path: &Path, file_itself: bool, above: bool) -> Plan {
     let start = std::path::absolute(config_path).unwrap_or_else(|_| config_path.to_path_buf());
     let mut plan = Plan::default();
     let mut directories: Vec<PathBuf> = Vec::new();
     let mut pending = vec![start.clone()];
+    let mut walked: HashSet<PathBuf> = HashSet::new();
     let mut steps = 0;
     while let Some(path) = pending.pop() {
+        // Two steps can lead to the same link above them.
+        if !walked.insert(path.clone()) {
+            continue;
+        }
         steps += 1;
         if steps > MAX_LINKS {
             break;
@@ -545,8 +558,11 @@ fn plan(config_path: &Path, file_itself: bool) -> Plan {
             // `join` keeps an absolute target as it is.
             pending.push(directory.join(target));
         }
-        if std::fs::symlink_metadata(directory).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            pending.push(directory.to_path_buf());
+        // The directory when it is a link itself, or with `above` the
+        // nearest link over it: its own step goes on from there.
+        let reach = if above { usize::MAX } else { 1 };
+        if let Some(link) = directory.ancestors().take(reach).find(|at| at.is_symlink()) {
+            pending.push(link.to_path_buf());
         }
         directories.push(directory.to_path_buf());
     }
@@ -698,7 +714,7 @@ impl Follower {
             incomplete: false,
             failed,
         };
-        follower.rewatch(plan(config_path, how.file_itself));
+        follower.rewatch(plan(config_path, how.file_itself, how.trusted));
         follower
     }
 
@@ -719,10 +735,11 @@ impl Follower {
                 _ = recheck.tick(), if self.rechecks() => {}
             }
             if self.watcher.is_some() {
-                let (path, file_itself) = (self.config_path.clone(), self.how.file_itself);
+                let (path, how) = (self.config_path.clone(), self.how);
                 // A few `stat` calls, off the runtime's threads like the read.
                 if let Ok(plan) =
-                    tokio::task::spawn_blocking(move || plan(&path, file_itself)).await
+                    tokio::task::spawn_blocking(move || plan(&path, how.file_itself, how.trusted))
+                        .await
                 {
                     self.rewatch(plan);
                 }

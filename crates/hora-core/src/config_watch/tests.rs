@@ -285,8 +285,12 @@ async fn trusted_notifications_leave_the_periodic_reread_off() {
     assert!(!follower.rechecks());
     tokio::spawn(follower.run());
     // A backend may still deliver the write that created the file (`FSEvents`
-    // batches): a few requests at most, never one per tick.
-    assert!(requests_within(&mut rx, Duration::from_millis(600)).await <= 2);
+    // replays it as several events): that drains first, then nothing ticks.
+    let _ = requests_within(&mut rx, Duration::from_millis(600)).await;
+    assert_eq!(
+        requests_within(&mut rx, Duration::from_millis(600)).await,
+        0
+    );
     std::fs::write(&path, "two").unwrap();
     tokio::time::timeout(PATIENCE, rx.recv())
         .await
@@ -487,7 +491,7 @@ fn a_plain_file_is_watched_through_its_directory_only() {
     std::fs::write(&path, "one").unwrap();
     let real = std::fs::canonicalize(&dir.0).unwrap();
 
-    let plan = plan(&path, false);
+    let plan = plan(&path, false, false);
     assert_eq!(names(&plan), ["config.toml"]);
     assert_eq!(directories(&plan), std::slice::from_ref(&real));
 
@@ -495,10 +499,10 @@ fn a_plain_file_is_watched_through_its_directory_only() {
     // to move, the watch never was on the file.
     let before = plan.targets;
     replace_by_rename(&path, "two");
-    assert_eq!(super::plan(&path, false).targets, before);
+    assert_eq!(super::plan(&path, false, false).targets, before);
 
     // Only a file mounted on its own is watched itself.
-    let with_file = super::plan(&path, true);
+    let with_file = super::plan(&path, true, false);
     assert_eq!(
         directories(&with_file),
         [real.clone(), real.join("config.toml")]
@@ -514,7 +518,7 @@ fn a_replaced_directory_is_a_new_target() {
     let inner = dir.path("conf");
     std::fs::create_dir(&inner).unwrap();
     std::fs::write(inner.join("config.toml"), "one").unwrap();
-    let before = plan(&inner.join("config.toml"), false);
+    let before = plan(&inner.join("config.toml"), false, false);
 
     let other = dir.path("conf.new");
     std::fs::create_dir(&other).unwrap();
@@ -522,7 +526,7 @@ fn a_replaced_directory_is_a_new_target() {
     std::fs::rename(&inner, dir.path("conf.old")).unwrap();
     std::fs::rename(&other, &inner).unwrap();
 
-    let after = plan(&inner.join("config.toml"), false);
+    let after = plan(&inner.join("config.toml"), false, false);
     assert_eq!(directories(&before), directories(&after));
     assert_ne!(before.targets, after.targets);
 }
@@ -539,9 +543,79 @@ fn a_symlinked_config_is_watched_along_its_chain() {
     symlink("..data/config.toml", dir.path("config.toml")).unwrap();
     let real = std::fs::canonicalize(&dir.0).unwrap();
 
-    let plan = plan(&dir.path("config.toml"), false);
+    let plan = plan(&dir.path("config.toml"), false, false);
     assert_eq!(names(&plan), ["..data", "..v1", "config.toml"]);
     assert_eq!(directories(&plan), [real.clone(), real.join("..v1")]);
+}
+
+/// A link higher up the path is part of the chain only when asked for: the
+/// directory that holds it is watched for its name, and so is the one that
+/// holds what it points to.
+#[cfg(unix)]
+#[test]
+fn a_link_above_the_config_is_followed_on_request() {
+    use std::os::unix::fs::symlink;
+
+    let dir = Scratch::new("plan-above");
+    // Canonical, so that no link of the temporary directory's own path
+    // (`/var` on macOS) joins the chain.
+    let real = std::fs::canonicalize(&dir.0).unwrap();
+    std::fs::create_dir_all(real.join("releases/1/conf")).unwrap();
+    std::fs::write(real.join("releases/1/conf/config.toml"), "one").unwrap();
+    symlink("releases/1", real.join("current")).unwrap();
+    let path = real.join("current/conf/config.toml");
+
+    let plain = plan(&path, false, false);
+    assert_eq!(names(&plain), ["config.toml"]);
+    assert_eq!(directories(&plain), [real.join("releases/1/conf")]);
+
+    let above = plan(&path, false, true);
+    assert_eq!(names(&above), ["1", "config.toml", "current"]);
+    assert_eq!(
+        directories(&above),
+        [
+            real.clone(),
+            real.join("releases"),
+            real.join("releases/1/conf")
+        ]
+    );
+}
+
+/// With the periodic re-read off, a release swapped under the config path is
+/// announced, and so is a change to the config of the new release.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_release_swapped_above_the_config_is_announced_without_the_reread() {
+    use std::os::unix::fs::symlink;
+
+    let dir = Scratch::new("above");
+    let real = std::fs::canonicalize(&dir.0).unwrap();
+    for release in ["1", "2"] {
+        let conf = real.join("releases").join(release).join("conf");
+        std::fs::create_dir_all(&conf).unwrap();
+        std::fs::write(conf.join("config.toml"), release).unwrap();
+    }
+    symlink("releases/1", real.join("current")).unwrap();
+    let path = real.join("current/conf/config.toml");
+
+    let (follower, mut rx) = ticking(&path, true);
+    assert!(!follower.rechecks());
+    tokio::spawn(follower.run());
+    let _ = requests_within(&mut rx, Duration::from_millis(600)).await;
+
+    symlink("releases/2", real.join("current.next")).unwrap();
+    std::fs::rename(real.join("current.next"), real.join("current")).unwrap();
+    tokio::time::timeout(PATIENCE, rx.recv())
+        .await
+        .expect("the swap was announced");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "2");
+
+    // The watch moved to the new release's directory.
+    let _ = requests_within(&mut rx, Duration::from_millis(600)).await;
+    std::fs::write(real.join("releases/2/conf/config.toml"), "two").unwrap();
+    tokio::time::timeout(PATIENCE, rx.recv())
+        .await
+        .expect("the change was announced");
 }
 
 #[cfg(unix)]
@@ -552,7 +626,7 @@ fn a_loop_of_links_ends() {
     let dir = Scratch::new("plan-loop");
     symlink("b.toml", dir.path("a.toml")).unwrap();
     symlink("a.toml", dir.path("b.toml")).unwrap();
-    let plan = plan(&dir.path("a.toml"), false);
+    let plan = plan(&dir.path("a.toml"), false, false);
     assert_eq!(names(&plan), ["a.toml", "b.toml"]);
     assert_eq!(plan.targets.len(), 1);
 }
