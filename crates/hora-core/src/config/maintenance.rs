@@ -140,29 +140,37 @@ impl Maintenance {
 impl Recurrence {
     /// Every run whose span overlaps `[from, to]`: from the first one that
     /// is still going at `from` (it started at most `duration_secs` before)
-    /// to the last that starts by `to`.
+    /// to the last that starts by `to`. Walked back from `to`, so that of a
+    /// schedule with more runs than [`MAX_OCCURRENCES`] the latest are
+    /// listed: the one going on now and the next ones are what a page shows
+    /// first, the oldest days of its history what it can do without.
     fn spans(&self, from: i64, to: i64) -> Vec<(Timestamp, Timestamp)> {
         let duration = i64::from(self.duration_secs);
+        let earliest = from.saturating_sub(duration);
         let mut cursor = LocalCronTime {
-            at: from.saturating_sub(duration).saturating_sub(1),
+            at: to,
             tz: self.timezone.clone(),
         };
+        // `to` itself may be a run; after it, strictly earlier ones.
+        let mut inclusive = true;
         let mut spans = Vec::new();
         while spans.len() < MAX_OCCURRENCES {
-            let Ok(next) = self.cron.find_next_occurrence(&cursor, false) else {
+            let Ok(previous) = self.cron.find_previous_occurrence(&cursor, inclusive) else {
                 break;
             };
-            if next.at > to {
+            if previous.at < earliest {
                 break;
             }
             if let (Some(start), Some(end)) = (
-                crate::clock::at(next.at),
-                crate::clock::at(next.at.saturating_add(duration)),
+                crate::clock::at(previous.at),
+                crate::clock::at(previous.at.saturating_add(duration)),
             ) {
                 spans.push((start, end));
             }
-            cursor = next;
+            cursor = previous;
+            inclusive = false;
         }
+        spans.reverse();
         spans
     }
 }
@@ -325,13 +333,16 @@ mod tests {
         );
     }
 
-    /// A cron that fires every minute is listed a bounded number of times.
+    /// A cron that fires every minute is listed a bounded number of times,
+    /// and what is listed is the latest: the run going on at the end of the
+    /// range, not the oldest of a history.
     #[test]
     fn a_schedule_lists_a_bounded_number_of_runs() {
         let busy = window("cron = '* * * * *'\nduration_secs = 30").expect("valid");
-        assert_eq!(
-            busy.spans(0, at("2026-01-01T00:00:00Z")).len(),
-            MAX_OCCURRENCES
-        );
+        let to = at("2026-01-01T00:00:00Z");
+        let spans = busy.spans(0, to);
+        assert_eq!(spans.len(), MAX_OCCURRENCES);
+        assert_eq!(spans.last().map(|span| span.0.as_second()), Some(to));
+        assert!(spans.is_sorted());
     }
 }
