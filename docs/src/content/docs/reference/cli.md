@@ -291,7 +291,9 @@ watchdog itself can't warn about, since it needs at least one working
 channel to reach you), and, on Linux, live reload (`reload`: a warning when
 the config is bind-mounted as a single file, which stops following once the
 file is replaced on the host, or sits on a network filesystem, where a
-change waits for the re-read every 60 s).
+change waits for the re-read every 60 s; otherwise the filesystem whose
+notifications are trusted, so that the re-read only runs while a watch is
+missing).
 Failures are judged against the config - no IPv6 route only fails when a
 `dual_stack` monitor needs one - and the process exits non-zero on any
 missing needed capability.

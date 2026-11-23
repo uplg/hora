@@ -15,6 +15,7 @@ const EVENTS_ONLY: Follow = Follow {
     recheck: Duration::from_secs(3600),
     events: true,
     file_itself: false,
+    trusted: false,
 };
 
 /// A directory of its own under the system's temporary one, removed on drop.
@@ -235,6 +236,7 @@ async fn the_periodic_reread_finds_a_change_nothing_announced() {
             recheck: Duration::from_millis(150),
             events: false,
             file_itself: false,
+            trusted: true,
         },
     );
     assert!(follower.watcher.is_none() && follower.watched.is_empty());
@@ -245,6 +247,97 @@ async fn the_periodic_reread_finds_a_change_nothing_announced() {
     assert_eq!(change(&mut reloader).await, "two");
     std::fs::write(&path, "three").unwrap();
     assert_eq!(change(&mut reloader).await, "three");
+}
+
+/// A follower whose re-read ticks every 50 ms, trusting the notifications or
+/// not, with its requests handed to the test.
+fn ticking(path: &Path, trusted: bool) -> (Follower, mpsc::Receiver<()>) {
+    let (tx, rx) = mpsc::channel(64);
+    let how = Follow {
+        recheck: Duration::from_millis(50),
+        events: true,
+        file_itself: false,
+        trusted,
+    };
+    (Follower::new(path, tx, how), rx)
+}
+
+/// How many requests arrive within `window`.
+async fn requests_within(rx: &mut mpsc::Receiver<()>, window: Duration) -> usize {
+    let deadline = Instant::now() + window;
+    let mut count = 0;
+    while let Ok(Some(())) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        count += 1;
+    }
+    count
+}
+
+/// On a trusted filesystem with every watch in place, nothing ticks: an idle
+/// daemon does not wake to re-read its config. A change is still announced.
+/// Untrusted, the same follower ticks.
+#[tokio::test]
+async fn trusted_notifications_leave_the_periodic_reread_off() {
+    let dir = Scratch::new("trusted");
+    let path = dir.path("config.toml");
+    std::fs::write(&path, "one").unwrap();
+
+    let (follower, mut rx) = ticking(&path, true);
+    assert!(!follower.rechecks());
+    tokio::spawn(follower.run());
+    // A backend may still deliver the write that created the file (`FSEvents`
+    // replays it as several events): that drains first, then nothing ticks.
+    let _ = requests_within(&mut rx, Duration::from_millis(600)).await;
+    assert_eq!(
+        requests_within(&mut rx, Duration::from_millis(600)).await,
+        0
+    );
+    std::fs::write(&path, "two").unwrap();
+    tokio::time::timeout(PATIENCE, rx.recv())
+        .await
+        .expect("the change was announced");
+
+    let (follower, mut rx) = ticking(&path, false);
+    assert!(follower.rechecks());
+    tokio::spawn(follower.run());
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await >= 4);
+}
+
+/// A directory that does not exist yet cannot be watched: until it does, the
+/// re-read runs even on a trusted filesystem, and it finds the directory.
+/// Once the watch is in place the ticks stop.
+#[tokio::test]
+async fn a_missing_watch_keeps_the_periodic_reread_on() {
+    let dir = Scratch::new("missing");
+    let sub = dir.path("conf");
+    let path = sub.join("config.toml");
+
+    let (follower, mut rx) = ticking(&path, true);
+    assert!(follower.incomplete && follower.rechecks());
+    tokio::spawn(follower.run());
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await >= 4);
+
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(&path, "one").unwrap();
+    // The next tick places the watch; what was announced meanwhile drains.
+    let _ = requests_within(&mut rx, Duration::from_millis(600)).await;
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await <= 2);
+    std::fs::write(&path, "two").unwrap();
+    tokio::time::timeout(PATIENCE, rx.recv())
+        .await
+        .expect("the change was announced");
+}
+
+/// Once the backend reported an error, its silence is not trusted again.
+#[tokio::test]
+async fn a_backend_error_turns_the_periodic_reread_on() {
+    let dir = Scratch::new("failed");
+    let path = dir.path("config.toml");
+    std::fs::write(&path, "one").unwrap();
+    let (follower, mut rx) = ticking(&path, true);
+    follower.failed.store(true, Ordering::Relaxed);
+    assert!(follower.rechecks());
+    tokio::spawn(follower.run());
+    assert!(requests_within(&mut rx, Duration::from_millis(600)).await >= 4);
 }
 
 /// The follower stops, and its watcher with it, when the supervisor drops
@@ -398,7 +491,7 @@ fn a_plain_file_is_watched_through_its_directory_only() {
     std::fs::write(&path, "one").unwrap();
     let real = std::fs::canonicalize(&dir.0).unwrap();
 
-    let plan = plan(&path, false);
+    let plan = plan(&path, false, false);
     assert_eq!(names(&plan), ["config.toml"]);
     assert_eq!(directories(&plan), std::slice::from_ref(&real));
 
@@ -406,10 +499,10 @@ fn a_plain_file_is_watched_through_its_directory_only() {
     // to move, the watch never was on the file.
     let before = plan.targets;
     replace_by_rename(&path, "two");
-    assert_eq!(super::plan(&path, false).targets, before);
+    assert_eq!(super::plan(&path, false, false).targets, before);
 
     // Only a file mounted on its own is watched itself.
-    let with_file = super::plan(&path, true);
+    let with_file = super::plan(&path, true, false);
     assert_eq!(
         directories(&with_file),
         [real.clone(), real.join("config.toml")]
@@ -425,7 +518,7 @@ fn a_replaced_directory_is_a_new_target() {
     let inner = dir.path("conf");
     std::fs::create_dir(&inner).unwrap();
     std::fs::write(inner.join("config.toml"), "one").unwrap();
-    let before = plan(&inner.join("config.toml"), false);
+    let before = plan(&inner.join("config.toml"), false, false);
 
     let other = dir.path("conf.new");
     std::fs::create_dir(&other).unwrap();
@@ -433,7 +526,7 @@ fn a_replaced_directory_is_a_new_target() {
     std::fs::rename(&inner, dir.path("conf.old")).unwrap();
     std::fs::rename(&other, &inner).unwrap();
 
-    let after = plan(&inner.join("config.toml"), false);
+    let after = plan(&inner.join("config.toml"), false, false);
     assert_eq!(directories(&before), directories(&after));
     assert_ne!(before.targets, after.targets);
 }
@@ -450,9 +543,79 @@ fn a_symlinked_config_is_watched_along_its_chain() {
     symlink("..data/config.toml", dir.path("config.toml")).unwrap();
     let real = std::fs::canonicalize(&dir.0).unwrap();
 
-    let plan = plan(&dir.path("config.toml"), false);
+    let plan = plan(&dir.path("config.toml"), false, false);
     assert_eq!(names(&plan), ["..data", "..v1", "config.toml"]);
     assert_eq!(directories(&plan), [real.clone(), real.join("..v1")]);
+}
+
+/// A link higher up the path is part of the chain only when asked for: the
+/// directory that holds it is watched for its name, and so is the one that
+/// holds what it points to.
+#[cfg(unix)]
+#[test]
+fn a_link_above_the_config_is_followed_on_request() {
+    use std::os::unix::fs::symlink;
+
+    let dir = Scratch::new("plan-above");
+    // Canonical, so that no link of the temporary directory's own path
+    // (`/var` on macOS) joins the chain.
+    let real = std::fs::canonicalize(&dir.0).unwrap();
+    std::fs::create_dir_all(real.join("releases/1/conf")).unwrap();
+    std::fs::write(real.join("releases/1/conf/config.toml"), "one").unwrap();
+    symlink("releases/1", real.join("current")).unwrap();
+    let path = real.join("current/conf/config.toml");
+
+    let plain = plan(&path, false, false);
+    assert_eq!(names(&plain), ["config.toml"]);
+    assert_eq!(directories(&plain), [real.join("releases/1/conf")]);
+
+    let above = plan(&path, false, true);
+    assert_eq!(names(&above), ["1", "config.toml", "current"]);
+    assert_eq!(
+        directories(&above),
+        [
+            real.clone(),
+            real.join("releases"),
+            real.join("releases/1/conf")
+        ]
+    );
+}
+
+/// With the periodic re-read off, a release swapped under the config path is
+/// announced, and so is a change to the config of the new release.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_release_swapped_above_the_config_is_announced_without_the_reread() {
+    use std::os::unix::fs::symlink;
+
+    let dir = Scratch::new("above");
+    let real = std::fs::canonicalize(&dir.0).unwrap();
+    for release in ["1", "2"] {
+        let conf = real.join("releases").join(release).join("conf");
+        std::fs::create_dir_all(&conf).unwrap();
+        std::fs::write(conf.join("config.toml"), release).unwrap();
+    }
+    symlink("releases/1", real.join("current")).unwrap();
+    let path = real.join("current/conf/config.toml");
+
+    let (follower, mut rx) = ticking(&path, true);
+    assert!(!follower.rechecks());
+    tokio::spawn(follower.run());
+    let _ = requests_within(&mut rx, Duration::from_millis(600)).await;
+
+    symlink("releases/2", real.join("current.next")).unwrap();
+    std::fs::rename(real.join("current.next"), real.join("current")).unwrap();
+    tokio::time::timeout(PATIENCE, rx.recv())
+        .await
+        .expect("the swap was announced");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "2");
+
+    // The watch moved to the new release's directory.
+    let _ = requests_within(&mut rx, Duration::from_millis(600)).await;
+    std::fs::write(real.join("releases/2/conf/config.toml"), "two").unwrap();
+    tokio::time::timeout(PATIENCE, rx.recv())
+        .await
+        .expect("the change was announced");
 }
 
 #[cfg(unix)]
@@ -463,7 +626,7 @@ fn a_loop_of_links_ends() {
     let dir = Scratch::new("plan-loop");
     symlink("b.toml", dir.path("a.toml")).unwrap();
     symlink("a.toml", dir.path("b.toml")).unwrap();
-    let plan = plan(&dir.path("a.toml"), false);
+    let plan = plan(&dir.path("a.toml"), false, false);
     assert_eq!(names(&plan), ["a.toml", "b.toml"]);
     assert_eq!(plan.targets.len(), 1);
 }
@@ -625,6 +788,45 @@ fn a_network_filesystem_is_found() {
     // FUSE in general passes local writes through (Unraid's shfs).
     let unraid = "30 1 0:40 / /mnt/user rw - fuse.shfs shfs rw\n";
     assert_eq!(found(unraid, "/mnt/user/appdata/hora/config.toml"), []);
+}
+
+fn trusted(mountinfo: &str, file: &str) -> Option<String> {
+    mount_trusted(mountinfo, Path::new(file), Path::new(file))
+}
+
+/// A local filesystem with no caveat is trusted; everything else is not.
+#[test]
+fn only_a_local_filesystem_without_caveats_is_trusted() {
+    assert_eq!(
+        trusted(COMPOSE, "/etc/hora/config.toml").as_deref(),
+        Some("ext4")
+    );
+    // The container's own overlay: a lower layer can change underneath.
+    assert_eq!(trusted(COMPOSE, "/config.toml"), None);
+
+    let unraid = "30 1 0:40 / /mnt/user rw - fuse.shfs shfs rw\n";
+    assert_eq!(
+        trusted(unraid, "/mnt/user/appdata/hora/config.toml").as_deref(),
+        Some("fuse.shfs")
+    );
+    // A FUSE filesystem that is not known to pass local writes through.
+    let sshfs = "31 1 0:41 / /mnt/remote rw - fuse.sshfs host: rw\n";
+    assert_eq!(trusted(sshfs, "/mnt/remote/config.toml"), None);
+    let unknown = "32 1 0:42 / /mnt/odd rw - fuse.something odd rw\n";
+    assert_eq!(trusted(unknown, "/mnt/odd/config.toml"), None);
+
+    let nfs = format!("{COMPOSE}1520 1502 0:61 / /mnt/shared rw - nfs4 nas:/export rw\n");
+    assert_eq!(trusted(&nfs, "/mnt/shared/config.toml"), None);
+
+    // A file mounted on its own, even from ext4: a caveat stands.
+    let single = COMPOSE.replace(
+        "/home/ops/hora/config /etc/hora ",
+        "/home/ops/hora/config.toml /etc/hora/config.toml ",
+    );
+    assert_eq!(trusted(&single, "/etc/hora/config.toml"), None);
+
+    // No mount table, no trust.
+    assert_eq!(trusted("", "/etc/hora/config.toml"), None);
 }
 
 #[test]
