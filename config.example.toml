@@ -326,7 +326,7 @@ depends_on = ["api"]
 #                         # With a 3xx among them the first answer is judged:
 #                         # redirects are not followed.
 # method = "HEAD"         # optional; "GET" (default) or "HEAD". A HEAD has no
-#                         # response body: not with keyword / json_query /
+#                         # response body: not with keyword / json_query / jq /
 #                         # number_regex. No other method: Hora sends no body.
 # fail_threshold = 1      # optional; consecutive failed checks before THIS monitor
 #                         # is down, instead of [alerts] fail_threshold. Any kind.
@@ -380,6 +380,9 @@ depends_on = ["database"]
 # keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 # json_query = "$.status"   # JSONPath (RFC 9535) evaluated against a JSON body
 # json_expected = "ok"      # the queried value must equal this (omit = must match a node)
+# jq = ".data.value | tonumber"  # jq expression on a JSON body: one string, number or bool
+# jq_expected = "10"             # compared with this (omit = true)
+# jq_operator = ">="             # == (default), !=, <, <=, >, >= (the last four: numbers)
 # number_regex = 'ships">(\d+)<'  # extract a number from the body (first capture group,
 #                                 # or the whole match) - down when nothing matches
 # number_min = 1            # ... or when the number is below this (inclusive bound)

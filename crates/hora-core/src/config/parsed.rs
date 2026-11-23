@@ -462,6 +462,45 @@ impl ParseField for HttpMethod {
     }
 }
 
+/// How a `jq` result is compared with `jq_expected` (`jq_operator`): `==`
+/// unless it says otherwise. The ordering operators compare numbers only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JqOperator {
+    #[default]
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl JqOperator {
+    const ALL: [Self; 6] = [Self::Eq, Self::Ne, Self::Lt, Self::Le, Self::Gt, Self::Ge];
+
+    /// As written in the config.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+        }
+    }
+}
+
+impl ParseField for JqOperator {
+    fn parse_field(raw: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|operator| operator.as_str() == raw.trim())
+            .ok_or_else(|| format!("jq_operator {raw:?} is not supported: ==, !=, <, <=, > or >="))
+    }
+}
+
 impl From<HttpMethod> for reqwest::Method {
     fn from(method: HttpMethod) -> Self {
         match method {

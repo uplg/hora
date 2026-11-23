@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::monitor::{Kind, ReleaseWatch};
-use super::parsed::{DnsRecord, HttpMethod, Parsed, RawStatuses};
+use super::parsed::{DnsRecord, HttpMethod, JqOperator, Parsed, RawStatuses};
 use super::secret::Secret;
 
 /// A `[[monitors]]` entry exactly as the TOML spells it: one flat table, every
@@ -75,6 +75,19 @@ pub(crate) struct RawMonitor {
     /// When unset, the query only has to match at least one node.
     #[serde(default)]
     pub(crate) json_expected: Option<String>,
+    /// HTTP body assertion: a jq expression run on a JSON body. It must
+    /// produce exactly one string, number or boolean, compared with
+    /// `jq_expected` by `jq_operator`.
+    #[serde(default)]
+    pub(crate) jq: Option<Parsed<crate::jq::JqProgram>>,
+    /// The value the `jq` result is compared with; unset = `true`. Compared
+    /// as numbers when both sides are numbers, as text otherwise.
+    #[serde(default)]
+    pub(crate) jq_expected: Option<String>,
+    /// How the `jq` result is compared: `==` (the default), `!=`, `<`, `<=`,
+    /// `>`, `>=` - the ordering ones on numbers only.
+    #[serde(default)]
+    pub(crate) jq_operator: Option<Parsed<JqOperator>>,
     /// HTTP body assertion: a regex extracting a number from the response body -
     /// the first capture group when the pattern has one, the whole match
     /// otherwise. Fails when nothing matches, the extracted text is not a
@@ -261,6 +274,9 @@ impl Default for RawMonitor {
             keyword_invert: false,
             json_query: None,
             json_expected: None,
+            jq: None,
+            jq_expected: None,
+            jq_operator: None,
             number_regex: None,
             number_min: None,
             number_max: None,

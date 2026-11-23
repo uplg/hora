@@ -58,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local-only down the peers have not confirmed. The time of the last one is kept in the database, so a restart
   neither repeats nor forgets one. The webhook payload of a reminder is a
   `down` with `down_for_secs`. Off by default; no migration.
+- **jq assertions on http monitors.** `jq` runs a jq expression (with
+  [jaq](https://github.com/01mf02/jaq)) on a JSON body and compares its one
+  result with `jq_expected` (default `true`) by `jq_operator` (`==`, `!=`,
+  `<`, `<=`, `>`, `>=`): for what a `json_query` cannot judge, such as a
+  count of failing entries, arithmetic, or a number sent as a string. The
+  expression is compiled at load and shared by the monitors that spell it the
+  same; it has no access to the environment, files or modules, and function
+  definitions and loops (`repeat`, `until`, `while`, `range`, `recurse(f)`)
+  are refused, so that an expression always ends. No result, several, `null`, an array or an object
+  fail the check. On the public page, a failure reads "content check failed".
 
 ### Changed
 

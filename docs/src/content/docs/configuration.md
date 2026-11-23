@@ -247,7 +247,8 @@ Values that cannot work are refused too:
 | --- | --- |
 | `interval_secs`, `timeout_secs`, `expect_every_secs`, `health.interval_secs` | at most 30 days (2592000) |
 | `expected_status` | statuses from 100 to 599 and classes `"1xx"` to `"5xx"`; a list is not empty |
-| `method` | `"GET"` or `"HEAD"`, on an http monitor; no `"HEAD"` with `keyword`, `json_query` or `number_regex` |
+| `method` | `"GET"` or `"HEAD"`, on an http monitor; no `"HEAD"` with `keyword`, `json_query`, `jq` or `number_regex` |
+| `jq_operator` | `==`, `!=`, `<`, `<=`, `>` or `>=`, with a `jq`; so is `jq_expected` |
 | `fail_threshold` on a monitor | at least 1 |
 | A `[[maintenance]]` window | `start` and `end`, or a `cron` with `duration_secs` from 1 to a week (604800) and an IANA `timezone` |
 | `repeat_alert_secs`, in `[alerts]` or on a monitor | 0 (off) or at most 30 days (2592000) |

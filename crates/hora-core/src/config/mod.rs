@@ -19,11 +19,11 @@ mod validate;
 pub use channel::Channel;
 pub use maintenance::{Maintenance, MaintenanceTime, Recurrence};
 pub use monitor::{
-    DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JsonAssert, KeywordAssert, Kind, Monitor, MonitorKind,
-    NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls, TcpSpec,
-    split_host_port,
+    DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JqAssert, JsonAssert, KeywordAssert, Kind, Monitor,
+    MonitorKind, NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls,
+    TcpSpec, split_host_port,
 };
-pub use parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, ParseField, Parsed};
+pub use parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, JqOperator, ParseField, Parsed};
 pub use peer::Peer;
 pub use secret::{Secret, redact_url_secrets};
 

@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::Alerts;
-use super::parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, Parsed};
+use super::parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, JqOperator, Parsed};
 use super::raw::RawMonitor;
 use super::secret::{Secret, redact_url_secrets};
 
@@ -195,6 +195,8 @@ pub struct HttpSpec {
     pub keyword: Option<KeywordAssert>,
     /// A `JSONPath` evaluated against a JSON body.
     pub json: Option<JsonAssert>,
+    /// A jq expression evaluated against a JSON body.
+    pub jq: Option<JqAssert>,
     /// A number extracted from the body by a regex, within bounds.
     pub number: Option<NumberAssert>,
     /// Cap (KiB) on the body read for the assertions (default 1 MiB).
@@ -220,6 +222,15 @@ pub struct JsonAssert {
     /// The value the query result must equal (string compare); unset = the
     /// query only has to match at least one node.
     pub expected: Option<String>,
+}
+
+/// `jq` / `jq_expected` / `jq_operator`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JqAssert {
+    pub query: Compiled<crate::jq::JqProgram>,
+    /// The value the one result is compared with; unset = `true`.
+    pub expected: Option<String>,
+    pub operator: JqOperator,
 }
 
 /// `number_regex` / `number_min` / `number_max`.
@@ -353,7 +364,7 @@ impl HttpSpec {
     /// Whether any body assertion is configured.
     #[must_use]
     pub fn asserts_body(&self) -> bool {
-        self.keyword.is_some() || self.json.is_some() || self.number.is_some()
+        self.keyword.is_some() || self.json.is_some() || self.jq.is_some() || self.number.is_some()
     }
 }
 
@@ -369,6 +380,7 @@ impl std::fmt::Debug for HttpSpec {
             .field("headers", &self.headers)
             .field("keyword", &self.keyword)
             .field("json", &self.json)
+            .field("jq", &self.jq)
             .field("number", &self.number)
             .field("max_body_kb", &self.max_body_kb)
             .field("proxy", &self.proxy.as_deref().map(redact_url_secrets))
