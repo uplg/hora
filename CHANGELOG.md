@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Pushover priority and sound per channel.** A `pushover` channel may set
+  `priority` (-2 to 2), used for every message it sends instead of the one
+  the event's urgency picks, `recovery_priority` (-2 to 2) for recoveries
+  (unset: `priority`), and `sound` (`"none"` is silence). Priority 2
+  (emergency) repeats until acknowledged and needs `retry` (at least 30 s)
+  and `expire` (at most 10800 s), as Pushover's API does, as soon as either
+  priority is 2; both are refused otherwise and are sent only with an
+  emergency. A channel without these keys sends exactly what it sent
+  before.
+
 ## [0.12.3] - 2026-11-23
 
 The running version on the page, and an idle daemon that stays asleep where

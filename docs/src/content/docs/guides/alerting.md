@@ -21,7 +21,7 @@ each monitor to specific ones. Ten backends are built in:
 | `matrix` | `homeserver` + access `token` + `room_id` |
 | `ntfy` | topic `url`, optional `token` for private servers |
 | `gotify` | server `url` + application `token` |
-| `pushover` | application `token` + `user` key |
+| `pushover` | application `token` + `user` key; optional `priority`, `recovery_priority`, `sound`, `retry`, `expire` (below) |
 | `email` | SMTP: `host`, `port` (587 STARTTLS default, `implicit_tls` for 465), `from`, `to` |
 | `freemobile` | Free Mobile SMS: `user` + `pass` |
 | `webhook` | POSTs a structured JSON event (`{ event, monitor, … }`) to `url` (see below) |
@@ -49,6 +49,19 @@ response body.
 On Gotify, ntfy and Pushover the notification's title is the event's headline
 ("API is DOWN") and its message the detail, so a phone's notification list
 names the monitor on every line.
+
+A Pushover channel may set its own `priority` (-2 to 2), which then applies
+to every message it sends - digests and pushed alerts included - instead of
+the one the event's urgency (or a pushed alert's `severity`) picks, and a
+`sound` (`"none"` is silence). Recoveries are sent at `recovery_priority`
+(-2 to 2) when it is set, else at `priority` too. Priority 2 (emergency)
+repeats until it is acknowledged and needs `retry` (seconds between repeats,
+at least 30) and `expire` (how long, at most 10800) as soon as `priority` or
+`recovery_priority` is 2; both are refused otherwise, and only messages
+actually sent as an emergency carry them. `priority = 2` with
+`recovery_priority = 0` pages for a down until acknowledged and announces
+the recovery once. Two channels with the same keys and different priorities
+route quiet and loud monitors apart.
 
 Every channel renders the same neutral message (`API is DOWN`,
 `API is slow (812 ms)`, `API recovered`) and only adds its own markup and
