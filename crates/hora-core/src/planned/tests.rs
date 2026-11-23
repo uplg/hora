@@ -1021,7 +1021,12 @@ async fn a_host_window_covers_that_host_and_is_announced_only_from_it() {
     silent.peers.clear();
     assert!(!is_announced(&silent, &own.window));
 
-    let schedule = Schedule::merged(&config, &[own.window.clone(), theirs.window.clone()]);
+    let schedule = Schedule::merged(
+        &config,
+        &[own.window.clone(), theirs.window.clone()],
+        0,
+        i64::MAX,
+    );
     assert_eq!(schedule.windows().len(), 2);
 }
 

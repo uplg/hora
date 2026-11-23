@@ -48,6 +48,7 @@ mod checks;
 mod compact;
 mod incidents;
 mod maintenance;
+mod push_updates;
 mod release;
 mod retention;
 #[cfg(test)]
@@ -90,6 +91,7 @@ pub use maintenance::{
     insert_maintenance_window, maintenance_window, maintenance_windows_between,
     maintenance_windows_since, pending_maintenance_windows,
 };
+pub(crate) use push_updates::PushSubscription;
 pub use release::{StoredRelease, mark_release_notified, release_watch, upsert_release_watch};
 pub(crate) use retention::prune;
 pub use retention::{
@@ -127,9 +129,33 @@ pub struct Store {
     /// [`Store::pages`]). `None` where one pool is all there is: an
     /// in-memory database, a one-shot command.
     pages: Option<SqlitePool>,
+    /// Wakes a push monitor's task when one of its heartbeats is stored
+    /// (see [`Store::subscribe_push`]); shared by every clone.
+    push_updates: std::sync::Arc<push_updates::PushUpdates>,
+    /// How often a push monitor's latest heartbeat was read, for the tests
+    /// that count what an evaluation strategy costs.
+    #[cfg(test)]
+    pub(crate) heartbeat_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Store {
+    fn from_pools(pool: SqlitePool, pages: Option<SqlitePool>) -> Self {
+        Self {
+            pool,
+            pages,
+            push_updates: std::sync::Arc::default(),
+            #[cfg(test)]
+            heartbeat_reads: std::sync::Arc::default(),
+        }
+    }
+
+    /// A wakeup for every heartbeat stored for `id` from now on (by the push
+    /// endpoint, a peer). It carries nothing: the
+    /// database stays the record, the task reads it when woken.
+    pub(crate) fn subscribe_push(&self, id: &str) -> PushSubscription {
+        self.push_updates.subscribe(id)
+    }
+
     /// The sqlx pool, for the query functions of this module only.
     pub(crate) fn sqlx(&self) -> &SqlitePool {
         &self.pool
@@ -160,6 +186,9 @@ impl Store {
         Self {
             pool: self.pages.clone().unwrap_or_else(|| self.pool.clone()),
             pages: None,
+            push_updates: std::sync::Arc::clone(&self.push_updates),
+            #[cfg(test)]
+            heartbeat_reads: std::sync::Arc::clone(&self.heartbeat_reads),
         }
     }
 
@@ -192,7 +221,7 @@ impl Store {
             .run(&pool)
             .await
             .expect("migrate in-memory database");
-        Self { pool, pages: None }
+        Self::from_pools(pool, None)
     }
 
     /// The raw pool, for test fixtures that insert rows no public function
@@ -214,13 +243,69 @@ const CORE_CONNECTIONS: u32 = 3;
 /// Connections of the status pages' pool. With the page cache at 4 MiB a
 /// connection, the two pools bound the daemon's cache memory at 36 MiB.
 const PAGE_CONNECTIONS: u32 = 6;
+/// The page cache of each connection, KiB.
+const CACHE_KIB: u32 = 4000;
 
-/// Open the pool (creating the file if needed, WAL mode) and run migrations.
+/// How big the two pools are, and the page cache of each connection: what
+/// bounds the daemon's cache memory (`cache_kib` x every connection).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolSizing {
+    /// Page cache per connection, KiB.
+    pub cache_kib: u32,
+    /// Connections of the daemon's own pool.
+    pub core: u32,
+    /// Connections of the status pages' pool.
+    pub pages: u32,
+}
+
+impl Default for PoolSizing {
+    fn default() -> Self {
+        Self {
+            cache_kib: CACHE_KIB,
+            core: CORE_CONNECTIONS,
+            pages: PAGE_CONNECTIONS,
+        }
+    }
+}
+
+impl PoolSizing {
+    /// The sizing `[server] database` asks for: `cache_kib` for every
+    /// connection, `max_connections` shared out a third (rounded up) to the
+    /// daemon's pool and the rest to the pages', at least one each - 9 is
+    /// the default 3 + 6, 4 is 2 + 2. Whatever it leaves out stays default.
+    #[must_use]
+    pub fn from_settings(settings: Option<&crate::config::DatabaseSettings>) -> Self {
+        let mut sizing = Self::default();
+        let Some(settings) = settings else {
+            return sizing;
+        };
+        if let Some(cache_kib) = settings.cache_kib {
+            sizing.cache_kib = cache_kib;
+        }
+        if let Some(total) = settings.max_connections {
+            sizing.core = total.div_ceil(3).max(1);
+            sizing.pages = total.saturating_sub(sizing.core).max(1);
+        }
+        sizing
+    }
+}
+
+/// Open the pool (creating the file if needed, WAL mode) and run migrations,
+/// sized as by default (see [`connect_sized`]).
 ///
 /// # Errors
 ///
 /// Returns an error if the database cannot be opened or migrations fail.
 pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
+    connect_sized(database_path, PoolSizing::default()).await
+}
+
+/// [`connect`] with pools and page caches of the given size.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be opened or migrations fail.
+pub async fn connect_sized(database_path: &str, sizing: PoolSizing) -> anyhow::Result<Store> {
     // The database holds failure snippets, push payloads and incident detail, so
     // create it private (0600) rather than at the process umask. SQLite then
     // mirrors that mode onto the -wal/-shm sidecars it spawns.
@@ -241,7 +326,8 @@ pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
         // ceiling of the daemon's page-cache memory: 36 MiB, where the
         // previous 16 MiB each allowed 128 MiB once the database outgrew it.
         // What falls out is still in the OS page cache, a copy away.
-        .pragma("cache_size", "-4000")
+        // `[server] database` sizes both (see `PoolSizing`).
+        .pragma("cache_size", format!("-{}", sizing.cache_kib))
         // A checkpoint rewinds the WAL but leaves the file at its high-water
         // mark, so one burst (long reads pinning a snapshot while the prune
         // writes) kept 100 MB+ on disk. Truncate it back to 64 MiB after a
@@ -252,7 +338,7 @@ pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
     // one writer at a time is all SQLite allows, so a few connections cover
     // the scheduler's inserts and the reads an alert needs.
     let pool = SqlitePoolOptions::new()
-        .max_connections(CORE_CONNECTIONS)
+        .max_connections(sizing.core)
         .acquire_timeout(Duration::from_secs(10))
         .connect_with(options.clone())
         .await?;
@@ -269,16 +355,13 @@ pub async fn connect(database_path: &str) -> anyhow::Result<Store> {
     // keeps the parallel summary queries from queueing. Opened lazily: a
     // one-shot command (`hora silence`, `hora tune`) never touches it.
     let pages = SqlitePoolOptions::new()
-        .max_connections(PAGE_CONNECTIONS)
+        .max_connections(sizing.pages)
         .min_connections(0)
         // Fail fast under contention instead of the 30s default; a slow monitor
         // query then degrades just that card, not the whole page.
         .acquire_timeout(Duration::from_secs(10))
         .connect_lazy_with(options);
-    Ok(Store {
-        pool,
-        pages: Some(pages),
-    })
+    Ok(Store::from_pools(pool, Some(pages)))
 }
 
 /// Create the database file with owner-only (0600) permissions before sqlx opens

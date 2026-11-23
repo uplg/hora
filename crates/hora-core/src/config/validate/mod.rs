@@ -144,17 +144,11 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    validate_tuning(config)?;
     if config.alerts.repeat_alert_secs > 0 {
         validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;
     }
-
-    for window in &config.maintenance {
-        anyhow::ensure!(
-            window.start < window.end,
-            "maintenance window {:?}: start must be before end",
-            window.title
-        );
-    }
+    validate_windows(config)?;
 
     let mut seen = HashSet::new();
     for monitor in &config.monitors {
@@ -225,6 +219,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         )?;
     }
 
+    validate_kuma_push(config, &seen)?;
     crate::topology::validate_dag(&config.monitors)?;
 
     validate_peers(config, &seen, &channel_names)?;
@@ -239,6 +234,48 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         config.alerts.notify_unconfirmed.as_deref(),
         &channel_names,
     )?;
+    Ok(())
+}
+
+/// A fixed maintenance window starts before it ends (a recurring one is
+/// checked as it is read).
+fn validate_windows(config: &Config) -> anyhow::Result<()> {
+    for window in &config.maintenance {
+        if let super::MaintenanceTime::Fixed { start, end } = &window.time {
+            anyhow::ensure!(
+                start < end,
+                "maintenance window {:?}: start must be before end",
+                window.title
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The server's tuning keys - the summary's idle pause, the database
+/// sizing - are checked for sense.
+fn validate_tuning(config: &Config) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config
+            .server
+            .summary_idle_refresh_secs
+            .is_none_or(|secs| (5..=3600).contains(&secs)),
+        "server.summary_idle_refresh_secs must be between 5 and 3600"
+    );
+    if let Some(database) = &config.server.database {
+        anyhow::ensure!(
+            database
+                .cache_kib
+                .is_none_or(|kib| (64..=1_048_576).contains(&kib)),
+            "server.database.cache_kib must be between 64 and 1048576"
+        );
+        anyhow::ensure!(
+            database
+                .max_connections
+                .is_none_or(|connections| (1..=64).contains(&connections)),
+            "server.database.max_connections must be between 1 and 64"
+        );
+    }
     Ok(())
 }
 
@@ -272,6 +309,43 @@ fn validate_push_auth(monitor: &super::Monitor) -> anyhow::Result<()> {
             "monitor {}: push monitor accepts unauthenticated heartbeats \
              (allow_unauthenticated) - its id appears on the status page/API, so anyone \
              who can reach /api/push can forge them",
+            monitor.id
+        );
+    }
+    Ok(())
+}
+
+/// A Kuma push URL finds its monitor by the token in its path, the same
+/// segment a native push names an id in: so each token must be URL-safe,
+/// name one monitor only, and never read as a monitor id or a watched peer's
+/// listen id.
+fn validate_kuma_push(config: &Config, monitor_ids: &HashSet<&str>) -> anyhow::Result<()> {
+    let mut tokens = HashSet::new();
+    for monitor in &config.monitors {
+        let (super::MonitorKind::Push(push), Some(token)) = (&monitor.spec, &monitor.push_token)
+        else {
+            continue;
+        };
+        if !push.kuma_push {
+            continue;
+        }
+        let token = token.as_ref();
+        // The messages never quote the token: it is the credential.
+        anyhow::ensure!(
+            is_url_safe_id(token),
+            "monitor {}: a kuma_push push_token must be alphanumeric, '-' or '_' \
+             (it is a path segment)",
+            monitor.id
+        );
+        anyhow::ensure!(
+            tokens.insert(token),
+            "monitor {}: its kuma_push push_token is another kuma_push monitor's too",
+            monitor.id
+        );
+        anyhow::ensure!(
+            !monitor_ids.contains(token)
+                && !config.peers.iter().any(|peer| peer.listen_id() == token),
+            "monitor {}: its kuma_push push_token equals a monitor id or a peer listen_id",
             monitor.id
         );
     }
@@ -385,6 +459,9 @@ fn validate_channels(config: &Config) -> anyhow::Result<HashSet<&str>> {
                 channel.name()
             );
         }
+        if matches!(channel, Channel::Pushover { .. }) {
+            validate_pushover(channel.name(), &channel.pushover_options())?;
+        }
         // These channels send credentials over the configured URL (in the URL
         // itself, or - for Matrix - in a header); warn on cleartext http.
         let url = match channel {
@@ -408,6 +485,52 @@ fn validate_channels(config: &Config) -> anyhow::Result<HashSet<&str>> {
         }
     }
     Ok(channel_names)
+}
+
+/// A Pushover channel's own settings, as the API takes them: priorities of
+/// -2 to 2, and `retry`/`expire` exactly when one of them is an emergency
+/// (2), which Pushover refuses without them.
+fn validate_pushover(
+    name: &str,
+    options: &hora_notify::pushover::PushoverOptions,
+) -> anyhow::Result<()> {
+    let hora_notify::pushover::PushoverOptions {
+        priority,
+        recovery_priority,
+        sound,
+        retry,
+        expire,
+    } = options;
+    let (retry, expire) = (*retry, *expire);
+    for (key, value) in [
+        ("priority", priority),
+        ("recovery_priority", recovery_priority),
+    ] {
+        anyhow::ensure!(
+            value.is_none_or(|value| (-2..=2).contains(&value)),
+            "channel {name}: {key} must be between -2 and 2"
+        );
+    }
+    if *priority == Some(2) || *recovery_priority == Some(2) {
+        anyhow::ensure!(
+            retry.is_some_and(|secs| secs >= 30),
+            "channel {name}: priority 2 needs retry (at least 30 seconds)"
+        );
+        anyhow::ensure!(
+            expire.is_some_and(|secs| (1..=10_800).contains(&secs)),
+            "channel {name}: priority 2 needs expire (1 to 10800 seconds)"
+        );
+    } else {
+        anyhow::ensure!(
+            retry.is_none() && expire.is_none(),
+            "channel {name}: retry and expire only apply to priority 2"
+        );
+    }
+    anyhow::ensure!(
+        sound.as_deref().is_none_or(|sound| !sound.is_empty()),
+        "channel {name}: sound must not be empty (\"none\" is silence)"
+    );
+    Ok(())
 }
 
 /// The `host` labels of the node and of its peers (a monitor's is checked

@@ -475,7 +475,7 @@ fn maintenance_window_mutes_selected_monitor() {
         "#,
     );
     let parse_dt = |s: &str| s.parse::<jiff::Timestamp>().unwrap();
-    let schedule = crate::planned::Schedule::merged(&config, &[]);
+    let schedule = crate::planned::Schedule::merged(&config, &[], 0, i64::MAX);
     assert!(schedule.in_maintenance("db", parse_dt("2026-06-08T01:00:00Z")));
     // Outside the window, or a monitor not listed.
     assert!(!schedule.in_maintenance("db", parse_dt("2026-06-08T03:00:00Z")));
@@ -633,8 +633,11 @@ fn config_dates_keep_their_looser_spellings() {
             at = " 2026-06-07T12:00:00Z "
         "#,
     );
-    assert_eq!(config.maintenance[0].start.as_second(), 1_780_876_800);
-    assert_eq!(config.maintenance[0].end.as_second(), 1_780_884_000);
+    let MaintenanceTime::Fixed { start, end } = config.maintenance[0].time else {
+        panic!("a fixed window");
+    };
+    assert_eq!(start.as_second(), 1_780_876_800);
+    assert_eq!(end.as_second(), 1_780_884_000);
     assert_eq!(
         config.incidents[0].at.map(jiff::Timestamp::as_second),
         Some(1_780_833_600)
@@ -2509,7 +2512,13 @@ fn the_example_config_round_trips_into_typed_monitors() {
     );
     assert!(smtp.checks_cert());
     let backup = config.find_monitor("nightly-backup").expect("push monitor");
-    assert_eq!(backup.spec, MonitorKind::Push(PushSpec { schedule: None }));
+    assert_eq!(
+        backup.spec,
+        MonitorKind::Push(PushSpec {
+            schedule: None,
+            kuma_push: false
+        })
+    );
 }
 
 #[test]
@@ -3134,6 +3143,135 @@ fn method_is_get_or_head_and_head_asserts_no_body() {
         error.contains("monitor db: method requires an http monitor"),
         "{error}"
     );
+}
+
+/// The summary's idle pause: unset by default, bounded when set.
+#[test]
+fn summary_idle_refresh_is_bounded() {
+    assert_eq!(
+        load(MINIMAL).unwrap().server.summary_idle_refresh_secs,
+        None
+    );
+    let at = |secs: &str| {
+        load(&MINIMAL.replace(
+            "[server]",
+            &format!("[server]\nsummary_idle_refresh_secs = {secs}"),
+        ))
+    };
+    assert_eq!(
+        at("300").unwrap().server.summary_idle_refresh_secs,
+        Some(300)
+    );
+    for bad in ["0", "4", "3601"] {
+        assert!(at(bad).is_err(), "{bad}");
+    }
+}
+
+/// The database sizing: unset by default, read inline, bounded when set.
+#[test]
+fn database_sizing_is_bounded() {
+    assert!(load(MINIMAL).unwrap().server.database.is_none());
+    let sized = MINIMAL.replace(
+        "[server]",
+        "[server]\ndatabase = { cache_kib = 2048, max_connections = 4 }",
+    );
+    let database = load(&sized).unwrap().server.database.expect("database");
+    assert_eq!(
+        (database.cache_kib, database.max_connections),
+        (Some(2048), Some(4))
+    );
+    for bad in [
+        "cache_kib = 0",
+        "cache_kib = 63",
+        "cache_kib = 1048577",
+        "max_connections = 0",
+        "max_connections = 65",
+        "pool = 3",
+    ] {
+        let toml = MINIMAL.replace("[server]", &format!("[server]\ndatabase = {{ {bad} }}"));
+        assert!(load(&toml).is_err(), "{bad}");
+    }
+}
+
+/// A Kuma push URL is opt-in, and its token - the path segment that finds
+/// the monitor - must exist, be URL-safe, unique, and never read as an id.
+#[test]
+fn kuma_push_requires_unique_url_safe_tokens_that_are_no_id() {
+    let job = |id: &str, token: &str| {
+        format!(
+            "[[monitors]]\nid='{id}'\nname='Job'\nkind='push'\ninterval_secs=60\n\
+             kuma_push=true\npush_token='{token}'\n"
+        )
+    };
+    let base = "[page]\n[server]\n";
+    let config = load(&format!("{base}{}", job("job", "synthetic-credential"))).unwrap();
+    assert!(
+        matches!(&config.monitors[0].spec, MonitorKind::Push(push) if push.kuma_push),
+        "{:?}",
+        config.monitors[0].spec
+    );
+    // No token, a token with a slash, two monitors on one token, a token
+    // that is a monitor id.
+    for bad in [
+        format!(
+            "{base}[[monitors]]\nid='job'\nname='Job'\nkind='push'\ninterval_secs=60\n\
+             kuma_push=true\nallow_unauthenticated=true\n"
+        ),
+        format!("{base}{}", job("job", "synthetic/credential")),
+        format!(
+            "{base}{}{}",
+            job("job", "synthetic-credential"),
+            job("job2", "synthetic-credential")
+        ),
+        format!(
+            "{base}{}{}",
+            job("job", "synthetic-credential"),
+            job("synthetic-credential", "another-credential-x")
+        ),
+    ] {
+        let err = load(&bad).expect_err(&bad).to_string();
+        assert!(!err.contains("synthetic-credential"), "{err}");
+    }
+    // Only a push monitor takes it.
+    assert!(
+        load(&format!(
+            "{MINIMAL}\nkuma_push=true\npush_token='synthetic-credential'"
+        ))
+        .is_err()
+    );
+}
+
+/// A Pushover channel's priority, sound and emergency settings, as the API
+/// takes them.
+#[test]
+fn pushover_channel_options_are_validated() {
+    let channel = "\n[[channels]]\nname = 'pager'\ntype = 'pushover'\n\
+                   token = 'test-token'\nuser = 'test-user'\n";
+    for good in [
+        "",
+        "priority = -1\nsound = 'none'",
+        "priority = 2\nretry = 30\nexpire = 600",
+        "priority = 2\nrecovery_priority = 0\nretry = 30\nexpire = 600",
+        "priority = 1\nrecovery_priority = 2\nretry = 30\nexpire = 10800",
+        "recovery_priority = -2",
+    ] {
+        assert!(load(&format!("{MINIMAL}{channel}{good}")).is_ok(), "{good}");
+    }
+    for bad in [
+        "priority = 3",
+        "priority = 2",
+        "priority = 2\nretry = 29\nexpire = 600",
+        "priority = 2\nretry = 30\nexpire = 10801",
+        "retry = 60",
+        "sound = ''",
+        "recovery_priority = -3",
+        "priority = 1\nrecovery_priority = 2",
+        "priority = 1\nrecovery_priority = 2\nretry = 30",
+        "priority = 2\nrecovery_priority = 0\nexpire = 600",
+        "priority = 1\nrecovery_priority = 0\nretry = 30\nexpire = 600",
+    ] {
+        assert!(load(&format!("{MINIMAL}{channel}{bad}")).is_err(), "{bad}");
+    }
 }
 
 /// Reminders of a lasting outage: the monitor's own cadence, else the
