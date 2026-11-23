@@ -25,8 +25,8 @@ pub use lenient::{
 pub use maintenance::{Maintenance, MaintenanceTime, Recurrence};
 pub use monitor::{
     DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JqAssert, JsonAssert, KeywordAssert, Kind, Monitor,
-    MonitorKind, NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls,
-    TcpSpec, split_host_port,
+    MonitorKind, MqttSpec, NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch,
+    Starttls, TcpSpec, split_host_port,
 };
 pub use parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, JqOperator, ParseField, Parsed};
 pub use peer::Peer;
@@ -52,6 +52,9 @@ pub struct Config {
     /// Named notification channels. Monitors route to them by name.
     #[serde(default)]
     pub channels: Vec<Channel>,
+    /// MQTT brokers, one shared connection each. MQTT monitors name them.
+    #[serde(default)]
+    pub brokers: Vec<crate::mqtt::Broker>,
     /// Scheduled maintenance windows that mute alerts.
     #[serde(default)]
     pub maintenance: Vec<Maintenance>,

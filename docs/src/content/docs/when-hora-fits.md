@@ -38,7 +38,7 @@ tries to help you tell which one you are.
 Self-hosted monitoring has good neighbours, and they are worth knowing.
 
 - **You would rather click than write a file**, or you need a check type
-  Hora does not have (databases, MQTT, a real browser...).
+  Hora does not have (databases, a real browser...).
   [Uptime Kuma](https://github.com/louislam/uptime-kuma) has a friendly web
   UI and a very long list of monitor types and notification services.
   Coming from it? [`hora import kuma`](../guides/import/) converts a backup.

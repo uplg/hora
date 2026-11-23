@@ -16,6 +16,7 @@ documents every option; this page covers the mechanics.
 | `[server]` | Bind address, database path, CORS, rate limits, the operator token (`auth_token`), the read-only token (`view_token`), group tokens |
 | `[[channels]]` | Named notification channels (Telegram, Discord, email, ...) |
 | `[alerts]` | Fail threshold, cert expiry warning, retention, alert grouping, still-down reminders, channel watchdog, where local-only downs go (`notify_unconfirmed`) |
+| `[[brokers]]` | MQTT brokers, one shared connection each, read by [MQTT monitors](../guides/monitors/#mqtt) |
 | `[[maintenance]]` | Scheduled windows that mute alerts |
 | `[[incidents]]` | Manual announcements shown as a status page banner |
 | `[[monitors]]` | The monitors themselves |
@@ -312,9 +313,14 @@ Values that cannot work are refused too:
 | `repeat_alert_secs`, in `[alerts]` or on a monitor | 0 (off) or at most 30 days (2592000) |
 | An IPv6 `tcp` target | bracketed: `[::1]:80`, not `::1:80` |
 | `dns_resolver` | an IP and a port (`8.8.8.8:53`, `[2620:fe::fe]:53`), not a hostname |
+| A broker's `url` | `mqtt://host:port` or `mqtts://host:port`, no credentials, path or query in it |
+| A broker's `keep_alive_secs` / `max_packet_kb` | 5 to 300 / 1 to 1024 |
+| `topic` on an mqtt monitor | a concrete topic, no `+` or `#` wildcards |
+| `max_age_secs` | at most 30 days, on an mqtt monitor |
 
 A `timeout_secs` longer than `interval_secs` is accepted with a warning
-(which `hora check` prints, and `hora check --strict` refuses).
+(which `hora check` prints, and `hora check --strict` refuses); push and
+mqtt monitors send no probe, so theirs is not checked.
 
 Before upgrading, run `hora check` with the **new** binary against your
 config: a key or a value an older release accepted may be refused now (see

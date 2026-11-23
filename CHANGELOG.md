@@ -75,6 +75,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or peer `listen_id` may use the id. The optional `[config_monitor]`
   section sets its `name`, `group` and `notify` (default: every channel).
 
+- **MQTT monitors** (`kind = "mqtt"`): the latest message on a topic, read
+  from one connection per `[[brokers]]` entry (`mqtt://` or `mqtts://`,
+  credentials in `username` / `password`), shared by every monitor that
+  names it. Down when nothing arrived, when the message is older than
+  `max_age_secs`, when `keyword`, `json_query` or `jq` fails on the payload,
+  or when the broker is unreachable; like any failed check it counts towards
+  `fail_threshold` (public reason *no recent message*). A topic that is only
+  published periodically gets no verdict for one interval after a start or a
+  reconnect instead of a false down. Brokers reload live; a new
+  `[[brokers]]` section, no change to existing configs.
+
 ### Changed
 
 - **A healthy push monitor is looked at when a heartbeat comes and when its

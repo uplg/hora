@@ -23,6 +23,7 @@ pub mod import;
 pub mod jq;
 pub mod maintenance;
 pub mod mesh;
+pub mod mqtt;
 pub mod notifications;
 pub mod planned;
 pub mod postmortem;
