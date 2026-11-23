@@ -45,6 +45,11 @@ pub struct BuiltinMonitor {
     /// Channels to alert; absent = every channel, like any monitor.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
+    /// Shown to everyone on the status page; absent = `false`: the
+    /// operator's view only. What the configuration of Hora is doing is not
+    /// what a visitor came to read, and the alert does not need the card.
+    #[serde(default)]
+    pub public: Option<bool>,
 }
 
 /// One entry a lenient load left out or changed, or a standing problem with
@@ -481,18 +486,20 @@ fn without_owner(message: &str, owner: &str) -> String {
 /// daemon itself (never by `/api/push`, which it has no token for), down
 /// while there is something to report, alerting at the first failure. Its
 /// deadline is the longest period allowed; its feeder records far more often.
-/// It is as public as a monitor is by default: private once the page has a
-/// token. `[config_monitor]` names it, groups it and routes it; a section the
+/// It is private unless `[config_monitor]` makes it public: the operator's
+/// view shows it, and where the page has no token nobody's does - the alert
+/// and the log speak for it. (A configured monitor may not be private there;
+/// this one is added after the validation, on purpose.)
+/// `[config_monitor]` names it, groups it and routes it; a section the
 /// monitor cannot be built from is an issue, and the defaults are used.
 fn add_config_monitor(config: &mut Config, issues: &mut Vec<ConfigIssue>) {
-    let public = config.server.auth_token.is_none() && config.server.view_token.is_none();
     let settings = config.config_monitor.clone().unwrap_or_default();
-    let monitor = config_monitor(public, &settings).or_else(|err| {
+    let monitor = config_monitor(&settings).or_else(|err| {
         issues.push(ConfigIssue::new(
             "config_monitor",
             format!("{err}; defaults used"),
         ));
-        config_monitor(public, &BuiltinMonitor::default())
+        config_monitor(&BuiltinMonitor::default())
     });
     match monitor {
         Ok(monitor) => config.monitors.push(monitor),
@@ -501,7 +508,7 @@ fn add_config_monitor(config: &mut Config, issues: &mut Vec<ConfigIssue>) {
     }
 }
 
-fn config_monitor(public: bool, settings: &BuiltinMonitor) -> Result<Monitor, String> {
+fn config_monitor(settings: &BuiltinMonitor) -> Result<Monitor, String> {
     let period = i64::try_from(super::validate::MAX_PERIOD_SECS).unwrap_or(i64::MAX);
     let mut monitor = toml::Table::new();
     monitor.insert("id".into(), CONFIG_MONITOR_ID.into());
@@ -510,7 +517,7 @@ fn config_monitor(public: bool, settings: &BuiltinMonitor) -> Result<Monitor, St
     monitor.insert("kind".into(), "push".into());
     monitor.insert("interval_secs".into(), period.into());
     monitor.insert("fail_threshold".into(), 1.into());
-    monitor.insert("public".into(), public.into());
+    monitor.insert("public".into(), settings.public.unwrap_or(false).into());
     if let Some(group) = &settings.group {
         monitor.insert("group".into(), group.as_str().into());
     }
@@ -750,15 +757,13 @@ mod tests {
         assert_eq!(builtin.fail_threshold, Some(1));
         assert!(builtin.push_token.is_none() && !builtin.allow_unauthenticated);
         assert!(builtin.notify.is_none(), "every channel");
-        assert!(builtin.public, "no token configured: everybody sees it");
-        let private = load(&format!(
-            "view_token = \"0123456789abcdef0123\"\n{}",
-            http("a")
-        ));
-        let builtin = private
+        assert!(!builtin.public, "the operator's view only, token or not");
+        let shown = load(&format!("{}[config_monitor]\npublic = true\n", http("a")));
+        let builtin = shown
             .find_monitor(CONFIG_MONITOR_ID)
             .expect("config monitor");
-        assert!(!builtin.public, "a page with a token keeps it private");
+        assert!(builtin.public, "shown to everyone when asked for");
+        assert!(shown.issues.is_empty(), "{:?}", shown.issues);
     }
 
     #[test]
@@ -814,7 +819,7 @@ mod tests {
         for bad in [
             "notify = [\"nowhere\"]",
             "nmae = \"typo\"",
-            "public = false",
+            "public = \"yes\"",
         ] {
             assert!(super::super::parse(&section(bad)).is_err(), "{bad}");
         }

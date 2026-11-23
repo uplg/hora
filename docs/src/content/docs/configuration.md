@@ -268,15 +268,16 @@ The built-in monitor **`hora-config`** ("Hora configuration") is down while
 anything was left out, with every issue in its message, and alerts like any
 monitor at the first failure. It recovers with the first load without
 issues. Hora alone feeds it: it takes no push, and no monitor (nor a peer's
-`listen_id`) may use the id. It is public unless the page has a token, like
-any monitor. The optional `[config_monitor]` section names, groups and
-routes it:
+`listen_id`) may use the id. It is private by default: the operator's view
+shows it, a visitor's does not, and its alerts go out either way. The
+optional `[config_monitor]` section names, groups, routes and shows it:
 
 ```toml
 [config_monitor]
 name = "Config valid"      # default: "Hora configuration"
 group = "Watchdog"         # status-page group; default: none
 notify = ["ops"]           # default: every channel
+public = true              # default: false (the operator's view only)
 ```
 
 Its `notify` is checked like a monitor's: a channel that is not configured

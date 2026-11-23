@@ -74,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   load without issues. Hora alone feeds it: it takes no push, and no monitor
   or peer `listen_id` may use the id. The optional `[config_monitor]`
   section sets its `name`, `group` and `notify` (default: every channel).
+  It is private unless `public = true`: a visitor of the status page does
+  not see it, and its alerts go out either way.
 
 - **MQTT monitors** (`kind = "mqtt"`): the latest message on a topic, read
   from one connection per `[[brokers]]` entry (`mqtt://` or `mqtts://`,

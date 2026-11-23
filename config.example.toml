@@ -255,6 +255,7 @@ default_retention_days = 90
 # name = "Config valid"      # default: "Hora configuration"
 # group = "Watchdog"         # status-page group
 # notify = ["ops-telegram"]  # default: every channel
+# public = true              # default: false - on the operator's view only
 
 # --- Scheduled maintenance ------------------------------------------------
 # Alerts are muted for the affected monitors during the window (checks still
