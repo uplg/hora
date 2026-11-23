@@ -107,3 +107,7 @@ deps:
 image-smoke:
     docker build -t hora:smoke .
     .github/scripts/image-smoke.sh hora:smoke
+
+# Run the MQTT monitors against a throwaway Mosquitto container, as CI does
+mqtt-integration:
+    .github/scripts/mqtt-integration.sh

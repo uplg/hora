@@ -456,6 +456,62 @@ fn dual_stack_validation() {
 }
 
 #[test]
+fn ignore_tls_is_an_http_opt_in() {
+    let base = |body: &str| {
+        format!(
+            r#"
+                [page]
+                [server]
+                [[monitors]]
+                id = "x"
+                name = "X"
+                interval_secs = 60
+                {body}
+            "#
+        )
+    };
+
+    // Off unless said; with the pin and the expiry watch, and dual-stack.
+    let config = load(&base("target = \"https://router.example\"")).unwrap();
+    assert!(!http_spec(&config.monitors[0]).ignore_tls);
+    for body in [
+        "target = \"https://192.0.2.10:8443/\"\nignore_tls = true",
+        "target = \"https://192.0.2.10/\"\nignore_tls = true\ncheck_cert = true\n\
+         cert_pin = \"0000000000000000000000000000000000000000000000000000000000000000\"",
+        "target = \"https://router.example\"\nignore_tls = true\ndual_stack = true",
+        "target = \"https://router.example\"\nignore_tls = true\n\
+         proxy = \"socks5://127.0.0.1:1080\"",
+    ] {
+        let config = load(&base(body)).expect(body);
+        assert!(config.monitors[0].ignore_tls(), "{body}");
+    }
+
+    // Another kind: refused, not ignored.
+    let error = load(&base(
+        "kind = \"tcp\"\ntarget = \"192.0.2.10:443\"\nignore_tls = true",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("ignore_tls requires an http monitor"),
+        "got: {error}"
+    );
+    // Through an https proxy the proxy's certificate would go unverified too.
+    let error = load(&base(
+        "target = \"https://192.0.2.10/\"\nignore_tls = true\n\
+         proxy = \"HTTPS://proxy.example:3128\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("https proxy"), "got: {error}");
+    load(&base(
+        "target = \"https://192.0.2.10/\"\nignore_tls = false\n\
+         proxy = \"https://proxy.example:3128\"",
+    ))
+    .expect("ignore_tls = false through an https proxy");
+}
+
+#[test]
 fn maintenance_window_mutes_selected_monitor() {
     let config = parse(
         r#"
@@ -3354,7 +3410,93 @@ fn rejects_jq_on_tcp() {
         jq = ".ok"
     "#;
     let error = load(src).unwrap_err().to_string();
-    assert_eq!(error, "monitor db: jq requires an http monitor");
+    assert_eq!(error, "monitor db: jq requires an http or mqtt monitor");
+}
+
+#[test]
+fn mqtt_config_rejects_unbounded_topics_and_unknown_brokers() {
+    let prefix = "[page]\n[server]\n[[brokers]]\nname='test'\nurl='mqtt://localhost:1883'\n";
+    let monitor = "[[monitors]]\nid='sensor'\nname='Sensor'\nkind='mqtt'\nbroker='test'\ntopic='test/sensor'\ninterval_secs=60\njq='.value >= 0'\nmax_age_secs=120";
+    let config = load(&format!("{prefix}{monitor}")).unwrap();
+    let MonitorKind::Mqtt(spec) = &config.monitors[0].spec else {
+        panic!("an mqtt monitor")
+    };
+    assert_eq!(
+        (spec.broker.as_str(), spec.topic.as_str(), spec.max_age_secs),
+        ("test", "test/sensor", Some(120))
+    );
+    assert!(spec.jq.is_some());
+    for (bad, says) in [
+        (monitor.replace("test/sensor", "test/#"), "concrete `topic`"),
+        (
+            monitor.replace("test/sensor", "test/+/x"),
+            "concrete `topic`",
+        ),
+        (
+            monitor.replace("broker='test'", "broker='missing'"),
+            "unknown broker",
+        ),
+        (monitor.replace("broker='test'\n", ""), "need a `broker`"),
+        (
+            monitor.replace("max_age_secs=120", "max_age_secs=0"),
+            "max_age_secs",
+        ),
+        (format!("{monitor}\ntarget='mqtt://x'"), "not a `target`"),
+        (
+            format!("{monitor}\nnumber_regex='(\\d+)'"),
+            "number_regex/proxy",
+        ),
+    ] {
+        let error = load(&format!("{prefix}{bad}")).unwrap_err().to_string();
+        assert!(error.contains(says), "{error}");
+    }
+    // One connection per endpoint and user: a second name for it is refused.
+    assert!(
+        load(&format!(
+            "{prefix}{monitor}\n[[brokers]]\nname='alias'\nurl='mqtt://localhost:1883'"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn mqtt_brokers_are_validated_and_keys_stay_on_their_kind() {
+    let monitor = "[[monitors]]\nid='m'\nname='M'\nkind='mqtt'\nbroker='b'\ntopic='t'\ninterval_secs=60\nkeyword='online'\nkeyword_invert=true\njson_query='$.a'\nmax_body_kb=4";
+    let broker =
+        |extra: &str| format!("[page]\n[server]\n[[brokers]]\nname='b'\n{extra}\n{monitor}");
+    let config = load(&broker(
+        "url='mqtts://broker.example:8883'\nusername='u'\npassword='p'",
+    ))
+    .unwrap();
+    assert_eq!(config.brokers[0].keep_alive_secs, 15);
+    assert_eq!(config.brokers[0].max_packet_kb, 64);
+    // The URL and the password are secrets: never in a Debug of the config.
+    assert!(!format!("{config:?}").contains("broker.example"));
+    for (extra, says) in [
+        ("url='http://broker.example'", "mqtt(s)://"),
+        ("url='mqtt://u:p@broker.example'", "credentials go in"),
+        ("url='mqtt://broker.example/path'", "mqtt(s)://"),
+        (
+            "url='mqtt://broker.example'\npassword='p'",
+            "password requires username",
+        ),
+        (
+            "url='mqtt://broker.example'\nmax_packet_kb=0",
+            "max_packet_kb",
+        ),
+        (
+            "url='mqtt://broker.example'\nkeep_alive_secs=1",
+            "keep_alive_secs",
+        ),
+    ] {
+        let error = load(&broker(extra)).unwrap_err().to_string();
+        assert!(error.contains(says), "{extra}: {error}");
+    }
+    // The MQTT keys on another kind are a mistake, said at once.
+    let error = load(&format!("{MINIMAL}\ntopic='t'"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("require an mqtt monitor"), "{error}");
 }
 
 /// The re-check of an unconfirmed failure: unset by default, at most the

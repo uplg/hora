@@ -1,6 +1,6 @@
 ---
 title: Monitors
-description: HTTP, TCP, ICMP, DNS and push probes - assertions, dual-stack, topology, visibility.
+description: HTTP, TCP, ICMP, DNS, push and MQTT probes - assertions, dual-stack, topology, visibility.
 ---
 
 A monitor is a `[[monitors]]` entry with an `id`, a `name`, a `kind` and a
@@ -85,6 +85,7 @@ timeout_secs = 10
 # degraded_over_ms = 800    # up but slower than this = degraded (yellow)
 # headers = { Authorization = "Bearer ${TOKEN}" }
 # proxy = "socks5://127.0.0.1:9050"
+# ignore_tls = true         # accept a self-signed certificate: see below
 ```
 
 **`expected_status`** is a status (`200`), a class (`"2xx"`, any of `"1xx"`
@@ -178,6 +179,26 @@ peer certificate: Expired*. Through a `proxy`, a proxy that refuses the
 request (`407`, a refused tunnel, SOCKS credentials) is reported as
 *proxy failed: ...*, not as the target failing; the TLS certificate is read
 through the proxy too.
+
+**`ignore_tls = true`** accepts the target's certificate without verifying
+it - self-signed, expired, or issued for another name - for a device that
+serves its own, such as a router or a controller UI on your network
+(Uptime Kuma's *Ignore TLS/SSL errors*). It is off by default and applies
+to that monitor alone: its requests go through a client of their own, never
+shared with the monitors that verify. The connection is still encrypted,
+but anyone on the path could answer in the device's place, so set it only
+where you cannot install a trusted certificate. Pair it with a `cert_pin`
+(see [TLS certificates](#tls-certificates)): the pin then still alerts when
+the key changes. The exception covers the target's host only: a redirect
+to another host is not followed, and the monitor is down, *redirected to
+another host*. It cannot go through an `https://` proxy, whose own
+certificate would not be verified either.
+
+```toml
+target = "https://192.0.2.10:8443/"
+ignore_tls = true
+cert_pin = "abc123..."     # optional, recommended: alerts if the key changes
+```
 
 ### `tcp`
 
@@ -418,6 +439,63 @@ watching it, it is down with *"no heartbeat received yet"*. That start time
 is stored, so a restart does not push the deadline back. If you declare a
 monitor for a job that does not run yet, comment it out until it does.
 
+### `mqtt`
+
+Reads the latest message on an MQTT topic. Every monitor of a broker shares
+one connection (MQTT 5, QoS 1 subscriptions), subscribed to exactly the
+topics its monitors name; each topic caches only its latest payload, no
+history. No probe goes out on a check: the monitor judges what is cached.
+
+```toml
+[[brokers]]
+name = "sensors"
+url = "mqtt://broker.example:1883"   # or mqtts:// (system trust roots)
+username = "monitor"                 # credentials in their own fields,
+password = "${MQTT_PASSWORD}"        # never in the URL
+# keep_alive_secs = 15               # 5 to 300
+# max_packet_kb = 64                 # largest packet and cached payload, 1 to 1024
+
+# Retained state: whatever was last published, however old.
+[[monitors]]
+id = "sensor-online"
+name = "Sensor online"
+kind = "mqtt"
+broker = "sensors"
+topic = "devices/sensor/state"       # a concrete topic: no + or # wildcards
+keyword = "online"                   # keyword / keyword_invert, as on http
+interval_secs = 60
+
+# A periodic reading: down when none arrived in the last 10 minutes.
+[[monitors]]
+id = "temperature"
+name = "Temperature"
+kind = "mqtt"
+broker = "sensors"
+topic = "home/sensor/temperature"
+json_query = "$.temperature"         # json_query / json_expected, as on http
+# jq = ".temperature < 60"           # or jq / jq_expected / jq_operator
+interval_secs = 60
+max_age_secs = 600
+```
+
+`number_regex` and `proxy` stay http-only. `max_body_kb` caps the payload
+the assertions accept (unset: the broker's `max_packet_kb`, beyond which the
+broker does not deliver a message and nothing is cached).
+
+The monitor is down when no message has arrived, when the latest one is
+older than `max_age_secs` (*no recent message*), when an assertion fails on
+the payload, when the broker is disconnected, or when it refused the
+subscription. Like any failed check, these count towards `fail_threshold`.
+A disconnect empties the cache, and Clean Start makes every reconnect
+subscribe again, so retained topics come back at once. A topic that is only
+published periodically has nothing cached for a while after a start, a
+reconnect or a change to the broker's topic list: for one interval (or
+`max_age_secs`, when shorter) such a monitor gets no verdict and nothing is
+recorded, instead of reading as down. A JSON or jq assertion's verdict is kept
+for an unchanged message, so a frequently checked topic is parsed once per
+message. Two broker entries for the same endpoint and user are refused:
+monitors share one name. The peers of a mesh do not confirm MQTT monitors.
+
 ## Dual-stack verification
 
 ```toml
@@ -467,6 +545,10 @@ cert_pin = "abc123..."   # SHA-256 of the leaf public key
 An unexpected key change - MITM, botched renewal - alerts once per change,
 with the old and new fingerprints. Disable expiry checking per monitor with
 `check_cert = false`.
+
+The watcher reads the certificate without verifying it, so expiry and pin
+work the same on a monitor with `ignore_tls`: a self-signed certificate is
+warned about before it expires, and its pin is checked.
 
 Mail servers get the same watch: set `starttls = "smtp"` (or `"imap"`) on a
 tcp monitor and the watcher negotiates STARTTLS before reading the

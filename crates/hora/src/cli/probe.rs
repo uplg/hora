@@ -68,8 +68,8 @@ pub(crate) async fn probe(args: &[String]) -> Result<(), CliError> {
     println!("hora probe - {header}");
     println!();
 
-    let client =
-        hora_core::http::probe_client(monitor.proxy()).context("building the probe HTTP client")?;
+    let client = hora_core::http::probe_client(monitor.proxy(), monitor.ignore_tls())
+        .context("building the probe HTTP client")?;
     let outcome = hora_core::probe::run(&client, &monitor, probe).await;
     print_probe_report(&monitor, &outcome).await;
 

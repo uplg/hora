@@ -68,6 +68,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   definitions and loops (`repeat`, `until`, `while`, `range`, `recurse(f)`)
   are refused, so that an expression always ends. No result, several, `null`, an array or an object
   fail the check. On the public page, a failure reads "content check failed".
+- **A built-in `hora-config` monitor.** It is down while the configuration
+  has issues, names every one in its message and alerts like any monitor
+  at the first failure; it recovers with the first
+  load without issues. Hora alone feeds it: it takes no push, and no monitor
+  or peer `listen_id` may use the id. The optional `[config_monitor]`
+  section sets its `name`, `group` and `notify` (default: every channel).
+  It is private unless `public = true`: a visitor of the status page does
+  not see it, and its alerts go out either way.
+- **MQTT monitors** (`kind = "mqtt"`): the latest message on a topic, read
+  from one connection per `[[brokers]]` entry (`mqtt://` or `mqtts://`,
+  credentials in `username` / `password`), shared by every monitor that
+  names it. Down when nothing arrived, when the message is older than
+  `max_age_secs`, when `keyword`, `json_query` or `jq` fails on the payload,
+  or when the broker is unreachable; like any failed check it counts towards
+  `fail_threshold` (public reason *no recent message*). A topic that is only
+  published periodically gets no verdict for one interval after a start or a
+  reconnect instead of a false down. Brokers reload live; a new
+  `[[brokers]]` section, no change to existing configs.
+- **`ignore_tls` on http monitors**: accept the target's certificate
+  without verifying it (self-signed, expired, another name), for a device
+  that serves its own - a router or a controller UI. Off by default, per
+  monitor; such monitors get probe clients of their own, never shared with
+  the verifying ones. The exception covers the target's host only: a
+  redirect to another host is a down, *redirected to another host*. Refused
+  on other kinds and through an `https://` proxy. The expiry watch and
+  `cert_pin` work as before (they never verified the chain), so a pin is
+  the recommended companion. Part of the check fingerprint only when set,
+  so peers keep agreeing on every other monitor. `hora import kuma` carries
+  Kuma's `ignoreTls` over.
 - **`retry_interval_secs` on a monitor**: after a failed check that has not
   reached `fail_threshold` yet, the next one runs that many seconds later
   instead of a whole `interval_secs` later, so an outage is confirmed
@@ -88,6 +117,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shorter), and a heartbeat is never looked at sooner than one such period
   after the previous look, so a burst of `status=down` pushes confirms no
   faster than before. No new config key.
+- **A faulty entry no longer stops the daemon.** Each monitor, channel and
+  maintenance window is checked on its own: an invalid one is left out with
+  an `ERROR` line and reported by `hora-config`, and everything else runs.
+  What it leaves dangling is fixed rather than failed: routes to a dropped
+  channel are removed, a `depends_on` on a monitor that is not loaded (or in
+  a cycle) is ignored, a group token without a loaded group is ignored. A
+  live reload follows the same rules; an entry edited into an invalid state
+  stops, no older version of it is kept. If no channel or no monitor is
+  left, the external heartbeat is withheld.
+- **A file that cannot be loaded at all no longer ends the process at
+  startup** (a TOML syntax error, an invalid global section, an unreadable
+  file): Hora answers every request with `503`, logs the reason, and reads
+  the file again every 5 s until it loads. On a live reload the previous
+  configuration keeps running, as before, and `hora-config` says so.
+- **`hora check` names every faulty entry**, not just the first, and still
+  fails while there is one.
 
 ## [0.12.3] - 2026-11-23
 

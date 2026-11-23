@@ -20,6 +20,8 @@ pub enum FailureKind {
     /// A public target redirected to a loopback, link-local or private
     /// address (see `crate::http::RedirectGuard`).
     PrivateRedirect,
+    /// A monitor with `ignore_tls` was redirected off its target's host.
+    UnverifiedRedirect,
     /// The body could not be read or decoded.
     InvalidBody,
     /// Any other HTTP client error.
@@ -56,6 +58,10 @@ pub enum FailureKind {
     NoHeartbeatYet,
     /// A push reported down or degraded; the detail is the job's own message.
     Pushed,
+    /// MQTT: no message on the topic yet, or the last one is older than
+    /// `max_age_secs`. A sample like any failed check (unlike a missed
+    /// heartbeat): the monitor's `fail_threshold` still applies.
+    NoMessage,
     /// The check could not run for lack of resources on this host (file
     /// descriptors, memory): nothing is known about the target. Never
     /// stored: the scheduler skips such a check (see `probe::local`).
@@ -65,13 +71,14 @@ pub enum FailureKind {
 }
 
 impl FailureKind {
-    pub(crate) const ALL: [Self; 26] = [
+    pub(crate) const ALL: [Self; 28] = [
         Self::Timeout,
         Self::ConnectionFailed,
         Self::ConnectionTimedOut,
         Self::TooManyRedirects,
         Self::InsecureRedirect,
         Self::PrivateRedirect,
+        Self::UnverifiedRedirect,
         Self::InvalidBody,
         Self::RequestError,
         Self::Unresolvable,
@@ -90,6 +97,7 @@ impl FailureKind {
         Self::MissedSchedule,
         Self::NoHeartbeatYet,
         Self::Pushed,
+        Self::NoMessage,
         Self::Local,
         Self::Other,
     ];
@@ -116,6 +124,7 @@ impl FailureKind {
             Self::TooManyRedirects => "too_many_redirects",
             Self::InsecureRedirect => "insecure_redirect",
             Self::PrivateRedirect => "private_redirect",
+            Self::UnverifiedRedirect => "unverified_redirect",
             Self::InvalidBody => "invalid_body",
             Self::RequestError => "request_error",
             Self::Unresolvable => "unresolvable",
@@ -134,6 +143,7 @@ impl FailureKind {
             Self::MissedSchedule => "missed_schedule",
             Self::NoHeartbeatYet => "no_heartbeat_yet",
             Self::Pushed => "pushed",
+            Self::NoMessage => "no_message",
             Self::Local => "local",
             Self::Other => "other",
         }
@@ -191,6 +201,8 @@ pub fn public_reason(kind: Option<FailureKind>, reason: &str) -> &str {
         // The detail names the plain-http origin; the category is enough.
         FailureKind::InsecureRedirect => "redirected to plain http",
         FailureKind::PrivateRedirect => "redirected to a private address",
+        // The detail names the other host; the category is enough.
+        FailureKind::UnverifiedRedirect => "redirected to another host",
         FailureKind::InvalidBody => "invalid response body",
         FailureKind::RequestError => "request error",
         FailureKind::Unresolvable => "could not resolve host",
@@ -210,6 +222,7 @@ pub fn public_reason(kind: Option<FailureKind>, reason: &str) -> &str {
         // "(was due 03:00 UTC + 30 min grace)" reveals the job's schedule.
         FailureKind::MissedSchedule => "missed scheduled heartbeat",
         FailureKind::NoHeartbeatYet => "no heartbeat received yet",
+        FailureKind::NoMessage => "no recent message",
         // The job's message is free text from whoever holds the push token.
         FailureKind::Local => "check could not run",
         FailureKind::Pushed | FailureKind::Other => "check failed",

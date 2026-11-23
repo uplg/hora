@@ -142,7 +142,7 @@ mod tests {
         let url = format!("{base}/domain/example.org");
         // A client that never follows (the loop does) and one that does.
         for client in [
-            crate::http::probe_client(None).unwrap(),
+            crate::http::probe_client(None, false).unwrap(),
             crate::http::client(None).unwrap(),
         ] {
             assert_eq!(expiration_at(&client, &url).await.unwrap(), expected);
@@ -153,7 +153,7 @@ mod tests {
     async fn oversized_answers_and_errors_are_refused() {
         let huge = format!(r#"{{"pad":"{}"}}"#, "x".repeat(crate::http::MAX_JSON_BYTES));
         let base = serve(vec![("/big", json_response(&huge))]).await;
-        let client = crate::http::probe_client(None).unwrap();
+        let client = crate::http::probe_client(None, false).unwrap();
         let err = expiration_at(&client, &format!("{base}/big"))
             .await
             .unwrap_err();

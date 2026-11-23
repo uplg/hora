@@ -134,6 +134,12 @@ fn http(text: &mut String, spec: &HttpSpec) {
             &spec.assertion_body_cap().to_string(),
         );
     }
+    // Written only when set, as `method`: an unverified certificate passes
+    // where a verifying peer's probe fails, so the two do not check the same
+    // thing - and the monitors that leave it unset keep their fingerprint.
+    if spec.ignore_tls {
+        flag(text, "ignore_tls", true);
+    }
     flag(text, "dual_stack", spec.dual_stack);
 }
 
@@ -272,6 +278,7 @@ mod tests {
             "expected_status = \"2xx\"",
             "expected_status = [\"2xx\"]",
             "expected_status = [\"2xx\", 200]",
+            "ignore_tls = false",
         ] {
             assert_eq!(
                 fingerprint(&format!("{PLAIN}\n{same}")),
@@ -331,6 +338,7 @@ mod tests {
             ("number", format!("{API}\nnumber_regex = \"(\\\\d+)\"")),
             ("body cap", format!("{API}\nmax_body_kb = 4")),
             ("families", format!("{API}\ndual_stack = true")),
+            ("certificate", format!("{API}\nignore_tls = true")),
         ] {
             assert_ne!(fingerprint(&changed), base, "{what}");
         }

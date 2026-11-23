@@ -23,6 +23,7 @@
 //! | `maxretries`                         | `fail_threshold` (retries + 1)  |
 //! | `retryInterval` (with retries)       | `retry_interval_secs`           |
 //! | `expiryNotification = false`         | `check_cert = false`            |
+//! | `ignoreTls = true`                   | `ignore_tls = true`             |
 //! | `dnsResolveType` / `dnsResolveServer`| `dns_record` / `dns_resolver`   |
 //! | `pushToken`                          | `push_token` + `kuma_push`      |
 //!
@@ -37,7 +38,7 @@
 //! `body`/`httpBodyEncoding`, `authMethod`
 //! and its credentials (basic/NTLM/mTLS/OAuth2), `proxyId` (Hora proxies are
 //! per-monitor URLs), `notificationIDList` (channel routing differs),
-//! `tags`, `description`, `ignoreTls`, `packetSize` and per-type extras.
+//! `tags`, `description`, `packetSize` and per-type extras.
 //!
 //! Two are said in a comment instead, because the monitor would not check
 //! what it checked in Kuma: a `method` other than `GET` or `HEAD` (Hora sends
@@ -91,6 +92,8 @@ struct KumaMonitor {
     /// The HTTP method (`GET` unless the monitor says otherwise).
     method: Option<String>,
     expiry_notification: Option<bool>,
+    #[serde(default)]
+    ignore_tls: bool,
     push_token: Option<String>,
     #[serde(alias = "dns_resolve_type")]
     dns_resolve_type: Option<String>,
@@ -321,6 +324,9 @@ fn convert_http(out: &mut String, monitor: &KumaMonitor) {
     {
         let _ = writeln!(out, "check_cert = false");
     }
+    if monitor.ignore_tls {
+        let _ = writeln!(out, "ignore_tls = true");
+    }
 }
 
 /// One Kuma `accepted_statuscodes` entry as an `expected_status` entry in
@@ -455,6 +461,31 @@ mod tests {
         assert!(toml.contains("kind = \"http\""));
         assert!(toml.contains("target = \"https://example.com\""));
         assert!(toml.contains("timeout_secs = 20"));
+    }
+
+    #[test]
+    fn test_ignore_tls_carries_over() {
+        let json = r#"{
+            "monitorList": [
+                {
+                    "name": "Router",
+                    "type": "http",
+                    "url": "https://192.0.2.10:8443/",
+                    "ignoreTls": true
+                },
+                {
+                    "name": "Site",
+                    "type": "http",
+                    "url": "https://example.com",
+                    "ignoreTls": false
+                }
+            ]
+        }"#;
+
+        let toml = convert_kuma_to_hora(json).unwrap();
+        assert_eq!(toml.matches("ignore_tls = true").count(), 1);
+        crate::config::parse(&format!("[page]\n[server]\n{toml}"))
+            .expect("the converted monitors load");
     }
 
     #[test]

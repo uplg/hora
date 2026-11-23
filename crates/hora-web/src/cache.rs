@@ -97,7 +97,8 @@ impl<K: Eq + Hash + Clone, V> Memo<K, V> {
     }
 }
 
-/// Probe clients for `/api/peer/probe`, one per proxy setting, so a mesh
+/// Probe clients for `/api/peer/probe`, one per proxy setting and
+/// `ignore_tls`, so a mesh
 /// confirming flaps reuses connection pools and TLS setup instead of building
 /// a client per call. Rebuilt (emptied) when the config changes, since a
 /// monitor's proxy may have. Generic over the client only so the tests can
@@ -116,17 +117,18 @@ impl<C> Default for ProbeClients<C> {
 
 struct ProbeClientSet<C> {
     config: Arc<Config>,
-    clients: HashMap<Option<String>, C>,
+    clients: HashMap<(Option<String>, bool), C>,
 }
 
 impl<C: Clone> ProbeClients<C> {
-    /// The cached client for `proxy` under `config`, or a fresh one from
-    /// `build` (cached on success).
+    /// The cached client for `proxy` and `ignore_tls` under `config`, or a
+    /// fresh one from `build` (cached on success).
     pub(crate) fn get_or_build<E>(
         &self,
         config: &Arc<Config>,
         proxy: Option<&str>,
-        build: impl FnOnce(Option<&str>) -> Result<C, E>,
+        ignore_tls: bool,
+        build: impl FnOnce(Option<&str>, bool) -> Result<C, E>,
     ) -> Result<C, E> {
         let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let set = match guard.take() {
@@ -137,11 +139,11 @@ impl<C: Clone> ProbeClients<C> {
             },
         };
         let set = guard.insert(set);
-        let key = proxy.map(str::to_owned);
+        let key = (proxy.map(str::to_owned), ignore_tls);
         if let Some(client) = set.clients.get(&key) {
             return Ok(client.clone());
         }
-        let client = build(proxy)?;
+        let client = build(proxy, ignore_tls)?;
         set.clients.insert(key, client.clone());
         Ok(client)
     }
@@ -208,23 +210,34 @@ mod tests {
         let clients = ProbeClients::<String>::default();
         let config = config();
         let mut builds = 0;
-        let mut build = |proxy: Option<&str>| -> Result<String, ()> {
+        let mut build = |proxy: Option<&str>, ignore_tls: bool| -> Result<String, ()> {
             builds += 1;
-            Ok(format!("client:{proxy:?}"))
+            Ok(format!("client:{proxy:?}:{ignore_tls}"))
         };
         assert_eq!(
-            clients.get_or_build(&config, None, &mut build),
-            Ok("client:None".to_owned())
+            clients.get_or_build(&config, None, false, &mut build),
+            Ok("client:None:false".to_owned())
         );
         assert_eq!(
-            clients.get_or_build(&config, None, &mut build),
-            Ok("client:None".to_owned())
+            clients.get_or_build(&config, None, false, &mut build),
+            Ok("client:None:false".to_owned())
         );
         clients
-            .get_or_build(&config, Some("socks5://proxy:1080"), &mut build)
+            .get_or_build(&config, Some("socks5://proxy:1080"), false, &mut build)
             .unwrap();
+        // An ignore_tls monitor never gets the verifying client, nor the
+        // other way round.
+        assert_eq!(
+            clients.get_or_build(&config, None, true, &mut build),
+            Ok("client:None:true".to_owned())
+        );
         let reloaded = self::config();
-        clients.get_or_build(&reloaded, None, &mut build).unwrap();
-        assert_eq!(builds, 3, "one build per proxy, plus one after the reload");
+        clients
+            .get_or_build(&reloaded, None, false, &mut build)
+            .unwrap();
+        assert_eq!(
+            builds, 4,
+            "one build per proxy and certificate policy, plus one after the reload"
+        );
     }
 }

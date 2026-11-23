@@ -221,6 +221,8 @@ impl AlertCell {
 /// (down/recovered alerts), the liveness beacon, and its alert state.
 pub struct MonitorDeps {
     pub store: Store,
+    /// The shared MQTT connections, read by MQTT monitors.
+    pub mqtt: Arc<crate::mqtt::MqttHub>,
     pub client: Client,
     /// The shared plain client for multi-vantage confirmation requests to the
     /// peers. Distinct from `client` on purpose: that one may be bound to the
@@ -355,6 +357,7 @@ async fn run(
 ) {
     let MonitorDeps {
         store,
+        mqtt,
         client,
         confirm_client,
         notifier,
@@ -428,6 +431,15 @@ async fn run(
         }
         _ => None,
     };
+    // An MQTT monitor reads its broker's cache through one evaluator for the
+    // task's lifetime, which remembers the verdict on an unchanged payload.
+    let mut mqtt_check = match &monitor.spec {
+        MonitorKind::Mqtt(spec) => Some(
+            mqtt.check(spec)
+                .with_grace(crate::mqtt::grace(monitor.interval_secs, spec)),
+        ),
+        _ => None,
+    };
 
     loop {
         if let Some(push) = heartbeat.as_mut() {
@@ -451,13 +463,15 @@ async fn run(
         );
 
         // No outcome means a push monitor still inside its first expected
-        // window (or a read error): status stays unknown, nothing to react to.
+        // window (or a read error), or an MQTT monitor whose connection is
+        // still settling: status stays unknown, nothing to react to.
         let Some(outcome) = tick_outcome(
             &client,
             &store,
             &monitor,
             exec_dir.as_deref(),
             heartbeat.as_mut(),
+            mqtt_check.as_mut(),
         )
         .await
         else {
@@ -1025,14 +1039,15 @@ async fn close_open_incident(store: &Store, monitor_id: &str, open_incident: &mu
 }
 
 /// One tick's outcome: probe active monitors (recording the check), run exec
-/// checks, evaluate stored heartbeats for push monitors. `None` means nothing
-/// to react to yet.
+/// checks, read MQTT topics, evaluate stored heartbeats for push monitors.
+/// `None` means nothing to react to yet.
 async fn tick_outcome(
     client: &Client,
     store: &Store,
     monitor: &Monitor,
     exec_dir: Option<&std::path::Path>,
     heartbeat: Option<&mut push::PushDriver>,
+    mqtt: Option<&mut crate::mqtt::Check<'_>>,
 ) -> Option<Outcome> {
     let outcome = match &monitor.spec {
         // Built with the task for every push monitor.
@@ -1047,6 +1062,8 @@ async fn tick_outcome(
                 "HORA_EXEC_DIR is not set".to_owned(),
             ),
         },
+        // Built with the task for every MQTT monitor.
+        MonitorKind::Mqtt(_) => mqtt?.verdict()?,
         MonitorKind::Http(spec) => probe::run(client, monitor, NetworkProbe::Http(spec)).await,
         MonitorKind::Tcp(spec) => probe::run(client, monitor, NetworkProbe::Tcp(spec)).await,
         MonitorKind::Icmp(spec) => probe::run(client, monitor, NetworkProbe::Icmp(spec)).await,
@@ -1792,6 +1809,7 @@ mod tests {
             config.clone(),
             MonitorDeps {
                 store: store.clone(),
+                mqtt: Arc::default(),
                 client: client.clone(),
                 confirm_client: client.clone(),
                 notifier: crate::notifications::shared(&config.borrow(), &client),

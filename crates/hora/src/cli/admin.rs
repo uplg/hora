@@ -23,10 +23,12 @@ pub(crate) fn import_kuma(args: &[String]) -> Result<(), CliError> {
 }
 
 /// `hora check [--strict]`: validate the config and exit non-zero on error -
-/// meant for CI and pre-deploy hooks. What the loader only warns about (a
-/// timeout longer than its interval, a channel over cleartext http) is printed
-/// and counted; `--strict` makes one warning a failure, for a pipeline that
-/// wants a config the daemon starts on without a word.
+/// meant for CI and pre-deploy hooks. Every faulty entry is listed, not just
+/// the first: the daemon would start without them (and its configuration
+/// monitor would be down). What the loader only warns about (a timeout longer
+/// than its interval, a channel over cleartext http) is printed and counted;
+/// `--strict` makes one warning a failure, for a pipeline that wants a config
+/// the daemon starts on without a word.
 pub(crate) fn check_config(args: &[String]) -> Result<(), CliError> {
     let strict = match args {
         [] => false,
@@ -35,7 +37,7 @@ pub(crate) fn check_config(args: &[String]) -> Result<(), CliError> {
     };
     let config_path = config::path();
     let (loaded, warnings) = collecting_warnings(|| {
-        let loaded = config::load_from(&config_path);
+        let loaded = config::load_lenient_from(&config_path);
         // What the daemon would say at startup about a config mounted in a
         // way that defeats live reload: one of its warnings, so said here.
         hora_core::config_watch::warn_caveats(&config_path);
@@ -46,14 +48,36 @@ pub(crate) fn check_config(args: &[String]) -> Result<(), CliError> {
     for warning in &warnings {
         eprintln!("warning: {warning}");
     }
+    let loaded =
+        loaded.and_then(|config| without_issues(&config, |line| eprintln!("error: {line}")));
     let verdict = check_verdict(
         &config_path.display().to_string(),
-        loaded.map(drop),
+        loaded,
         warnings.len(),
         strict,
     )?;
     println!("{verdict}");
     Ok(())
+}
+
+/// A lenient load is valid only without issues: each one is handed to
+/// `report`, and the error counts them.
+fn without_issues(config: &config::Config, mut report: impl FnMut(String)) -> anyhow::Result<()> {
+    for issue in &config.issues {
+        report(issue.to_string());
+    }
+    if config.cannot_alert {
+        report(
+            "no notification channel or no monitor could be loaded: Hora could not alert".into(),
+        );
+    }
+    match config.issues.len() {
+        0 => Ok(()),
+        n => anyhow::bail!(
+            "{n} issue(s): Hora would start without the entries above, its configuration \
+             monitor down"
+        ),
+    }
 }
 
 /// The outcome of `hora check` for a load that ended in `loaded` after
@@ -337,6 +361,30 @@ mod tests {
         // An error is an error, warnings or not.
         let broken = check_verdict("config.toml", Err(anyhow::anyhow!("bad")), 1, false);
         assert_eq!(failure(broken), "Configuration error: bad");
+    }
+
+    /// Every faulty entry is named, not just the first; the rest would start.
+    #[test]
+    fn check_lists_every_issue() {
+        let broken = format!(
+            "{WARNS}[[monitors]]\nid = \"zero\"\nname = \"Z\"\ntarget = \"https://e.com\"\n\
+             interval_secs = 0\n[[channels]]\nname = \"broken\"\ntype = \"webhook\"\n"
+        );
+        let config = config::parse_lenient(&broken).expect("loads in part");
+        let mut lines = Vec::new();
+        let result = without_issues(&config, |line| lines.push(line));
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "channel broken: missing field `url`; not loaded");
+        assert_eq!(
+            lines[1],
+            "monitor zero: interval_secs must be > 0; not loaded"
+        );
+        assert!(lines[2].contains("could not alert"), "{lines:?}");
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.starts_with("2 issue(s)"), "{message}");
+
+        let clean = config::parse_lenient(WARNS).expect("loads");
+        assert!(without_issues(&clean, |line| panic!("{line}")).is_ok());
     }
 
     #[test]

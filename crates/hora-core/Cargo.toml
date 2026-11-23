@@ -21,6 +21,8 @@ hora-notify.workspace = true
 jaq-core = "3.1.2"
 jaq-std = { version = "3.0.4", default-features = false, features = ["std"] }
 jaq-json = { version = "2.0.3", features = ["sync", "serde"] }
+# MQTT monitors: one shared client per broker (rustls on aws-lc, as reqwest).
+mqtt-glide = { version = "0.5.2", default-features = false, features = ["tls-rustls-aws-lc"] }
 notify.workspace = true
 regex = "1.13.1"
 reqwest.workspace = true
