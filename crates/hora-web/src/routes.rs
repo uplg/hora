@@ -87,6 +87,8 @@ pub(crate) fn router_with_deadline(state: AppState, deadline: Duration) -> Route
         .trusting(config.server.trusted_proxies);
     let refill = Duration::from_secs(config.server.rate_limit_refill_secs.max(1));
     let burst = config.server.rate_limit_burst.max(1);
+    // The running config, for the access log to tell a push id from a token.
+    let live = state.config.clone();
 
     // Every write refuses `?token=` (see `refuse_query_token`, which lets
     // the GETs through); the read-only views keep it first-class. A 401 to a
@@ -189,8 +191,9 @@ pub(crate) fn router_with_deadline(state: AppState, deadline: Duration) -> Route
         // The trace span carries the request id so every log line emitted while
         // handling a request can be correlated back to it.
         .layer(
-            TraceLayer::new(SharedClassifier::new(StartingIsNoFailure))
-                .make_span_with(make_request_span),
+            TraceLayer::new(SharedClassifier::new(StartingIsNoFailure)).make_span_with(
+                move |request: &Request<Body>| make_request_span(request, &live.borrow()),
+            ),
         )
         // Outermost: stamp each request with an id (honouring a well-formed
         // inbound `x-request-id`) before any other layer runs, and echo it on
@@ -363,18 +366,27 @@ impl ClassifyResponse for StartingIsNoFailure {
     }
 }
 
-/// The path as the access log shows it. A push path's last segment may be
-/// a `kuma_push` monitor's token rather than an id, so no push path is
-/// logged with it.
-pub(crate) fn logged_path(path: &str) -> &str {
-    if path.starts_with("/api/push/") {
-        "/api/push/[redacted]"
-    } else {
-        path
+/// The path as the access log shows it. A push path ends in a monitor's id
+/// or a peer's listen id - or in a `kuma_push` monitor's token, the
+/// credential itself. It is shown when it is an id the config knows, which
+/// no such token can be (validation keeps them apart); anything else, a
+/// token or a mistyped one, stays out of the log.
+pub(crate) fn logged_path<'a>(path: &'a str, config: &hora_core::config::Config) -> &'a str {
+    match path.strip_prefix("/api/push/") {
+        Some(id)
+            if !config.monitors.iter().any(|monitor| monitor.id == id)
+                && !config.peers.iter().any(|peer| peer.listen_id() == id) =>
+        {
+            "/api/push/[redacted]"
+        }
+        _ => path,
     }
 }
 
-pub(crate) fn make_request_span(request: &Request<Body>) -> tracing::Span {
+pub(crate) fn make_request_span(
+    request: &Request<Body>,
+    config: &hora_core::config::Config,
+) -> tracing::Span {
     let request_id = request
         .headers()
         .get(REQUEST_ID_HEADER)
@@ -385,7 +397,7 @@ pub(crate) fn make_request_span(request: &Request<Body>) -> tracing::Span {
     tracing::info_span!(
         "request",
         method = %request.method(),
-        path = %logged_path(request.uri().path()),
+        path = %logged_path(request.uri().path(), config),
         request_id,
     )
 }

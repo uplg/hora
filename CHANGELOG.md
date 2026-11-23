@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hora import kuma` sets it on the push monitors it imports, so migrated
   producers need no change. The token must be URL-safe, unique among
   `kuma_push` monitors and never equal a monitor id or a peer's
-  `listen_id`. Every push path is now logged as `/api/push/[redacted]`.
+  `listen_id`. A push path that does not end in a known id is logged as
+  `/api/push/[redacted]`, so a token never reaches Hora's log.
 
 ## [0.12.3] - 2026-11-23
 

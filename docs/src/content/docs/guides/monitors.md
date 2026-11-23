@@ -345,9 +345,9 @@ token in place of the id and no header - what Kuma's push monitors hand
 out, and where some backup tools post their JSON report. The
 answer is `{"ok":true}`, a fractional `ping` is rounded, an empty one is
 ignored, and a body is never read. The token must be URL-safe and must not
-equal a monitor id or a peer's listen id. Hora logs every push path as
-`/api/push/[redacted]`; a reverse proxy in front logs the full path unless
-told otherwise. The header form keeps working for the same monitor, and
+equal a monitor id or a peer's listen id. Hora's own log shows a push path
+only when it ends in a known id, and `/api/push/[redacted]` otherwise; a
+reverse proxy in front logs the full path unless told otherwise. The header form keeps working for the same monitor, and
 `hora import kuma` sets `kuma_push = true` on the push monitors it imports.
 
 ```sh

@@ -609,11 +609,25 @@ async fn kuma_push_urls_take_the_token_in_the_path() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// The access log names the monitor a heartbeat is for, and nothing else
+/// that follows `/api/push/`: a `kuma_push` token, a mistyped one, a guess.
 #[test]
-fn push_paths_are_logged_without_their_last_segment() {
-    assert_eq!(
-        super::super::logged_path("/api/push/synthetic-credential"),
-        "/api/push/[redacted]"
-    );
-    assert_eq!(super::super::logged_path("/api/summary"), "/api/summary");
+fn a_push_path_is_logged_with_an_id_never_with_a_token() {
+    let config = hora_core::config::parse(
+        "[page]\n[server]\n\
+         [[monitors]]\nid='job'\nname='Job'\nkind='push'\ninterval_secs=60\n\
+         kuma_push=true\npush_token='synthetic-credential'\n",
+    )
+    .expect("config");
+    let logged = |path| super::super::logged_path(path, &config);
+    assert_eq!(logged("/api/push/job"), "/api/push/job");
+    for path in [
+        "/api/push/synthetic-credential",
+        "/api/push/synthetic-credentia",
+        "/api/push/job/more",
+        "/api/push/",
+    ] {
+        assert_eq!(logged(path), "/api/push/[redacted]", "{path}");
+    }
+    assert_eq!(logged("/api/summary"), "/api/summary");
 }
