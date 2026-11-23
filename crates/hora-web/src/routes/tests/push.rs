@@ -522,3 +522,98 @@ async fn alert_history_respects_public_and_private_visibility() {
         "{full}"
     );
 }
+
+/// A `kuma_push` monitor is reached the way Uptime Kuma's producers call it:
+/// GET or POST, the token in the path, a fractional ping, a body nobody
+/// reads; the native header-token POST keeps working next to it.
+#[tokio::test]
+async fn kuma_push_urls_take_the_token_in_the_path() {
+    let (app, store) = app_with_pool(
+        "[page]\n[server]\n[[monitors]]\nid='job'\nname='Job'\nkind='push'\n\
+         interval_secs=60\nkuma_push=true\npush_token='synthetic-credential'\n\
+         [[monitors]]\nid='plain'\nname='Plain'\nkind='push'\ninterval_secs=60\n\
+         push_token='plain-credential-1'\n",
+    )
+    .await;
+    for method in ["GET", "POST"] {
+        let request = Request::builder()
+            .method(method)
+            .uri("/api/push/synthetic-credential?status=down&msg=failed&ping=12.5")
+            .header("content-type", "application/json")
+            .extension(fake_peer())
+            .body(Body::from(r#"{"report":"a job report nobody reads"}"#))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{method}");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body: serde_json::Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(body["ok"], true);
+    }
+    let checks = hora_core::db::recent_checks(&store, "job", 10)
+        .await
+        .unwrap();
+    // Both in one second: one row (the checks are keyed by second).
+    assert!(!checks.is_empty());
+    assert_eq!(checks[0].status, hora_core::status::CheckStatus::Down);
+    // 12.5 rounds to even.
+    assert_eq!(checks[0].latency_ms, Some(12));
+
+    // An empty ping is none; a negative or a wrong status is refused.
+    let ok = app
+        .clone()
+        .oneshot(get("/api/push/synthetic-credential?status=up&msg=OK&ping="))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    for bad in ["?ping=-1", "?ping=NaN", "?ping=inf", "?status=dwon"] {
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/push/synthetic-credential{bad}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    // The id is no token, a token of a monitor that did not opt in neither,
+    // and a GET never reaches the native push.
+    for uri in [
+        "/api/push/job",
+        "/api/push/wrong",
+        "/api/push/plain-credential-1",
+        "/api/push/plain",
+    ] {
+        let res = app.clone().oneshot(get(uri)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+    // The native form, for either monitor.
+    for (id, token) in [
+        ("job", "synthetic-credential"),
+        ("plain", "plain-credential-1"),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(push_with(&format!("/api/push/{id}"), "x-push-token", token))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{id}");
+        assert_eq!(body_text(res).await, "ok");
+    }
+    // A token in the query stays refused on a write, Kuma URL or not.
+    let res = app
+        .clone()
+        .oneshot(push(
+            "/api/push/synthetic-credential?token=synthetic-credential",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn push_paths_are_logged_without_their_last_segment() {
+    assert_eq!(
+        super::super::logged_path("/api/push/synthetic-credential"),
+        "/api/push/[redacted]"
+    );
+    assert_eq!(super::super::logged_path("/api/summary"), "/api/summary");
+}

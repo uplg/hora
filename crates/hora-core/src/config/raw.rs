@@ -124,6 +124,13 @@ pub(crate) struct RawMonitor {
     /// secrets, so anyone who can reach `/api/push` can then forge them.
     #[serde(default)]
     pub(crate) allow_unauthenticated: Option<bool>,
+    /// Push monitor with a `push_token`: also accept Uptime Kuma's push URL,
+    /// `GET`/`POST /api/push/<push_token>?status=up&msg=…&ping=…`, where the
+    /// token itself is the path - for producers that were set up for Kuma
+    /// and cannot send a header. Off by default: a token in a URL ends up in
+    /// proxy logs and shell histories.
+    #[serde(default)]
+    pub(crate) kuma_push: Option<bool>,
     /// Push monitor only: a five-field cron expression (UTC) for when heartbeats
     /// are expected (e.g. `"0 3 * * *"` for a nightly job). The monitor goes
     /// down only when a scheduled run misses its `grace_secs`
@@ -259,6 +266,7 @@ impl Default for RawMonitor {
             proxy: None,
             push_token: None,
             allow_unauthenticated: None,
+            kuma_push: None,
             schedule: None,
             grace_secs: None,
             check_cert: None,

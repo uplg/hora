@@ -277,6 +277,8 @@ pub struct DnsSpec {
 pub struct PushSpec {
     /// Heartbeats expected per cron run rather than every interval.
     pub schedule: Option<PushSchedule>,
+    /// Also accepted on Uptime Kuma's URL, `/api/push/<push_token>`.
+    pub kuma_push: bool,
 }
 
 /// `schedule` / `grace_secs` on a push monitor.

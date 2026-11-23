@@ -410,6 +410,9 @@ allow_unauthenticated = true     # accepts heartbeats from anyone: example only
 # schedule = "0 3 * * *"     # five-field cron, UTC (not local time: DST moves a
 #                            # local crontab by an hour); replaces the fixed-gap rule
 # grace_secs = 1800          # how late a scheduled ping may be (default 30 min)
+# kuma_push = true           # also accept Uptime Kuma's URL for producers set
+#                            # up for Kuma: GET/POST /api/push/<push_token>
+#                            # ?status=up|down&msg=...&ping=... (needs push_token)
 
 # Exec monitor: run an external check, monitoring-plugins convention (exit
 # 0 = up, 1 = degraded, anything else = down; first stdout line = message).

@@ -338,6 +338,22 @@ curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \
   "https://status.example.com/api/push/nightly-backup?status=down&msg=disk+full"
 ```
 
+**Producers set up for Uptime Kuma** can keep their URL: with
+`kuma_push = true` (and a `push_token`) the monitor is also reached by
+`GET` or `POST /api/push/<push_token>?status=up|down&msg=...&ping=...`, the
+token in place of the id and no header - what Kuma's push monitors hand
+out, and where some backup tools post their JSON report. The
+answer is `{"ok":true}`, a fractional `ping` is rounded, an empty one is
+ignored, and a body is never read. The token must be URL-safe and must not
+equal a monitor id or a peer's listen id. Hora logs every push path as
+`/api/push/[redacted]`; a reverse proxy in front logs the full path unless
+told otherwise. The header form keeps working for the same monitor, and
+`hora import kuma` sets `kuma_push = true` on the push monitors it imports.
+
+```sh
+curl -fsS "https://status.example.com/api/push/${PUSH_TOKEN}?status=up&msg=OK&ping="
+```
+
 **A push monitor that never pinged alerts too.** Once its interval (or its
 first scheduled run plus `grace_secs`) has passed since Hora started
 watching it, it is down with *"no heartbeat received yet"*. That start time

@@ -2509,7 +2509,13 @@ fn the_example_config_round_trips_into_typed_monitors() {
     );
     assert!(smtp.checks_cert());
     let backup = config.find_monitor("nightly-backup").expect("push monitor");
-    assert_eq!(backup.spec, MonitorKind::Push(PushSpec { schedule: None }));
+    assert_eq!(
+        backup.spec,
+        MonitorKind::Push(PushSpec {
+            schedule: None,
+            kuma_push: false
+        })
+    );
 }
 
 #[test]
@@ -3133,5 +3139,53 @@ fn method_is_get_or_head_and_head_asserts_no_body() {
     assert!(
         error.contains("monitor db: method requires an http monitor"),
         "{error}"
+    );
+}
+
+/// A Kuma push URL is opt-in, and its token - the path segment that finds
+/// the monitor - must exist, be URL-safe, unique, and never read as an id.
+#[test]
+fn kuma_push_requires_unique_url_safe_tokens_that_are_no_id() {
+    let job = |id: &str, token: &str| {
+        format!(
+            "[[monitors]]\nid='{id}'\nname='Job'\nkind='push'\ninterval_secs=60\n\
+             kuma_push=true\npush_token='{token}'\n"
+        )
+    };
+    let base = "[page]\n[server]\n";
+    let config = load(&format!("{base}{}", job("job", "synthetic-credential"))).unwrap();
+    assert!(
+        matches!(&config.monitors[0].spec, MonitorKind::Push(push) if push.kuma_push),
+        "{:?}",
+        config.monitors[0].spec
+    );
+    // No token, a token with a slash, two monitors on one token, a token
+    // that is a monitor id.
+    for bad in [
+        format!(
+            "{base}[[monitors]]\nid='job'\nname='Job'\nkind='push'\ninterval_secs=60\n\
+             kuma_push=true\nallow_unauthenticated=true\n"
+        ),
+        format!("{base}{}", job("job", "synthetic/credential")),
+        format!(
+            "{base}{}{}",
+            job("job", "synthetic-credential"),
+            job("job2", "synthetic-credential")
+        ),
+        format!(
+            "{base}{}{}",
+            job("job", "synthetic-credential"),
+            job("synthetic-credential", "another-credential-x")
+        ),
+    ] {
+        let err = load(&bad).expect_err(&bad).to_string();
+        assert!(!err.contains("synthetic-credential"), "{err}");
+    }
+    // Only a push monitor takes it.
+    assert!(
+        load(&format!(
+            "{MINIMAL}\nkuma_push=true\npush_token='synthetic-credential'"
+        ))
+        .is_err()
     );
 }

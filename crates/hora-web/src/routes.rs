@@ -98,7 +98,8 @@ pub(crate) fn router_with_deadline(state: AppState, deadline: Duration) -> Route
         .route("/api/peer/probe", post(peer_probe))
         .route("/api/peer/monitors", get(peer_monitors))
         .route("/api/monitors/{id}/alert", post(post_alert))
-        .route("/api/push/{id}", post(push))
+        // GET only for a `kuma_push` monitor's token (see `push`).
+        .route("/api/push/{id}", post(push).get(push))
         .route("/api/silence", post(silence))
         .route("/api/announce", post(announce).delete(announce_clear))
         .route("/api/event", post(post_event))
@@ -362,6 +363,17 @@ impl ClassifyResponse for StartingIsNoFailure {
     }
 }
 
+/// The path as the access log shows it. A push path's last segment may be
+/// a `kuma_push` monitor's token rather than an id, so no push path is
+/// logged with it.
+pub(crate) fn logged_path(path: &str) -> &str {
+    if path.starts_with("/api/push/") {
+        "/api/push/[redacted]"
+    } else {
+        path
+    }
+}
+
 pub(crate) fn make_request_span(request: &Request<Body>) -> tracing::Span {
     let request_id = request
         .headers()
@@ -373,7 +385,7 @@ pub(crate) fn make_request_span(request: &Request<Body>) -> tracing::Span {
     tracing::info_span!(
         "request",
         method = %request.method(),
-        path = %request.uri().path(),
+        path = %logged_path(request.uri().path()),
         request_id,
     )
 }
