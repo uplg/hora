@@ -180,7 +180,19 @@ impl Message {
     /// Put `event` into words. The single source of every notification text.
     pub(crate) fn render(event: Event<'_>) -> Self {
         let (kind, subject, rest) = match event {
-            Event::Down { monitor, .. } => (Kind::Down, monitor.to_owned(), " is DOWN".to_owned()),
+            Event::Down {
+                monitor,
+                down_for_secs,
+                ..
+            } => (
+                Kind::Down,
+                monitor.to_owned(),
+                match down_for_secs {
+                    None => " is DOWN".to_owned(),
+                    Some(0) => " is still DOWN".to_owned(),
+                    Some(secs) => format!(" is still DOWN (for {})", human_duration(secs)),
+                },
+            ),
             Event::Degraded {
                 monitor,
                 latency_ms,
@@ -585,6 +597,7 @@ mod tests {
             vantage: None,
             event: None,
             local_only: false,
+            down_for_secs: None,
         }
     }
 
@@ -598,6 +611,7 @@ mod tests {
             vantage: Some("confirmed down from 3/3 vantage points"),
             event: Some("deploy api v2.3, 3 min before"),
             local_only: false,
+            down_for_secs: None,
         });
         assert_eq!(msg.headline(), "API is DOWN");
         assert_eq!(msg.tagged_headline(), "[DOWN] API is DOWN");
@@ -611,6 +625,32 @@ mod tests {
         let root = Message::render(down(None, None, &["API", "Web"]));
         assert_eq!(root.code.as_deref(), Some("no response"));
         assert_eq!(root.plain_body(), "no response\nimpacts 2: API, Web");
+    }
+
+    /// A reminder of an outage that lasts reads as one, with its duration
+    /// when known; the body is the down's.
+    #[test]
+    fn a_reminder_says_still_down_and_for_how_long() {
+        let still = |down_for_secs| {
+            Message::render(Event::Down {
+                monitor: "API",
+                error: Some("boom"),
+                cause: None,
+                impacted: &[],
+                vantage: None,
+                event: None,
+                local_only: false,
+                down_for_secs: Some(down_for_secs),
+            })
+        };
+        assert_eq!(still(9000).headline(), "API is still DOWN (for 2 h)");
+        assert_eq!(
+            still(9000).tagged_headline(),
+            "[DOWN] API is still DOWN (for 2 h)"
+        );
+        assert_eq!(still(0).headline(), "API is still DOWN");
+        assert_eq!(still(9000).urgency(), Urgency::High);
+        assert_eq!(still(9000).plain_body(), "boom");
     }
 
     #[test]

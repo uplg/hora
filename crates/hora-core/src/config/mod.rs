@@ -479,6 +479,12 @@ pub struct Alerts {
     /// page's "Not an outage").
     #[serde(default)]
     pub notify_unconfirmed: Option<Vec<String>>,
+    /// Remind of a confirmed outage every this many seconds while it lasts
+    /// (the down alert again, to the same channels). 0, the default, sends
+    /// none. A monitor may set its own (`repeat_alert_secs`). Separate from
+    /// the re-sending of a down no channel took.
+    #[serde(default)]
+    pub repeat_alert_secs: u64,
 }
 
 impl Default for Alerts {
@@ -493,6 +499,7 @@ impl Default for Alerts {
             push_alert_window_secs: default_push_alert_window(),
             channel_fail_threshold: default_channel_fail_threshold(),
             notify_unconfirmed: None,
+            repeat_alert_secs: 0,
         }
     }
 }

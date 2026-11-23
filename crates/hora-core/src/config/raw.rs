@@ -40,6 +40,10 @@ pub(crate) struct RawMonitor {
     /// failure is already worth a page, more for one that is known to flap.
     #[serde(default)]
     pub(crate) fail_threshold: Option<u32>,
+    /// Remind of a confirmed outage every this many seconds while it lasts,
+    /// instead of `[alerts] repeat_alert_secs`; 0 turns reminders off.
+    #[serde(default)]
+    pub(crate) repeat_alert_secs: Option<u64>,
     #[serde(default)]
     pub(crate) degraded_over_ms: Option<i64>,
     /// Latency SLO objective in ms: the 24h p95 is flagged met/breached against it.
@@ -240,6 +244,7 @@ impl Default for RawMonitor {
             expected_status: None,
             method: None,
             fail_threshold: None,
+            repeat_alert_secs: None,
             degraded_over_ms: None,
             slo_latency_ms: None,
             slo_uptime: None,

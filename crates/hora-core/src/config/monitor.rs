@@ -127,6 +127,9 @@ pub struct Monitor {
     /// Consecutive failed checks before this monitor is confirmed down;
     /// unset = `[alerts] fail_threshold` (see [`Monitor::fail_threshold`]).
     pub fail_threshold: Option<u32>,
+    /// Reminder cadence of a confirmed outage; unset = `[alerts]
+    /// repeat_alert_secs` (see [`Monitor::repeat_alert_secs`]).
+    pub repeat_alert_secs: Option<u64>,
     /// Restrict this monitor's alerts to these channel names. Unset = every
     /// configured channel.
     pub notify: Option<Vec<String>>,
@@ -395,6 +398,7 @@ impl std::fmt::Debug for Monitor {
             .field("slo_window_days", &self.slo_window_days)
             .field("probe_retries", &self.probe_retries)
             .field("fail_threshold", &self.fail_threshold)
+            .field("repeat_alert_secs", &self.repeat_alert_secs)
             .field("notify", &self.notify)
             .field("check_cert", &self.check_cert)
             .field("retention_days", &self.retention_days)
@@ -507,6 +511,13 @@ impl Monitor {
     #[must_use]
     pub fn fail_threshold(&self, alerts: &Alerts) -> u32 {
         self.fail_threshold.unwrap_or(alerts.fail_threshold).max(1)
+    }
+
+    /// How often a confirmed outage is reminded of, in seconds: its own
+    /// `repeat_alert_secs`, else the global one; `None` when off (0).
+    #[must_use]
+    pub fn repeat_alert_secs(&self, alerts: &Alerts) -> Option<u64> {
+        Some(self.repeat_alert_secs.unwrap_or(alerts.repeat_alert_secs)).filter(|secs| *secs > 0)
     }
 
     /// Availability SLO window in days (default 30).

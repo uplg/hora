@@ -74,7 +74,8 @@ that key is set (an empty list: nowhere). See
 `recovered`, `cert_expiring`, `cert_changed`, `cert_unreadable`,
 `domain_expiring`, `release_available`, `peer_link_degraded`,
 `budget_burn`, `digest`, `alert`) and `monitor`, plus the fields that event
-carries: `message`, `cause`, `impacted`, `vantage` and `change` on a down;
+carries: `message`, `cause`, `impacted`, `vantage` and `change` on a down,
+and `down_for_secs` on a [still-down reminder](#still-down-reminders);
 `local_only` (bool) on `down` and `recovered`; `days_left` and `secs_left`
 on expiry events (`days_left` is rounded down: 0 during the last day, -1
 once the expiry has passed; `secs_left` is the exact figure, negative once
@@ -175,6 +176,44 @@ that flaps entirely inside the window sends nothing at all.
 [alerts]
 group_window_secs = 30   # 0 restores one-alert-per-monitor
 ```
+
+## Still-down reminders
+
+One alert, then quiet, is the default. For an outage that must not be
+forgotten, `repeat_alert_secs` sends the down again every so many seconds
+while it lasts, until it recovers:
+
+```
+API is still DOWN (for 2 h)
+```
+
+```toml
+[alerts]
+repeat_alert_secs = 3600 # every hour; 0 (the default) sends none
+
+[[monitors]]
+id = "payments"
+# ...
+repeat_alert_secs = 900  # its own cadence; 0 turns them off for this monitor
+```
+
+A reminder goes out with the first check after it is due, to the channels
+the down went to, with the same detail (the error, the root cause or what
+it impacts). There is none:
+
+- while the monitor is muted by a [maintenance window](#maintenance-windows)
+  or a [silence](#ad-hoc-silences-deploy-hooks). One that came due goes out
+  when the mute ends, once, never a backlog;
+- for a down folded into its root cause's alert: the cause's reminder
+  speaks for it;
+- for a [local-only down](../peers/#local-only-downs) the peers have not
+  confirmed. Once they do, the reminders count from the down that then goes
+  out.
+
+The time of the last one is kept in the database: a restart neither sends
+a reminder early nor forgets one. Separately, and with or without
+reminders, a down that no channel took (every one failed) is sent again
+after 10 minutes: that is delivery, not a reminder.
 
 ## Maintenance windows
 

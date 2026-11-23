@@ -144,6 +144,9 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         );
     }
     let channel_names = validate_channels(config)?;
+    if config.alerts.repeat_alert_secs > 0 {
+        validate_period("alerts.repeat_alert_secs", config.alerts.repeat_alert_secs)?;
+    }
 
     for window in &config.maintenance {
         anyhow::ensure!(
@@ -176,6 +179,9 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
             &format!("monitor {} timeout_secs", monitor.id),
             monitor.timeout_secs,
         )?;
+        if let Some(secs) = monitor.repeat_alert_secs.filter(|secs| *secs > 0) {
+            validate_period(&format!("monitor {} repeat_alert_secs", monitor.id), secs)?;
+        }
         // A probe outliving its interval delays the next tick (the scheduler
         // never overlaps probes), so the effective cadence is the timeout,
         // not the interval. Push monitors probe nothing; their timeout is inert.

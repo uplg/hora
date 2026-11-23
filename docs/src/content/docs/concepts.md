@@ -170,7 +170,9 @@ complete.
 The alert goes to the monitor's `notify` channels (or every channel), with
 the reason, the root-cause annotation, the peers' verdict and, for HTTP, a
 snippet of what the service answered. Then Hora stays quiet until the
-monitor recovers, and sends the recovery only if it sent the down.
+monitor recovers, and sends the recovery only if it sent the down - unless
+you asked to be reminded ([still-down reminders](../guides/alerting/#still-down-reminders),
+`repeat_alert_secs`).
 
 This state survives edits and restarts: changing a monitor's config during
 an outage does not send the down again, and a restart picks up the open
