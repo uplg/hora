@@ -45,7 +45,15 @@ hora --version
 
 Validates the configuration and exits non-zero on error - made for CI and
 pre-deploy hooks. Validation is strict; see
-[Configuration](../../configuration/#validation).
+[Configuration](../../configuration/#validation). Every faulty entry is
+named on stderr, one `error: ...` line each - the entries the daemon would
+start without, with its `hora-config` monitor down:
+
+```text
+$ hora check
+error: monitor api: interval_secs must be > 0; not loaded
+Configuration error: 1 issue(s): Hora would start without the entries above, its configuration monitor down
+```
 
 What the loader only warns about - the lines the daemon would log at startup
 (a `${VAR}` that is not set, a channel disabled by an empty secret, a

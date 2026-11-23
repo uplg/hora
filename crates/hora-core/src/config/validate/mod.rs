@@ -65,7 +65,7 @@ fn is_loopback_url(raw: &str) -> bool {
 /// `expect_every_secs`): 30 days. Nothing sensible is slower, and a typo'd
 /// huge value would overflow `Instant` arithmetic in the tick timers - a panic
 /// (which aborts the daemon in a release build) instead of a load error.
-const MAX_PERIOD_SECS: u64 = 30 * 24 * 3600;
+pub(super) const MAX_PERIOD_SECS: u64 = 30 * 24 * 3600;
 
 /// A period in seconds must be positive and at most [`MAX_PERIOD_SECS`].
 fn validate_period(label: &str, secs: u64) -> anyhow::Result<()> {
@@ -100,7 +100,7 @@ pub(super) fn validate_host_label(label: &str, host: Option<&str>) -> anyhow::Re
 
 /// Ids that appear in URLs (`/api/badge/{id}`, `/api/push/{id}`) must stay
 /// URL-safe.
-fn is_url_safe_id(id: &str) -> bool {
+pub(super) fn is_url_safe_id(id: &str) -> bool {
     id.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
@@ -233,6 +233,28 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
         config.alerts.notify_unconfirmed.as_deref(),
         &channel_names,
     )?;
+    validate_reserved_ids(config)?;
+    if let Some(builtin) = &config.config_monitor {
+        validate_routes("config_monitor", builtin.notify.as_deref(), &channel_names)?;
+    }
+    Ok(())
+}
+
+/// The built-in configuration monitor's id is its own: no configured
+/// monitor may take it, nor a watched peer's `listen_id` (both would be
+/// pushed to at `/api/push/{id}`, which refuses it).
+fn validate_reserved_ids(config: &Config) -> anyhow::Result<()> {
+    let reserved = super::CONFIG_MONITOR_ID;
+    if config.find_monitor(reserved).is_some() {
+        anyhow::bail!("monitor {reserved}: the id is reserved for a built-in monitor");
+    }
+    for peer in config.peers.iter().filter(|peer| peer.is_watched()) {
+        anyhow::ensure!(
+            peer.listen_id() != reserved,
+            "peer {}: listen_id {reserved:?} is reserved for a built-in monitor",
+            peer.id
+        );
+    }
     Ok(())
 }
 

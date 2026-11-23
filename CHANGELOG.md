@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A built-in `hora-config` monitor.** It is down while the configuration
+  has issues, names every one in its message and alerts like any monitor
+  at the first failure; it recovers with the first
+  load without issues. Hora alone feeds it: it takes no push, and no monitor
+  or peer `listen_id` may use the id. The optional `[config_monitor]`
+  section sets its `name`, `group` and `notify` (default: every channel).
+
+### Changed
+
+- **A faulty entry no longer stops the daemon.** Each monitor, channel and
+  maintenance window is checked on its own: an invalid one is left out with
+  an `ERROR` line and reported by `hora-config`, and everything else runs.
+  What it leaves dangling is fixed rather than failed: routes to a dropped
+  channel are removed, a `depends_on` on a monitor that is not loaded (or in
+  a cycle) is ignored, a group token without a loaded group is ignored. A
+  live reload follows the same rules; an entry edited into an invalid state
+  stops, no older version of it is kept. If no channel or no monitor is
+  left, the external heartbeat is withheld.
+- **A file that cannot be loaded at all no longer ends the process at
+  startup** (a TOML syntax error, an invalid global section, an unreadable
+  file): Hora answers every request with `503` and the reason, and reads the
+  file again every 5 s until it loads. On a live reload the previous
+  configuration keeps running, as before, and `hora-config` says so.
+- **`hora check` names every faulty entry**, not just the first, and still
+  fails while there is one.
+
 ## [0.12.3] - 2026-11-23
 
 The running version on the page, and an idle daemon that stays asleep where

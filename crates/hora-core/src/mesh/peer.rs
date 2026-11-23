@@ -215,6 +215,12 @@ pub fn spawn_heartbeat(
                 );
                 continue;
             }
+            // No channel or no monitor survived the config load: Hora cannot
+            // alert by itself, so the dead-man service has to.
+            if snapshot.cannot_alert {
+                warn!("heartbeat skipped: no notification channel or no monitor could be loaded");
+                continue;
+            }
 
             let digest = format!("ok mon={} tick={}s", snapshot.monitors.len(), age.max(0));
             match crate::planned::announcements(&store, &snapshot, now).await {

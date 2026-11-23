@@ -6,6 +6,7 @@
 
 mod channel;
 mod env;
+mod lenient;
 mod monitor;
 mod parsed;
 mod peer;
@@ -16,6 +17,10 @@ mod tests;
 mod validate;
 
 pub use channel::Channel;
+pub use lenient::{
+    BuiltinMonitor, CONFIG_MONITOR_ID, ConfigIssue, load_lenient_from, parse_lenient,
+    parse_lenient_at,
+};
 pub use monitor::{
     DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JsonAssert, KeywordAssert, Kind, Monitor, MonitorKind,
     NetworkProbe, NumberAssert, PushSchedule, PushSpec, ReleaseWatch, Starttls, TcpSpec,
@@ -32,7 +37,6 @@ use anyhow::Context as _;
 use jiff::Timestamp;
 use serde::Deserialize;
 
-#[cfg(test)]
 pub(crate) use env::capture::captured_warnings;
 use env::{Lookup, expand_env_table};
 pub use validate::MIN_TOKEN_CHARS;
@@ -72,6 +76,21 @@ pub struct Config {
     /// one message per release). On by default.
     #[serde(default)]
     pub updates: Updates,
+    /// How the built-in configuration monitor ([`CONFIG_MONITOR_ID`]) shows
+    /// and alerts. It exists whether or not the section does (after a
+    /// lenient load; a strict one adds no built-in monitor).
+    #[serde(default)]
+    pub config_monitor: Option<BuiltinMonitor>,
+    /// What a lenient load ([`parse_lenient`]) left out or changed, and what
+    /// the daemon adds to it (a reload that failed). Empty after a strict
+    /// load.
+    #[serde(skip)]
+    pub issues: Vec<ConfigIssue>,
+    /// A lenient load kept no notification channel, or no monitor, of the
+    /// ones configured: Hora cannot alert anybody by itself, so it withholds
+    /// its external heartbeat and the dead-man service raises the alarm.
+    #[serde(skip)]
+    pub cannot_alert: bool,
     /// Where exec-probe executables live, from the `HORA_EXEC_DIR`
     /// environment variable - never from the file. The separation is the
     /// security model: the hot-reloadable config alone must not be able to
@@ -635,8 +654,14 @@ pub fn load_from(path: &Path) -> anyhow::Result<Config> {
 /// the logo cannot be read.
 pub fn parse_at(raw: &str, path: &Path) -> anyhow::Result<Config> {
     let mut config = parse(raw)?;
+    read_logos(&mut config.page, path)?;
+    Ok(config)
+}
+
+/// Read the logos `page` names, relative to the directory of the config
+/// file at `path`.
+fn read_logos(page: &mut Page, path: &Path) -> anyhow::Result<()> {
     let dir = path.parent().unwrap_or(Path::new(""));
-    let page = &mut config.page;
     anyhow::ensure!(
         page.logo.is_some() || page.logo_dark.is_none(),
         "page.logo_dark needs page.logo, the light theme's"
@@ -647,7 +672,7 @@ pub fn parse_at(raw: &str, path: &Path) -> anyhow::Result<Config> {
     if let Some(logo) = &page.logo_dark {
         page.logo_dark_image = Some(Logo::read(&dir.join(logo))?);
     }
-    Ok(config)
+    Ok(())
 }
 
 /// Parse, env-override and validate a configuration from TOML text.
