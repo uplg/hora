@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`[server] summary_idle_refresh_secs`**: how long the status summary
+  waits before its next rebuild while nobody reads it (default 30 s, as
+  before; 5..3600). A longer pause saves database reads on an idle node;
+  the first request after a quiet stretch still waits for a fresh build.
+- **`[server] database = { cache_kib, max_connections }`** sizes the two
+  SQLite pools: the page cache of each connection, and the connections of
+  both pools together (a third for the daemon, the rest for the status
+  pages). Unset, as before: 4000 KiB for each of 3 + 6 connections. A
+  small container can trade page throughput for memory. `hora` commands
+  open the database with the same sizing.
+
 ## [0.12.3] - 2026-11-23
 
 The running version on the page, and an idle daemon that stays asleep where

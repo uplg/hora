@@ -21,7 +21,8 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     // never do so under a running daemon (nor two daemons share one file).
     let _lock = hora_core::db::lock_exclusive(&initial.server.database_path)
         .context("locking the database")?;
-    let store = hora_core::db::connect(&initial.server.database_path)
+    let sizing = hora_core::db::PoolSizing::from_settings(initial.server.database.as_ref());
+    let store = hora_core::db::connect_sized(&initial.server.database_path, sizing)
         .await
         .context("opening database")?;
     // The notifier client (no proxy); per-monitor probe clients are built by the
