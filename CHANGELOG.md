@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **jq assertions on http monitors.** `jq` runs a jq expression (with
+  [jaq](https://github.com/01mf02/jaq)) on a JSON body and compares its one
+  result with `jq_expected` (default `true`) by `jq_operator` (`==`, `!=`,
+  `<`, `<=`, `>`, `>=`): for what a `json_query` cannot judge, such as a
+  count of failing entries, arithmetic, or a number sent as a string. The
+  expression is compiled at load and shared by the monitors that spell it the
+  same; it has no access to the environment, files or modules, and function
+  definitions are refused. No result, several, `null`, an array or an object
+  fail the check. On the public page, a failure reads "content check failed".
+
 ## [0.12.3] - 2026-11-23
 
 The running version on the page, and an idle daemon that stays asleep where

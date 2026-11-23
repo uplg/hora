@@ -77,7 +77,7 @@ judges the first answer and does not follow redirects: see below.
 **`method = "HEAD"`** asks for the headers alone: for a large page or a
 download you do not want fetched every minute, or an endpoint that counts
 its `GET`s. The answer to a `HEAD` has no body, so a monitor with `keyword`,
-`json_query` or `number_regex` and `method = "HEAD"` is refused at load.
+`json_query`, `jq` or `number_regex` and `method = "HEAD"` is refused at load.
 `"GET"` is the default and the only other method: Hora sends no request
 body, so there is no `POST` or `PUT`. Some servers answer a `HEAD` with a
 405 or another status than their `GET`: check with
@@ -89,6 +89,9 @@ body, so there is no `POST` or `PUT`. Some servers answer a `HEAD` with a
 keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 json_query = "$.status"   # JSONPath (RFC 9535) against a JSON body
 json_expected = "ok"      # the queried value must equal this (omit = must match a node)
+jq = '[.checks[] | select(.ok | not)] | length'  # jq against a JSON body
+jq_expected = "0"         # compared with its one result (omit = true)
+jq_operator = "=="        # ==, !=, <, <=, >, >= (default ==)
 number_regex = 'in stock: (\d+)'  # extract a number from the body (first capture
                           # group, or the whole match) - down when nothing matches
 number_min = 1            # ... or when the number is below this (inclusive)
@@ -101,6 +104,28 @@ JSON endpoint behind them - a queue depth, a stock level, a sensor's "receivers
 online" counter. When the page is HTML, anchor the pattern on the surrounding
 markup: `number_regex = 'class="shipCount">(\d+)<'` with `number_min = 1` goes
 down the moment the counter reads zero (or disappears entirely).
+
+`jq` is for answers a `JSONPath` cannot judge: counts, arithmetic, a number
+sent as a string (`.value | tonumber > 0.5`), a choice between fields. It is
+run by [jaq](https://github.com/01mf02/jaq), a jq implementation in Rust. The
+expression must produce exactly one string, number or boolean: no output,
+several outputs, `null`, an array or an object fail the check, as does a body
+that is not JSON. `jq_expected` and the result compare as numbers when both
+read as numbers (`"2.0"` equals `2`), as text otherwise; `<`, `<=`, `>` and
+`>=` need numbers on both sides. A `jq_expected` or `jq_operator` without a
+`jq` is refused at load, as is an expression that does not compile.
+
+The expression is part of the configuration and is trusted like the rest of
+it; the body it reads is the server's. Hora does not cap the time or memory
+an expression takes on a body, so keep it to a filter over that body
+(`range(1e18)` would keep a thread busy). Expressions are compiled once at load
+and shared between monitors that spell them the same. They have no access to
+the environment, files, the clock or modules (`env`, `input`, `now`,
+`import` and `include` are not available), and jaq's regex and date functions
+are left out (`number_regex` covers the first). Function definitions (`def`)
+are refused, because a recursive one overflows the stack and stops Hora rather
+than failing a check. The body is read up to `max_body_kb` and nested at most
+128 levels deep, also inside a string handed to `fromjson` or `tonumber`.
 
 Redirects are followed (up to 10), but configured headers, which may carry
 credentials, are only re-attached while the redirect stays on the original

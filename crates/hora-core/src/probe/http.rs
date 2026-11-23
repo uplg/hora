@@ -9,7 +9,7 @@ use reqwest::{Client, RequestBuilder};
 
 use super::snapshot::{MAX_SNAPSHOT_BODY_CHARS, render_snapshot, snapshot_head, snippet};
 use super::{Outcome, millis, over_threshold};
-use crate::config::{HttpSpec, JsonAssert, Monitor, NumberAssert, Secret};
+use crate::config::{HttpSpec, JqAssert, JqOperator, JsonAssert, Monitor, NumberAssert, Secret};
 use crate::http::{RedirectGuard, is_downgrade};
 
 pub(super) async fn http(client: &Client, monitor: &Monitor, spec: &HttpSpec) -> Outcome {
@@ -235,7 +235,7 @@ pub(super) fn same_origin(target: &reqwest::Url, url: &reqwest::Url) -> bool {
     target.origin() == url.origin()
 }
 
-/// Run the configured keyword/JSON assertions against the body; the first that
+/// Run the configured keyword/JSON/jq/number assertions against the body; the first that
 /// fails returns its reason. `None` means every assertion passed.
 pub(super) fn check_assertions(spec: &HttpSpec, body: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(body);
@@ -251,6 +251,11 @@ pub(super) fn check_assertions(spec: &HttpSpec, body: &[u8]) -> Option<String> {
     }
     if let Some(json) = &spec.json
         && let Some(failure) = check_json(json, &text)
+    {
+        return Some(failure);
+    }
+    if let Some(jq) = &spec.jq
+        && let Some(failure) = check_jq(jq, body)
     {
         return Some(failure);
     }
@@ -308,6 +313,40 @@ pub(super) fn check_json(json: &JsonAssert, body: &str) -> Option<String> {
             (!matched).then(|| format!("JSON query {query} != {expected}"))
         }
     }
+}
+
+/// Run a jq expression against the body and compare its one result with the
+/// expected value: as numbers when both sides read as numbers, as text
+/// otherwise; the ordering operators need numbers. Returns a failure reason
+/// or `None`.
+pub(super) fn check_jq(jq: &JqAssert, body: &[u8]) -> Option<String> {
+    let query = jq.query.raw();
+    let result = match jq.query.evaluate(body) {
+        Ok(result) => result,
+        // Same wording as the JSONPath check, so both collapse alike.
+        Err(error @ "response is not valid JSON") => return Some(error.to_owned()),
+        Err(error) => return Some(format!("jq {query}: {error}")),
+    };
+    let expected = jq.expected.as_deref().unwrap_or("true");
+    let numbers = result
+        .parse::<f64>()
+        .ok()
+        .zip(expected.parse::<f64>().ok())
+        .filter(|(a, b)| a.is_finite() && b.is_finite());
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact equality is the configured assertion, not an approximation"
+    )]
+    let equal = numbers.map_or(result == expected, |(a, b)| a == b);
+    let passed = match jq.operator {
+        JqOperator::Eq => equal,
+        JqOperator::Ne => !equal,
+        JqOperator::Lt => numbers.is_some_and(|(a, b)| a < b),
+        JqOperator::Le => numbers.is_some_and(|(a, b)| a <= b),
+        JqOperator::Gt => numbers.is_some_and(|(a, b)| a > b),
+        JqOperator::Ge => numbers.is_some_and(|(a, b)| a >= b),
+    };
+    (!passed).then(|| format!("jq {query}: result not {} {expected}", jq.operator.as_str()))
 }
 
 /// Compare a queried JSON node to an expected string: strings match their inner

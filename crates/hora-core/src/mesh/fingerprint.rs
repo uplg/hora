@@ -107,6 +107,15 @@ fn http(text: &mut String, spec: &HttpSpec) {
             field(text, "json_expected", expected);
         }
     }
+    if let Some(jq) = &spec.jq {
+        field(text, "jq", jq.query.raw());
+        field(
+            text,
+            "jq_expected",
+            jq.expected.as_deref().unwrap_or("true"),
+        );
+        field(text, "jq_operator", jq.operator.as_str());
+    }
     if let Some(number) = &spec.number {
         field(text, "number_regex", number.regex.raw());
         if let Some(min) = number.min {
@@ -318,12 +327,22 @@ mod tests {
             ("credential", API.replace("s3cret", "0ther")),
             ("path", API.replace("/health", "/ready")),
             ("json", format!("{API}\njson_query = \"$.status\"")),
+            ("jq", format!("{API}\njq = \".ok\"")),
             ("number", format!("{API}\nnumber_regex = \"(\\\\d+)\"")),
             ("body cap", format!("{API}\nmax_body_kb = 4")),
             ("families", format!("{API}\ndual_stack = true")),
         ] {
             assert_ne!(fingerprint(&changed), base, "{what}");
         }
+        let jq = format!("{API}\njq = \".n\"");
+        assert_ne!(
+            fingerprint(&format!("{jq}\njq_expected = \"2\"")),
+            fingerprint(&jq)
+        );
+        assert_ne!(
+            fingerprint(&format!("{jq}\njq_operator = \"!=\"")),
+            fingerprint(&jq)
+        );
         let json = format!("{API}\njson_query = \"$.status\"");
         assert_ne!(
             fingerprint(&format!("{json}\njson_expected = \"up\"")),

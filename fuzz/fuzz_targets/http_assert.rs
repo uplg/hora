@@ -1,10 +1,12 @@
 //! What an HTTP probe does with a monitored server's answer: the body
-//! assertions (keyword, JSON query, number), and the failure snapshot kept
-//! with an incident (headers and the start of the body).
+//! assertions (keyword, JSON query, jq, number), and the failure snapshot
+//! kept with an incident (headers and the start of the body).
 //!
 //! Input: four lines - `keyword`, `json_query`, `json_expected`,
 //! `number_regex` (an empty line: not set) - then the answer's body. The
-//! assertions are the operator's, the body is the server's.
+//! assertions are the operator's, the body is the server's. The jq
+//! expression is fixed: it is configuration, trusted as such; what is
+//! fuzzed is the body it reads, every string of it parsed as JSON again.
 #![no_main]
 
 use hora_core::config::MonitorKind;
@@ -29,7 +31,9 @@ fuzz_target!(|data: &[u8]| {
 
     let config = format!(
         "[page]\n[server]\n[[monitors]]\nid = \"m\"\nname = \"M\"\n\
-         target = \"http://127.0.0.1:9/\"\ninterval_secs = 60\n{}{}{}{}{}",
+         target = \"http://127.0.0.1:9/\"\ninterval_secs = 60\n\
+         jq = '[.. | strings | fromjson? | numbers] | length'\njq_operator = '>='\n\
+         jq_expected = '0'\n{}{}{}{}{}",
         setting("keyword", &keyword),
         setting("json_query", &query),
         // Only read with a query.

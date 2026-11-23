@@ -3,15 +3,17 @@ use std::net::SocketAddr;
 
 use super::dns::{record_type, resolver_for};
 use super::family::combine;
-use super::http::{check_assertions, check_json, check_number, same_origin, with_headers};
+use super::http::{
+    check_assertions, check_jq, check_json, check_number, same_origin, with_headers,
+};
 use super::snapshot::{
     MAX_SNAPSHOT_BODY_CHARS, MAX_SNAPSHOT_HEADER_CHARS, MAX_SNAPSHOT_HEADERS, render_head,
     render_snapshot,
 };
 use super::*;
 use crate::config::{
-    Compiled, DnsRecord, ExpectedStatus, HttpMethod, HttpSpec, JsonAssert, KeywordAssert,
-    MonitorKind, NumberAssert, Parsed, Secret,
+    Compiled, DnsRecord, ExpectedStatus, HttpMethod, HttpSpec, JqAssert, JqOperator, JsonAssert,
+    KeywordAssert, MonitorKind, NumberAssert, Parsed, Secret,
 };
 use crate::http::is_downgrade;
 
@@ -229,6 +231,19 @@ fn json(query: &str, expected: Option<&str>, body: &str) -> Option<String> {
     let query = Compiled::parse(query).unwrap();
     let expected = expected.map(str::to_owned);
     check_json(&JsonAssert { query, expected }, body)
+}
+
+fn jq(query: &str, operator: JqOperator, expected: &str, body: &str) -> Option<String> {
+    let query = Compiled::parse(query).unwrap();
+    let expected = Some(expected.to_owned());
+    check_jq(
+        &JqAssert {
+            query,
+            expected,
+            operator,
+        },
+        body.as_bytes(),
+    )
 }
 
 #[test]
@@ -702,6 +717,62 @@ fn json_query_assertion() {
     assert!(json("$.x", Some("1"), "not json").is_some());
 }
 
+#[test]
+fn jq_assertion() {
+    use JqOperator::{Eq, Ge, Gt, Le, Lt, Ne};
+    // Arithmetic, counts and a number inside a string: what a JSONPath can't judge.
+    for (query, up, down, expected) in [
+        (". > 100", "101", "99", "true"),
+        (
+            "[.[] | select(.state == \"failed\")] | length",
+            r#"[{"state":"ok"}]"#,
+            r#"[{"state":"failed"}]"#,
+            "0",
+        ),
+        (
+            ".data.result[0].value[1] | tonumber | round",
+            r#"{"data":{"result":[{"value":[0,"2.4"]}]}}"#,
+            r#"{"data":{"result":[{"value":[0,"3.4"]}]}}"#,
+            "2",
+        ),
+    ] {
+        assert!(jq(query, Eq, expected, up).is_none(), "{query}");
+        assert!(jq(query, Eq, expected, down).is_some(), "{query}");
+    }
+    // Numbers compare as numbers, everything else as text.
+    for (operator, expected, pass) in [
+        (Eq, "2.0", true),
+        (Ne, "3", true),
+        (Lt, "3", true),
+        (Le, "2", true),
+        (Gt, "1", true),
+        (Ge, "2", true),
+        (Lt, "1", false),
+        (Gt, "bad", false),
+    ] {
+        assert_eq!(
+            jq(".", operator, expected, "2").is_none(),
+            pass,
+            "{operator:?} {expected}"
+        );
+    }
+    assert!(jq(".s", Eq, "up", r#"{"s":"up"}"#).is_none());
+    assert!(jq(".s", Gt, "up", r#"{"s":"up"}"#).is_some());
+    // The reasons carry the expression and the expected value, never the body.
+    assert_eq!(
+        jq(".n", Gt, "5", r#"{"n":3}"#).as_deref(),
+        Some("jq .n: result not > 5")
+    );
+    assert_eq!(
+        jq(".n", Eq, "5", r#"{"n":[3]}"#).as_deref(),
+        Some("jq .n: result is not a string, number or boolean")
+    );
+    assert_eq!(
+        jq(".n", Eq, "5", "not json").as_deref(),
+        Some("response is not valid JSON")
+    );
+}
+
 #[tokio::test]
 async fn applies_every_configured_header() {
     let client = Client::new();
@@ -878,5 +949,35 @@ fn public_reason_collapses_dual_stack_detail() {
     assert_eq!(
         public_reason(None, "IPv4 and IPv6 failing: timeout; refused"),
         "IPv4 and IPv6 failing"
+    );
+}
+
+#[tokio::test]
+async fn jq_http_assertions_evaluate_the_response_body() {
+    let (url, _) = serve(
+        "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"value\":\"5\"}",
+    )
+    .await;
+    let client = crate::http::probe_client(None).unwrap();
+    let mut monitor = http_monitor(&url);
+    spec_mut(&mut monitor).jq = Some(JqAssert {
+        query: Compiled::parse(".value | tonumber").unwrap(),
+        expected: Some("4".into()),
+        operator: JqOperator::Gt,
+    });
+    assert!(http(&client, &monitor, spec(&monitor)).await.is_up());
+    spec_mut(&mut monitor).jq.as_mut().unwrap().expected = Some("6".into());
+    let down = http(&client, &monitor, spec(&monitor)).await;
+    assert_eq!(
+        down.error.as_deref(),
+        Some("jq .value | tonumber: result not > 6")
+    );
+    assert_eq!(
+        public_reason(down.reason, down.error.as_deref().unwrap()),
+        "content check failed"
+    );
+    assert_eq!(
+        public_reason(None, down.error.as_deref().unwrap()),
+        "content check failed"
     );
 }

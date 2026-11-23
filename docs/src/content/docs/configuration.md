@@ -214,7 +214,8 @@ Values that cannot work are refused too:
 | --- | --- |
 | `interval_secs`, `timeout_secs`, `expect_every_secs`, `health.interval_secs` | at most 30 days (2592000) |
 | `expected_status` | statuses from 100 to 599 and classes `"1xx"` to `"5xx"`; a list is not empty |
-| `method` | `"GET"` or `"HEAD"`, on an http monitor; no `"HEAD"` with `keyword`, `json_query` or `number_regex` |
+| `method` | `"GET"` or `"HEAD"`, on an http monitor; no `"HEAD"` with `keyword`, `json_query`, `jq` or `number_regex` |
+| `jq_operator` | `==`, `!=`, `<`, `<=`, `>` or `>=`, with a `jq`; so is `jq_expected` |
 | `fail_threshold` on a monitor | at least 1 |
 | An IPv6 `tcp` target | bracketed: `[::1]:80`, not `::1:80` |
 | `dns_resolver` | an IP and a port (`8.8.8.8:53`, `[2620:fe::fe]:53`), not a hostname |

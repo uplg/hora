@@ -3135,3 +3135,54 @@ fn method_is_get_or_head_and_head_asserts_no_body() {
         "{error}"
     );
 }
+
+#[test]
+fn jq_is_compiled_at_load_and_its_options_require_an_expression() {
+    for (extra, error) in [
+        ("jq='('", "invalid jq"),
+        ("jq_expected='true'", "require jq"),
+        ("jq_operator='=='", "require jq"),
+        (
+            "jq='.a'\njq_operator='~'",
+            "jq_operator \"~\" is not supported",
+        ),
+        ("jq='.a'\nmethod='HEAD'", "HEAD"),
+    ] {
+        let err = load(&format!("{MINIMAL}\n{extra}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(error), "{extra}: {err}");
+    }
+    let config = load(&format!(
+        "{MINIMAL}\njq='.value | tonumber'\njq_operator='>='\njq_expected='2'"
+    ))
+    .unwrap();
+    let jq = http_spec(&config.monitors[0]).jq.as_ref().unwrap();
+    assert_eq!(jq.query.raw(), ".value | tonumber");
+    assert_eq!(jq.operator, JqOperator::Ge);
+    assert_eq!(jq.expected.as_deref(), Some("2"));
+    // Unset, the operator is == and the expected value `true`.
+    let config = load(&format!("{MINIMAL}\njq='.ok'")).unwrap();
+    let jq = http_spec(&config.monitors[0]).jq.as_ref().unwrap();
+    assert_eq!(
+        (jq.operator, jq.expected.as_deref()),
+        (JqOperator::Eq, None)
+    );
+}
+
+#[test]
+fn rejects_jq_on_tcp() {
+    let src = r#"
+        [page]
+        [server]
+        [[monitors]]
+        id = "db"
+        name = "DB"
+        kind = "tcp"
+        target = "db.example:5432"
+        interval_secs = 60
+        jq = ".ok"
+    "#;
+    let error = load(src).unwrap_err().to_string();
+    assert_eq!(error, "monitor db: jq requires an http monitor");
+}

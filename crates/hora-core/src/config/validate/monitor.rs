@@ -2,12 +2,13 @@
 //! conversion of the flat file table into a typed [`Monitor`].
 
 use crate::config::monitor::{
-    DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JsonAssert, KeywordAssert, Monitor, MonitorKind,
-    NumberAssert, PushSchedule, PushSpec, Starttls, TcpSpec,
+    DnsSpec, ExecSpec, HttpSpec, IcmpSpec, JqAssert, JsonAssert, KeywordAssert, Monitor,
+    MonitorKind, NumberAssert, PushSchedule, PushSpec, Starttls, TcpSpec,
 };
 use crate::config::raw::RawMonitor;
 use crate::config::{
-    DnsRecord, ExpectedStatus, HttpMethod, Kind, Parsed, ReleaseWatch, parse_cron, split_host_port,
+    DnsRecord, ExpectedStatus, HttpMethod, JqOperator, Kind, Parsed, ReleaseWatch, parse_cron,
+    split_host_port,
 };
 
 /// Validate one `[[monitors]]` table and turn it into a [`Monitor`]: every
@@ -99,6 +100,17 @@ fn spec_of(raw: &mut RawMonitor) -> anyhow::Result<MonitorKind> {
                 Some(query) => Some(JsonAssert {
                     query: query.compiled().ok_or_else(|| compiled("json_query"))?,
                     expected: raw.json_expected.take(),
+                }),
+                None => None,
+            },
+            jq: match raw.jq.take() {
+                Some(query) => Some(JqAssert {
+                    query: query.compiled().ok_or_else(|| compiled("jq"))?,
+                    expected: raw.jq_expected.take(),
+                    operator: match &raw.jq_operator {
+                        Some(operator) => *operator.get().ok_or_else(|| compiled("jq_operator"))?,
+                        None => JqOperator::Eq,
+                    },
                 }),
                 None => None,
             },
@@ -358,24 +370,45 @@ fn validate_http_request(monitor: &RawMonitor) -> anyhow::Result<()> {
     }
     // The answer to a HEAD has no body: an assertion on it would fail on
     // every check, and the monitor would be down for good.
-    let asserts_body =
-        monitor.keyword.is_some() || monitor.json_query.is_some() || monitor.number_regex.is_some();
+    let asserts_body = monitor.keyword.is_some()
+        || monitor.json_query.is_some()
+        || monitor.jq.is_some()
+        || monitor.number_regex.is_some();
     anyhow::ensure!(
         method.get() != Some(&HttpMethod::Head) || !asserts_body,
         "monitor {}: method = \"HEAD\" gets no response body, so keyword / json_query / \
-         number_regex could never pass: use \"GET\" or drop the assertion",
+         jq / number_regex could never pass: use \"GET\" or drop the assertion",
         monitor.id
     );
     Ok(())
 }
 
-/// Validate the body assertions: the `JSONPath` and the number regex must
-/// compile, and the number bounds only make sense with a regex to extract the
-/// number and in min <= max order.
+/// Validate the body assertions: the `JSONPath`, the jq expression and the
+/// number regex must compile, the jq options need an expression, and the
+/// number bounds only make sense with a regex to extract the number and in
+/// min <= max order.
 fn validate_body_assertions(monitor: &RawMonitor) -> anyhow::Result<()> {
     if let Some(err) = monitor.json_query.as_ref().and_then(Parsed::error) {
         anyhow::bail!("monitor {}: invalid json_query: {err}", monitor.id);
     }
+    anyhow::ensure!(
+        monitor.kind == Kind::Http || monitor.jq.is_none(),
+        "monitor {}: jq requires an http monitor",
+        monitor.id
+    );
+    if let Some(err) = monitor.jq.as_ref().and_then(Parsed::error) {
+        anyhow::bail!("monitor {}: invalid jq: {err}", monitor.id);
+    }
+    if let Some(err) = monitor.jq_operator.as_ref().and_then(Parsed::error) {
+        anyhow::bail!("monitor {}: {err}", monitor.id);
+    }
+    // New keys: without an expression to compare they are a mistake, said
+    // at once rather than ignored with a warning.
+    anyhow::ensure!(
+        monitor.jq.is_some() || (monitor.jq_expected.is_none() && monitor.jq_operator.is_none()),
+        "monitor {}: jq_expected/jq_operator require jq",
+        monitor.id
+    );
     if let Some(pattern) = &monitor.number_regex {
         if let Some(err) = pattern.error() {
             anyhow::bail!("monitor {}: invalid number_regex: {err}", monitor.id);
