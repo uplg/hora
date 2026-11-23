@@ -65,7 +65,7 @@ pub(crate) enum Verdict {
 /// into a false "confirmed down from 2/2").
 #[must_use]
 pub fn enabled(config: &Config, monitor: &Monitor) -> bool {
-    if matches!(monitor.kind(), Kind::Push | Kind::Exec) {
+    if matches!(monitor.kind(), Kind::Push | Kind::Exec | Kind::Mqtt) {
         return false;
     }
     monitor.confirm_with_peers.unwrap_or_else(|| {

@@ -376,7 +376,7 @@ interval_secs = 30
 timeout_secs = 10
 group = "app"
 depends_on = ["database"]
-# Body assertions (http only):
+# Body assertions (http; keyword/json_query/jq also on mqtt):
 # keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 # json_query = "$.status"   # JSONPath (RFC 9535) evaluated against a JSON body
 # json_expected = "ok"      # the queried value must equal this (omit = must match a node)
@@ -487,6 +487,27 @@ allow_unauthenticated = true     # accepts heartbeats from anyone: example only
 # dns_record = "A"                # optional; A (default), AAAA, CNAME, MX, NS, TXT, SRV, SOA, PTR
 # dns_expected = "1.2.3.4"        # optional; expected answer (comma-separated, order-insensitive)
 # dns_resolver = "8.8.8.8:53"     # optional; custom resolver (default: system)
+
+# MQTT monitor: the latest message on a topic, from one connection per broker
+# shared by all its monitors (MQTT 5, QoS 1). Down when no message arrived,
+# when it is older than max_age_secs, or when an assertion (keyword,
+# json_query, jq) fails on the payload. Brokers reload live.
+# [[brokers]]
+# name = "sensors"
+# url = "mqtt://broker.example:1883"   # or mqtts://; no credentials in the URL
+# username = "monitor"
+# password = "${MQTT_PASSWORD}"
+# keep_alive_secs = 15                 # 5..300
+# max_packet_kb = 64                   # largest packet/cached payload, 1..1024
+# [[monitors]]
+# id = "sensor"
+# name = "Sensor"
+# kind = "mqtt"
+# broker = "sensors"
+# topic = "devices/sensor/state"       # concrete, no + or # wildcards
+# keyword = "online"
+# interval_secs = 60
+# max_age_secs = 180                   # periodic topics; omit for retained state
 
 # --- Mutual surveillance (who watches the watcher) ------------------------
 # A [health] section makes this node emit an outbound "dead-man" heartbeat: it

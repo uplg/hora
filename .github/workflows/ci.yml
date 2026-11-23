@@ -52,6 +52,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      # A throwaway Mosquitto container on loopback: the hosted runner has Docker.
+      - name: MQTT broker integration
+        run: .github/scripts/mqtt-integration.sh
       - name: Design tokens in step with brand/tokens.json
         run: python3 brand/src/tokens.py --check
 
