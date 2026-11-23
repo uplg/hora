@@ -20,6 +20,7 @@ mod heartbeat;
 pub mod histogram;
 pub mod http;
 pub mod import;
+pub mod jq;
 pub mod maintenance;
 pub mod mesh;
 pub mod notifications;

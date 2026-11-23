@@ -88,6 +88,11 @@ impl<T> Compiled<T> {
     pub fn raw(&self) -> &str {
         &self.raw
     }
+
+    /// A value parsed elsewhere, with the text it came from.
+    pub(crate) fn from_parsed(raw: String, value: T) -> Self {
+        Self { raw, value }
+    }
 }
 
 impl<T: ParseField> Compiled<T> {
@@ -454,6 +459,45 @@ impl ParseField for HttpMethod {
                      request body)"
                 )
             })
+    }
+}
+
+/// How a `jq` result is compared with `jq_expected` (`jq_operator`): `==`
+/// unless it says otherwise. The ordering operators compare numbers only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JqOperator {
+    #[default]
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl JqOperator {
+    const ALL: [Self; 6] = [Self::Eq, Self::Ne, Self::Lt, Self::Le, Self::Gt, Self::Ge];
+
+    /// As written in the config.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+        }
+    }
+}
+
+impl ParseField for JqOperator {
+    fn parse_field(raw: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|operator| operator.as_str() == raw.trim())
+            .ok_or_else(|| format!("jq_operator {raw:?} is not supported: ==, !=, <, <=, > or >="))
     }
 }
 

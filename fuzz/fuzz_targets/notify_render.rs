@@ -34,6 +34,7 @@ fuzz_target!(|data: &[u8]| {
             vantage: optional(flags, 2, d),
             event: optional(flags, 3, e),
             local_only: flags & 16 != 0,
+            down_for_secs: optional(flags, 5, number.unsigned_abs()),
         },
         1 => Event::Degraded {
             monitor: a,

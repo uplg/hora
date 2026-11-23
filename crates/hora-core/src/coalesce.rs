@@ -40,6 +40,9 @@ use crate::notifications::Notifiers;
 #[derive(Debug)]
 pub enum AlertMsg {
     Down(DownAlert),
+    /// A confirmed outage still lasts (`repeat_alert_secs`): the down
+    /// again, sent where the down itself went (see `Coalescer::can_remind`).
+    Reminder(DownAlert),
     Recovered {
         id: String,
         name: String,
@@ -77,6 +80,8 @@ pub struct DownAlert {
     /// The incident this down belongs to, marked announced once a channel
     /// takes the alert (or once it is settled without one, by design).
     pub incident: Option<i64>,
+    /// A reminder: how long the outage has lasted (see [`AlertMsg::Reminder`]).
+    pub down_for_secs: Option<u64>,
 }
 
 /// Who receives a recovery: whoever received the down it ends.
@@ -261,14 +266,24 @@ impl Coalescer {
         self.suppressed.remove(id);
     }
 
-    /// Forget folded downs of monitors no longer configured: their recovery
-    /// will never come, and a monitor re-added under the same id later must
-    /// not have its first real recovery swallowed.
+    /// Whether a reminder of `id`'s outage may go out: not while its down
+    /// waits in the grouping window, not for a down folded into its root
+    /// cause's (the cause's reminder speaks for it), and not for a
+    /// local-only down the peers never confirmed.
+    fn can_remind(&self, id: &str) -> bool {
+        !self.suppressed.contains(id)
+            && !self.pending.iter().any(|pending| pending.alert.id == id)
+            && self.quiet.get(id).is_none_or(|quiet| quiet.confirmed)
+    }
+
     /// Seed the routing of a local-only down announced before a restart.
     fn resume_local_only(&mut self, id: String, confirmed: bool) {
         self.quiet.insert(id, Quiet { confirmed });
     }
 
+    /// Forget folded downs of monitors no longer configured: their recovery
+    /// will never come, and a monitor re-added under the same id later must
+    /// not have its first real recovery swallowed.
     fn retain_monitors(&mut self, known: impl Fn(&str) -> bool) {
         self.suppressed.retain(|id| known(id));
         self.quiet.retain(|id, _| known(id));
@@ -336,6 +351,11 @@ pub fn spawn(
                         Some(AlertMsg::Down(alert)) => {
                             let window = config.borrow().alerts.group_window_secs;
                             if let Some(alert) = state.on_down(alert, now, window) {
+                                send_down(&mut lanes, &config, alert).await;
+                            }
+                        }
+                        Some(AlertMsg::Reminder(alert)) => {
+                            if state.can_remind(&alert.id) {
                                 send_down(&mut lanes, &config, alert).await;
                             }
                         }
@@ -483,7 +503,9 @@ impl Lanes {
             if let Delivery::Down(alert) = delivery {
                 if sent {
                     self.dropped.remove(&key(&alert.name));
-                } else {
+                } else if alert.down_for_secs.is_none() {
+                    // A reminder that found no room: the down itself may
+                    // have got through, so its recovery still goes.
                     self.dropped.insert(key(&alert.name));
                 }
             }
@@ -526,6 +548,7 @@ async fn lane(
                     vantage: alert.vantage.as_deref(),
                     event: alert.event.as_deref(),
                     local_only: alert.local_only,
+                    down_for_secs: alert.down_for_secs,
                 };
                 let failed = dispatcher.dispatch(event, Some(&only)).await;
                 // Announced as soon as one channel took it: from here on a
@@ -656,6 +679,7 @@ mod tests {
             event: None,
             local_only: false,
             incident: None,
+            down_for_secs: None,
         }
     }
 
@@ -678,6 +702,23 @@ mod tests {
         // Recoveries go back to whoever received the down.
         assert_eq!(c.on_recovered("db", 200), Recipients::Quiet);
         assert_eq!(c.on_recovered("web", 200), Recipients::Usual);
+    }
+
+    #[test]
+    fn reminders_go_only_where_the_down_went() {
+        let mut c = Coalescer::default();
+        assert!(c.on_down(down("db", &[]), 0, 30).is_some());
+        assert!(c.can_remind("db"));
+        // Still waiting in the window, then folded into its cause.
+        assert!(c.on_down(down("web", &["db"]), 0, 30).is_none());
+        assert!(!c.can_remind("web"));
+        assert!(c.flush(31).is_empty());
+        assert!(!c.can_remind("web"));
+        // A local-only down, until the peers confirm it.
+        assert!(c.on_down(local("api", &[]), 0, 30).is_some());
+        assert!(!c.can_remind("api"));
+        c.resume_local_only("api".to_owned(), true);
+        assert!(c.can_remind("api"));
     }
 
     #[test]
@@ -830,6 +871,7 @@ mod tests {
         assert!(c.on_down(down("web", &["cdn"]), 100, 30).is_none());
         let waiting = DownAlert {
             incident: Some(7),
+            down_for_secs: None,
             ..down("api", &["db"])
         };
         assert!(c.on_down(waiting, 100, 30).is_none());
@@ -1092,6 +1134,7 @@ mod tests {
 
         tx.send(AlertMsg::Down(DownAlert {
             incident: Some(incident),
+            down_for_secs: None,
             ..down("api", &[])
         }))
         .unwrap();
@@ -1243,11 +1286,13 @@ mod tests {
         let nowhere_incident = incident(&store, "db").await;
         tx.send(AlertMsg::Down(DownAlert {
             incident: Some(refused_incident),
+            down_for_secs: None,
             ..down("api", &[])
         }))
         .unwrap();
         tx.send(AlertMsg::Down(DownAlert {
             incident: Some(nowhere_incident),
+            down_for_secs: None,
             notify: Some(Vec::new()),
             ..down("db", &[])
         }))
@@ -1288,6 +1333,7 @@ mod tests {
         tx.send(AlertMsg::Down(down("cache", &[]))).unwrap();
         tx.send(AlertMsg::Down(DownAlert {
             incident: Some(folded),
+            down_for_secs: None,
             ..down("web", &["cache"])
         }))
         .unwrap();

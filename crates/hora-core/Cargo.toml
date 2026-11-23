@@ -10,11 +10,17 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
-jiff.workspace = true
+# The time zone database is compiled in: a recurring maintenance window's
+# `timezone` must resolve in a container image that ships none.
+jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 croner.workspace = true
 futures-util.workspace = true
 hickory-resolver = { workspace = true }
 hora-notify.workspace = true
+# jq assertions: compiled once at load, evaluated without env/filesystem access.
+jaq-core = "3.1.2"
+jaq-std = { version = "3.0.4", default-features = false, features = ["std"] }
+jaq-json = { version = "2.0.3", features = ["sync", "serde"] }
 notify.workspace = true
 regex = "1.13.1"
 reqwest.workspace = true

@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::Alerts;
-use super::parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, Parsed};
+use super::parsed::{Compiled, DnsRecord, ExpectedStatus, HttpMethod, JqOperator, Parsed};
 use super::raw::RawMonitor;
 use super::secret::{Secret, redact_url_secrets};
 
@@ -127,6 +127,9 @@ pub struct Monitor {
     /// Consecutive failed checks before this monitor is confirmed down;
     /// unset = `[alerts] fail_threshold` (see [`Monitor::fail_threshold`]).
     pub fail_threshold: Option<u32>,
+    /// Reminder cadence of a confirmed outage; unset = `[alerts]
+    /// repeat_alert_secs` (see [`Monitor::repeat_alert_secs`]).
+    pub repeat_alert_secs: Option<u64>,
     /// Restrict this monitor's alerts to these channel names. Unset = every
     /// configured channel.
     pub notify: Option<Vec<String>>,
@@ -192,6 +195,8 @@ pub struct HttpSpec {
     pub keyword: Option<KeywordAssert>,
     /// A `JSONPath` evaluated against a JSON body.
     pub json: Option<JsonAssert>,
+    /// A jq expression evaluated against a JSON body.
+    pub jq: Option<JqAssert>,
     /// A number extracted from the body by a regex, within bounds.
     pub number: Option<NumberAssert>,
     /// Cap (KiB) on the body read for the assertions (default 1 MiB).
@@ -217,6 +222,15 @@ pub struct JsonAssert {
     /// The value the query result must equal (string compare); unset = the
     /// query only has to match at least one node.
     pub expected: Option<String>,
+}
+
+/// `jq` / `jq_expected` / `jq_operator`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JqAssert {
+    pub query: Compiled<crate::jq::JqProgram>,
+    /// The value the one result is compared with; unset = `true`.
+    pub expected: Option<String>,
+    pub operator: JqOperator,
 }
 
 /// `number_regex` / `number_min` / `number_max`.
@@ -277,6 +291,8 @@ pub struct DnsSpec {
 pub struct PushSpec {
     /// Heartbeats expected per cron run rather than every interval.
     pub schedule: Option<PushSchedule>,
+    /// Also accepted on Uptime Kuma's URL, `/api/push/<push_token>`.
+    pub kuma_push: bool,
 }
 
 /// `schedule` / `grace_secs` on a push monitor.
@@ -348,7 +364,7 @@ impl HttpSpec {
     /// Whether any body assertion is configured.
     #[must_use]
     pub fn asserts_body(&self) -> bool {
-        self.keyword.is_some() || self.json.is_some() || self.number.is_some()
+        self.keyword.is_some() || self.json.is_some() || self.jq.is_some() || self.number.is_some()
     }
 }
 
@@ -364,6 +380,7 @@ impl std::fmt::Debug for HttpSpec {
             .field("headers", &self.headers)
             .field("keyword", &self.keyword)
             .field("json", &self.json)
+            .field("jq", &self.jq)
             .field("number", &self.number)
             .field("max_body_kb", &self.max_body_kb)
             .field("proxy", &self.proxy.as_deref().map(redact_url_secrets))
@@ -395,6 +412,7 @@ impl std::fmt::Debug for Monitor {
             .field("slo_window_days", &self.slo_window_days)
             .field("probe_retries", &self.probe_retries)
             .field("fail_threshold", &self.fail_threshold)
+            .field("repeat_alert_secs", &self.repeat_alert_secs)
             .field("notify", &self.notify)
             .field("check_cert", &self.check_cert)
             .field("retention_days", &self.retention_days)
@@ -507,6 +525,13 @@ impl Monitor {
     #[must_use]
     pub fn fail_threshold(&self, alerts: &Alerts) -> u32 {
         self.fail_threshold.unwrap_or(alerts.fail_threshold).max(1)
+    }
+
+    /// How often a confirmed outage is reminded of, in seconds: its own
+    /// `repeat_alert_secs`, else the global one; `None` when off (0).
+    #[must_use]
+    pub fn repeat_alert_secs(&self, alerts: &Alerts) -> Option<u64> {
+        Some(self.repeat_alert_secs.unwrap_or(alerts.repeat_alert_secs)).filter(|secs| *secs > 0)
     }
 
     /// Availability SLO window in days (default 30).

@@ -30,6 +30,8 @@ allow-wildcard-paths = true
 multiple-versions = "deny"
 skip = [
     { crate = "hashbrown" },
+    # jaq-json (jq assertions) uses foldhash 0.1; hashbrown's current line uses 0.2.
+    { crate = "foldhash" },
     { crate = "thiserror" },
     { crate = "thiserror-impl" },
     # lettre (email parsing) pulls nom 8 while x509-parser is still on nom 7.

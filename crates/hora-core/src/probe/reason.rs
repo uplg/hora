@@ -270,10 +270,11 @@ fn legacy_public_reason(reason: &str) -> &str {
     if reason.starts_with("missed scheduled heartbeat") {
         return "missed scheduled heartbeat";
     }
-    // Keyword, JSON and number assertions embed the configured keyword/query/
-    // regex - and the number reasons additionally carry the extracted value.
+    // Keyword, JSON, jq and number assertions embed the configured keyword/
+    // query/regex - and the number reasons additionally carry the extracted value.
     if reason.starts_with("keyword ")
         || reason.starts_with("JSON query")
+        || reason.starts_with("jq ")
         || reason.starts_with("invalid JSON query")
         || reason.starts_with("number")
         || reason.starts_with("invalid number_regex")

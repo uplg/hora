@@ -77,7 +77,7 @@ judges the first answer and does not follow redirects: see below.
 **`method = "HEAD"`** asks for the headers alone: for a large page or a
 download you do not want fetched every minute, or an endpoint that counts
 its `GET`s. The answer to a `HEAD` has no body, so a monitor with `keyword`,
-`json_query` or `number_regex` and `method = "HEAD"` is refused at load.
+`json_query`, `jq` or `number_regex` and `method = "HEAD"` is refused at load.
 `"GET"` is the default and the only other method: Hora sends no request
 body, so there is no `POST` or `PUT`. Some servers answer a `HEAD` with a
 405 or another status than their `GET`: check with
@@ -89,6 +89,9 @@ body, so there is no `POST` or `PUT`. Some servers answer a `HEAD` with a
 keyword = "operational"   # body must contain this (keyword_invert = true → must NOT)
 json_query = "$.status"   # JSONPath (RFC 9535) against a JSON body
 json_expected = "ok"      # the queried value must equal this (omit = must match a node)
+jq = '[.checks[] | select(.ok | not)] | length'  # jq against a JSON body
+jq_expected = "0"         # compared with its one result (omit = true)
+jq_operator = "=="        # ==, !=, <, <=, >, >= (default ==)
 number_regex = 'in stock: (\d+)'  # extract a number from the body (first capture
                           # group, or the whole match) - down when nothing matches
 number_min = 1            # ... or when the number is below this (inclusive)
@@ -101,6 +104,29 @@ JSON endpoint behind them - a queue depth, a stock level, a sensor's "receivers
 online" counter. When the page is HTML, anchor the pattern on the surrounding
 markup: `number_regex = 'class="shipCount">(\d+)<'` with `number_min = 1` goes
 down the moment the counter reads zero (or disappears entirely).
+
+`jq` is for answers a `JSONPath` cannot judge: counts, arithmetic, a number
+sent as a string (`.value | tonumber > 0.5`), a choice between fields. It is
+run by [jaq](https://github.com/01mf02/jaq), a jq implementation in Rust. The
+expression must produce exactly one string, number or boolean: no output,
+several outputs, `null`, an array or an object fail the check, as does a body
+that is not JSON. `jq_expected` and the result compare as numbers when both
+read as numbers (`"2.0"` equals `2`), as text otherwise; `<`, `<=`, `>` and
+`>=` need numbers on both sides. A `jq_expected` or `jq_operator` without a
+`jq` is refused at load, as is an expression that does not compile.
+
+The expression is part of the configuration and is trusted like the rest of
+it; the body it reads is the server's. Hora does not cap the time or memory
+an expression takes on a body, so what could go on for ever is refused at
+load: `repeat`, `until`, `while`, `range` and `recurse(f)` (`recurse` alone
+and `..` walk the body and end with it). Expressions are compiled once at load
+and shared between monitors that spell them the same. They have no access to
+the environment, files, the clock or modules (`env`, `input`, `now`,
+`import` and `include` are not available), and jaq's regex and date functions
+are left out (`number_regex` covers the first). Function definitions (`def`)
+are refused, because a recursive one overflows the stack and stops Hora rather
+than failing a check. The body is read up to `max_body_kb` and nested at most
+128 levels deep, also inside a string handed to `fromjson` or `tonumber`.
 
 Redirects are followed (up to 10), but configured headers, which may carry
 credentials, are only re-attached while the redirect stays on the original
@@ -317,13 +343,20 @@ Optional query parameters: `?status=up|down|degraded`, `msg=...` (recorded
 with the heartbeat), `ping=<ms>` (round-trip latency). An unknown `status`
 or a negative `ping` is refused with a 400, so a typo never reads as up.
 
-**A heartbeat that does not come is down at once.** Hora looks at a push
-monitor at least every minute; once the last heartbeat is older than
-`interval_secs` (or a scheduled run is later than `grace_secs`), the
-monitor is down and alerted, without waiting for `fail_threshold` (the
-global one or the monitor's own): the
+**A heartbeat that does not come is down at once.** Hora looks at a
+healthy push monitor when a heartbeat comes and when its deadline passes;
+once the last heartbeat is older than `interval_secs` (or a scheduled run
+is later than `grace_secs`), the monitor is down and alerted, without
+waiting for `fail_threshold` (the global one or the monitor's own): the
 interval or the grace is the tolerance. Size them for the job, not for the
 threshold.
+
+A monitor that is not healthy - down, degraded, recovered during a
+maintenance window - is looked at again at least every minute (every
+`interval_secs` when shorter), so the threshold and the end of a
+maintenance window work as for any check. A heartbeat is looked at no
+sooner than one such period after the previous look: a burst of pushes
+counts once.
 
 **The job's own verdict drives alerting.** A heartbeat that says
 `status=down` counts as a failure on the next tick, with the job's `msg` as
@@ -336,6 +369,22 @@ evaluations (a few minutes; at once with `fail_threshold = 1` on the monitor), l
 # the backup ran but failed: say so, rather than staying silent
 curl -fsS -X POST -H "X-Push-Token: ${BACKUP_TOKEN}" \
   "https://status.example.com/api/push/nightly-backup?status=down&msg=disk+full"
+```
+
+**Producers set up for Uptime Kuma** can keep their URL: with
+`kuma_push = true` (and a `push_token`) the monitor is also reached by
+`GET` or `POST /api/push/<push_token>?status=up|down&msg=...&ping=...`, the
+token in place of the id and no header - what Kuma's push monitors hand
+out, and where some backup tools post their JSON report. The
+answer is `{"ok":true}`, a fractional `ping` is rounded, an empty one is
+ignored, and a body is never read. The token must be URL-safe and must not
+equal a monitor id or a peer's listen id. Hora's own log shows a push path
+only when it ends in a known id, and `/api/push/[redacted]` otherwise; a
+reverse proxy in front logs the full path unless told otherwise. The header form keeps working for the same monitor, and
+`hora import kuma` sets `kuma_push = true` on the push monitors it imports.
+
+```sh
+curl -fsS "https://status.example.com/api/push/${PUSH_TOKEN}?status=up&msg=OK&ping="
 ```
 
 **A push monitor that never pinged alerts too.** Once its interval (or its

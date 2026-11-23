@@ -1798,3 +1798,70 @@ async fn the_daily_roll_up_survives_latencies_at_the_edge_of_i64() {
         vec![("job".to_owned(), 2, i64::MAX), ("web".to_owned(), 1, 40)]
     );
 }
+
+/// `[server] database` sizes both pools: unset, 3 + 6 connections at
+/// 4000 KiB each; `max_connections` shared out a third to the daemon's.
+#[test]
+fn database_settings_size_both_pools() {
+    use crate::config::DatabaseSettings;
+    let sized = |cache_kib, max_connections| {
+        PoolSizing::from_settings(Some(&DatabaseSettings {
+            cache_kib,
+            max_connections,
+        }))
+    };
+    let default = PoolSizing {
+        cache_kib: 4000,
+        core: 3,
+        pages: 6,
+    };
+    assert_eq!(PoolSizing::from_settings(None), default);
+    assert_eq!(PoolSizing::default(), default);
+    assert_eq!(sized(None, None), default);
+    assert_eq!(sized(None, Some(9)), default);
+    let small = PoolSizing {
+        cache_kib: 2048,
+        core: 2,
+        pages: 2,
+    };
+    assert_eq!(sized(Some(2048), Some(4)), small);
+    for (total, core, pages) in [(1, 1, 1), (2, 1, 1), (3, 1, 2), (6, 2, 4), (64, 22, 42)] {
+        let sizing = sized(None, Some(total));
+        assert_eq!((sizing.core, sizing.pages), (core, pages), "{total}");
+    }
+}
+
+/// The sizing reaches the connections: their page cache, and how many
+/// each pool opens.
+#[tokio::test]
+async fn connect_sized_applies_the_cache_and_the_pool_sizes() {
+    let path = std::env::temp_dir().join(format!("hora-test-sized-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let sizing = PoolSizing {
+        cache_kib: 2048,
+        core: 2,
+        pages: 2,
+    };
+    let store = connect_sized(path.to_str().unwrap(), sizing).await.unwrap();
+    for pool in [store.sqlx(), store.pages().sqlx()] {
+        let (cache,): (i64,) = sqlx::query_as("PRAGMA cache_size")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(cache, -2048);
+        assert_eq!(pool.options().get_max_connections(), 2);
+    }
+    store.close().await;
+    let store = connect(path.to_str().unwrap()).await.unwrap();
+    let (cache,): (i64,) = sqlx::query_as("PRAGMA cache_size")
+        .fetch_one(store.sqlx())
+        .await
+        .unwrap();
+    assert_eq!(cache, -4000);
+    assert_eq!(store.sqlx().options().get_max_connections(), 3);
+    assert_eq!(store.pages().sqlx().options().get_max_connections(), 6);
+    store.close().await;
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
