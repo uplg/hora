@@ -668,8 +668,13 @@ impl Follower {
             let seen = Arc::clone(&interest);
             let backend_failed = Arc::clone(&failed);
             let tx = events_tx.clone();
-            let created =
-                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            // Changes only, no access events: an open or a close of a file in
+            // a watched directory (the database next to the config, every
+            // read of our own) is then not even asked of the kernel, and
+            // wakes nobody. `concerns` would have dropped them anyway.
+            let kinds = notify::Config::default().with_event_kinds(notify::EventKindMask::CORE);
+            let created = RecommendedWatcher::new(
+                move |event: notify::Result<notify::Event>| {
                     if let Err(err) = &event
                         && !backend_failed.swap(true, Ordering::Relaxed)
                     {
@@ -686,7 +691,9 @@ impl Follower {
                         // A full queue already holds a request: nothing is lost.
                         let _ = tx.try_send(());
                     }
-                });
+                },
+                kinds,
+            );
             match created {
                 Ok(watcher) => Some(watcher),
                 Err(err) => {
