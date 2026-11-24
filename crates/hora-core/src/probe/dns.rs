@@ -220,9 +220,18 @@ mod tests {
     /// the full answer over TCP on the same port.
     #[tokio::test]
     async fn custom_resolver_retries_truncated_answers_over_tcp() {
-        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let addr = udp.local_addr().unwrap();
-        let tcp = tokio::net::TcpListener::bind(addr).await.unwrap();
+        // The same port for both, as a resolver has it. The system hands out
+        // a free UDP port; its TCP twin may be another test's listener, so
+        // try again with the next one it offers.
+        let (udp, tcp, addr) = loop {
+            let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let addr = udp.local_addr().unwrap();
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(tcp) => break (udp, tcp, addr),
+                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {}
+                Err(err) => panic!("binding {addr} over TCP: {err}"),
+            }
+        };
         let answer = |query: &Message, truncated: bool| {
             let mut reply = Message::response(query.metadata.id, query.metadata.op_code);
             reply.metadata.recursion_desired = true;
