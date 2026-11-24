@@ -154,6 +154,18 @@ fn alerts_can_leave(channels: &[hora_notify::ChannelHealthEntry], threshold: u32
             .any(|channel| channel.health.consecutive_failures < threshold.max(1))
 }
 
+/// Why Hora cannot alert by itself even with a channel that delivers: the
+/// alert coalescer is gone, or no channel or no monitor survived the config
+/// load. The heartbeat is withheld then, so the dead-man service alerts.
+fn cannot_alert(config: &Config, health: &crate::self_check::SelfHealth) -> Option<&'static str> {
+    if health.cannot_deliver() {
+        return Some("the alert coalescer stopped, no alert can get out");
+    }
+    config
+        .cannot_alert
+        .then_some("no notification channel or no monitor could be loaded")
+}
+
 /// Spawn the outbound heartbeat: every `health.interval_secs`, when this node is
 /// locally healthy, `POST` a heartbeat to each peer's `ping_url` and to the
 /// optional `heartbeat_url`. When unhealthy it stays silent - that silence is the
@@ -170,6 +182,7 @@ pub fn spawn_heartbeat(
     client: Client,
     notifier: Notifiers,
     last_tick: Arc<AtomicU64>,
+    self_health: Arc<crate::self_check::SelfHealth>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -215,10 +228,8 @@ pub fn spawn_heartbeat(
                 );
                 continue;
             }
-            // No channel or no monitor survived the config load: Hora cannot
-            // alert by itself, so the dead-man service has to.
-            if snapshot.cannot_alert {
-                warn!("heartbeat skipped: no notification channel or no monitor could be loaded");
+            if let Some(reason) = cannot_alert(&snapshot, &self_health) {
+                warn!("heartbeat skipped: {reason}");
                 continue;
             }
 
@@ -533,6 +544,23 @@ async fn dispatch(notifier: &Notifiers, peer: &Peer, event: Event<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the channels' counters cannot tell: a dead coalescer, or a load
+    /// that kept no channel or no monitor, withholds the heartbeat too.
+    #[test]
+    fn a_node_that_cannot_alert_withholds_its_heartbeat() {
+        let health = crate::self_check::SelfHealth::default();
+        let fine = crate::config::parse_lenient("[page]\n[server]\n").unwrap();
+        assert_eq!(cannot_alert(&fine, &health), None);
+        // A webhook without its URL: the only channel is not loaded.
+        let lost = crate::config::parse_lenient(
+            "[page]\n[server]\n[[channels]]\nname = \"w\"\ntype = \"webhook\"\n",
+        )
+        .unwrap();
+        assert!(cannot_alert(&lost, &health).is_some_and(|why| why.contains("no notification")));
+        health.coalescer_died();
+        assert!(cannot_alert(&fine, &health).is_some_and(|why| why.contains("coalescer")));
+    }
 
     #[test]
     fn the_dead_man_goes_silent_when_no_channel_delivers() {
@@ -881,6 +909,7 @@ mod tests {
             client.clone(),
             crate::notifications::shared(&config, &client),
             Arc::new(AtomicU64::new(0)),
+            Arc::default(),
             shutdown_rx,
         );
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);

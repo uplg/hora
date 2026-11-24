@@ -256,6 +256,18 @@ default_retention_days = 90
 # group = "Watchdog"         # status-page group
 # notify = ["ops-telegram"]  # default: every channel
 # public = true              # default: false - on the operator's view only
+# repeat_alert_secs = 86400  # "still down" reminders; default: [alerts], 0 = none
+
+# --- The self-check monitor ------------------------------------------------
+# The built-in monitor `hora-self` is down while Hora itself is partly
+# broken: a monitor that stopped checking, a task restarted within the last
+# hour, a stopped alert coalescer, checks skipped for lack of resources. Same optional keys as [config_monitor].
+# [self_monitor]
+# name = "Self-check"        # default: "Hora self-check"
+# group = "Watchdog"         # status-page group
+# notify = ["ops-telegram"]  # default: every channel
+# public = true              # default: false - on the operator's view only
+# repeat_alert_secs = 86400  # default: [alerts] repeat_alert_secs; 0 = none
 
 # --- Scheduled maintenance ------------------------------------------------
 # Alerts are muted for the affected monitors during the window (checks still

@@ -31,12 +31,16 @@ use super::{Channel, Config, Maintenance, Monitor, MonitorKind};
 /// or peer may take the id.
 pub const CONFIG_MONITOR_ID: &str = "hora-config";
 
-/// `[config_monitor]`: how the built-in configuration monitor shows and
+/// Id of the built-in self-check monitor (see `crate::self_check`), reserved
+/// like [`CONFIG_MONITOR_ID`].
+pub const SELF_MONITOR_ID: &str = "hora-self";
+
+/// `[config_monitor]` / `[self_monitor]`: how a built-in monitor shows and
 /// alerts. Every key is optional; the monitor exists without the section.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuiltinMonitor {
-    /// Display name; absent = "Hora configuration".
+    /// Display name; absent = "Hora configuration" / "Hora self-check".
     #[serde(default)]
     pub name: Option<String>,
     /// Status-page group.
@@ -46,8 +50,8 @@ pub struct BuiltinMonitor {
     #[serde(default)]
     pub notify: Option<Vec<String>>,
     /// Shown to everyone on the status page; absent = `false`: the
-    /// operator's view only. What the configuration of Hora is doing is not
-    /// what a visitor came to read, and the alert does not need the card.
+    /// operator's view only. What Hora itself is doing is not what a visitor
+    /// came to read, and the alert does not need the card.
     #[serde(default)]
     pub public: Option<bool>,
     /// "Still down" reminders while it stays down, like a monitor's
@@ -179,7 +183,7 @@ pub(super) fn parse_lenient_with(
 
     config.cannot_alert = (channels > 0 && config.channels.is_empty())
         || (monitors > 0 && config.monitors.is_empty());
-    add_config_monitor(&mut config, &mut issues);
+    add_builtins(&mut config, &mut issues);
     config.issues = issues;
     Ok(config)
 }
@@ -290,6 +294,9 @@ fn prune(config: &mut Config, issues: &mut Vec<ConfigIssue>) {
             &channels,
             &mut removed,
         );
+    }
+    if let Some(builtin) = &mut config.self_monitor {
+        drop_routes("self_monitor", &mut builtin.notify, &channels, &mut removed);
     }
     for (channel, owners) in removed {
         let named = owners.iter().take(MAX_NAMED).cloned().collect::<Vec<_>>();
@@ -410,13 +417,18 @@ fn drop_blamed(config: &mut Config, message: &str, issues: &mut Vec<ConfigIssue>
         ));
         return true;
     }
-    if message.starts_with("config_monitor.") {
-        config.config_monitor = None;
-        issues.push(ConfigIssue::new(
-            "config_monitor",
-            format!("{message}; defaults used"),
-        ));
-        return true;
+    for (section, builtin) in [
+        ("config_monitor", &mut config.config_monitor),
+        ("self_monitor", &mut config.self_monitor),
+    ] {
+        if message.starts_with(&format!("{section}.")) {
+            *builtin = None;
+            issues.push(ConfigIssue::new(
+                section,
+                format!("{message}; defaults used"),
+            ));
+            return true;
+        }
     }
     let blamed = |prefixes: &[String]| prefixes.iter().any(|p| message.starts_with(p.as_str()));
     let pick = |matches: Vec<usize>| {
@@ -494,37 +506,51 @@ fn without_owner(message: &str, owner: &str) -> String {
     format!("{reason}; not loaded")
 }
 
-/// Append the built-in configuration monitor: a push monitor fed by the
-/// daemon itself (never by `/api/push`, which it has no token for), down
-/// while there is something to report, alerting at the first failure. Its
-/// deadline is the longest period allowed; its feeder records far more often.
-/// It is private unless `[config_monitor]` makes it public: the operator's
-/// view shows it, and where the page has no token nobody's does - the alert
-/// and the log speak for it. (A configured monitor may not be private there;
-/// this one is added after the validation, on purpose.)
-/// `[config_monitor]` names it, groups it and routes it; a section the
-/// monitor cannot be built from is an issue, and the defaults are used.
-fn add_config_monitor(config: &mut Config, issues: &mut Vec<ConfigIssue>) {
-    let settings = config.config_monitor.clone().unwrap_or_default();
-    let monitor = config_monitor(&settings).or_else(|err| {
-        issues.push(ConfigIssue::new(
+/// Append the built-in monitors (configuration, then self-check): push
+/// monitors fed by the daemon itself (never by `/api/push`, which they have
+/// no token for), down while there is something to report, alerting at the
+/// first failure. Their deadline is the longest period allowed; their feeders
+/// record far more often. They are private unless their section makes them
+/// public: the operator's view shows them, and where the page has no token
+/// nobody's does - the alert and the log speak for them. (A configured
+/// monitor may not be private there; these are added after the validation,
+/// on purpose.) `[config_monitor]` / `[self_monitor]` name, group and route
+/// them; a section a monitor cannot be built from is an issue, and the
+/// defaults are used.
+fn add_builtins(config: &mut Config, issues: &mut Vec<ConfigIssue>) {
+    let builtins = [
+        (
+            CONFIG_MONITOR_ID,
             "config_monitor",
-            format!("{err}; defaults used"),
-        ));
-        config_monitor(&BuiltinMonitor::default())
-    });
-    match monitor {
-        Ok(monitor) => config.monitors.push(monitor),
-        // The defaults are a constant: covered by the tests.
-        Err(err) => tracing::error!("built-in monitor {CONFIG_MONITOR_ID} cannot be built: {err}"),
+            "Hora configuration",
+            config.config_monitor.clone(),
+        ),
+        (
+            SELF_MONITOR_ID,
+            "self_monitor",
+            "Hora self-check",
+            config.self_monitor.clone(),
+        ),
+    ];
+    for (id, section, default_name, settings) in builtins {
+        let settings = settings.unwrap_or_default();
+        let monitor = builtin(id, default_name, &settings).or_else(|err| {
+            issues.push(ConfigIssue::new(section, format!("{err}; defaults used")));
+            builtin(id, default_name, &BuiltinMonitor::default())
+        });
+        match monitor {
+            Ok(monitor) => config.monitors.push(monitor),
+            // The defaults are a constant: covered by the tests.
+            Err(err) => tracing::error!("built-in monitor {id} cannot be built: {err}"),
+        }
     }
 }
 
-fn config_monitor(settings: &BuiltinMonitor) -> Result<Monitor, String> {
+fn builtin(id: &str, default_name: &str, settings: &BuiltinMonitor) -> Result<Monitor, String> {
     let period = i64::try_from(super::validate::MAX_PERIOD_SECS).unwrap_or(i64::MAX);
     let mut monitor = toml::Table::new();
-    monitor.insert("id".into(), CONFIG_MONITOR_ID.into());
-    let name = settings.name.as_deref().unwrap_or("Hora configuration");
+    monitor.insert("id".into(), id.into());
+    let name = settings.name.as_deref().unwrap_or(default_name);
     monitor.insert("name".into(), name.into());
     monitor.insert("kind".into(), "push".into());
     monitor.insert("interval_secs".into(), period.into());
@@ -590,7 +616,7 @@ mod tests {
             http("a"),
             http("b")
         ));
-        assert_eq!(ids(&config), ["a", "b", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", "b", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(
             has_issue(
                 &config,
@@ -610,7 +636,7 @@ mod tests {
              intervall_secs = 60\n",
             http("a")
         ));
-        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(
             has_issue(&config, "monitor typo", "not loaded"),
             "{:?}",
@@ -625,7 +651,7 @@ mod tests {
             http("a"),
             http("a").replace("interval_secs = 60", "interval_secs = 30")
         ));
-        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert_eq!(config.monitors[0].interval_secs, 60);
         assert!(has_issue(&config, "monitor a", "duplicate"));
     }
@@ -688,7 +714,7 @@ mod tests {
             "{WEBHOOK}[[monitors]]\nid = \"bad\"\nname = \"B\"\ntarget = \"https://e.com\"\n\
              interval_secs = 0\n"
         ));
-        assert_eq!(ids(&config), [CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), [CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(config.cannot_alert);
         // Nothing configured is a choice, not a loss.
         assert!(!load("").cannot_alert);
@@ -705,7 +731,7 @@ mod tests {
             http("a"),
             http("b")
         ));
-        assert_eq!(ids(&config), ["a", "b", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", "b", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(config.monitors.iter().all(|m| m.depends_on.is_none()));
         assert!(has_issue(&config, "monitor b", "dependency cycle"));
     }
@@ -761,7 +787,7 @@ mod tests {
     #[test]
     fn the_config_monitor_is_added_and_its_id_reserved() {
         let config = load(&format!("{}{}", http("a"), http(CONFIG_MONITOR_ID)));
-        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(has_issue(
             &config,
             &format!("monitor {CONFIG_MONITOR_ID}"),
@@ -834,7 +860,7 @@ mod tests {
             "[config_monitor]\nname = \"Config valid\"\nrepeat_alert_secs = 2592001\n{}",
             http("a")
         ));
-        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID]);
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
         assert!(
             has_issue(&config, "config_monitor", "defaults used"),
             "{:?}",
@@ -847,23 +873,91 @@ mod tests {
         assert!(builtin.repeat_alert_secs.is_none());
     }
 
+    /// `[self_monitor]` takes the same keys as `[config_monitor]`, and the
+    /// self-check's id is reserved like the configuration monitor's.
+    #[test]
+    fn self_monitor_names_groups_and_routes_the_self_check() {
+        let config = load(&format!(
+            "{WEBHOOK}{BROKEN}[self_monitor]\nname = \"Self\"\ngroup = \"Watchdog\"\n\
+             notify = [\"broken\", \"ok\"]\npublic = true\nrepeat_alert_secs = 0\n{}{}",
+            http("a"),
+            http(SELF_MONITOR_ID)
+        ));
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
+        assert!(has_issue(
+            &config,
+            &format!("monitor {SELF_MONITOR_ID}"),
+            "reserved"
+        ));
+        assert!(has_issue(
+            &config,
+            "notify \"broken\"",
+            "route removed from self_monitor"
+        ));
+        let builtin = config.find_monitor(SELF_MONITOR_ID).expect("self monitor");
+        assert_eq!(builtin.name, "Self");
+        assert_eq!(builtin.group.as_deref(), Some("Watchdog"));
+        assert_eq!(builtin.notify.as_deref(), Some(&["ok".to_owned()][..]));
+        assert_eq!(builtin.repeat_alert_secs, Some(0), "no reminders");
+        assert!(builtin.public, "shown to everyone when asked for");
+        assert_eq!(builtin.kind(), super::super::Kind::Push);
+        assert_eq!(builtin.fail_threshold, Some(1));
+        assert!(builtin.push_token.is_none() && !builtin.allow_unauthenticated);
+        let plain = load(&http("a"));
+        let builtin = plain.find_monitor(SELF_MONITOR_ID).expect("self monitor");
+        assert_eq!(builtin.name, "Hora self-check");
+        assert!(builtin.group.is_none() && builtin.notify.is_none());
+        assert!(builtin.repeat_alert_secs.is_none(), "[alerts]' reminders");
+        assert!(!builtin.public, "the operator's view only, token or not");
+    }
+
+    /// A reminder period out of bounds is an issue; the defaults are used.
+    #[test]
+    fn a_self_monitor_section_out_of_bounds_falls_back_to_the_defaults() {
+        let config = load(&format!(
+            "[self_monitor]\nname = \"Self\"\nrepeat_alert_secs = 2592001\n{}",
+            http("a")
+        ));
+        assert_eq!(ids(&config), ["a", CONFIG_MONITOR_ID, SELF_MONITOR_ID]);
+        assert!(
+            has_issue(&config, "self_monitor", "defaults used"),
+            "{:?}",
+            config.issues
+        );
+        let builtin = config.find_monitor(SELF_MONITOR_ID).expect("self monitor");
+        assert_eq!(builtin.name, "Hora self-check");
+        assert!(builtin.repeat_alert_secs.is_none());
+        let other = config
+            .find_monitor(CONFIG_MONITOR_ID)
+            .expect("config monitor");
+        assert_eq!(other.name, "Hora configuration", "the other is untouched");
+    }
+
     /// The strict parse checks the section like any monitor's routes, and
     /// knows its keys.
     #[test]
-    fn the_strict_parse_checks_the_config_monitor_section() {
-        let section = |body: &str| format!("{HEAD}{WEBHOOK}[config_monitor]\n{body}\n");
-        let config = super::super::parse(&section("name = \"Config valid\"")).unwrap();
-        let settings = config.config_monitor.expect("section");
-        assert_eq!(settings.name.as_deref(), Some("Config valid"));
-        assert!(config.monitors.is_empty(), "no built-in on a strict load");
-        assert!(super::super::parse(&section("repeat_alert_secs = 0")).is_ok());
-        for bad in [
-            "repeat_alert_secs = 2592001",
-            "notify = [\"nowhere\"]",
-            "nmae = \"typo\"",
-            "public = \"yes\"",
-        ] {
-            assert!(super::super::parse(&section(bad)).is_err(), "{bad}");
+    fn the_strict_parse_checks_the_built_in_sections() {
+        for name in ["config_monitor", "self_monitor"] {
+            let section = |body: &str| format!("{HEAD}{WEBHOOK}[{name}]\n{body}\n");
+            let config = super::super::parse(&section("name = \"Config valid\"")).unwrap();
+            let settings = match name {
+                "config_monitor" => config.config_monitor,
+                _ => config.self_monitor,
+            };
+            assert_eq!(
+                settings.expect("section").name.as_deref(),
+                Some("Config valid")
+            );
+            assert!(config.monitors.is_empty(), "no built-in on a strict load");
+            assert!(super::super::parse(&section("repeat_alert_secs = 0")).is_ok());
+            for bad in [
+                "repeat_alert_secs = 2592001",
+                "notify = [\"nowhere\"]",
+                "nmae = \"typo\"",
+                "public = \"yes\"",
+            ] {
+                assert!(super::super::parse(&section(bad)).is_err(), "{name}: {bad}");
+            }
         }
     }
 
@@ -930,6 +1024,7 @@ mod tests {
         let clean = super::super::parse(&format!("{HEAD}{}", http("a"))).unwrap();
         assert_eq!(clean.monitors.len(), 1, "no built-ins on a strict load");
         assert!(super::super::parse(&format!("{HEAD}{}", http(CONFIG_MONITOR_ID))).is_err());
+        assert!(super::super::parse(&format!("{HEAD}{}", http(SELF_MONITOR_ID))).is_err());
     }
 
     #[test]

@@ -632,14 +632,17 @@ fn a_push_path_is_logged_with_an_id_never_with_a_token() {
     assert_eq!(logged("/api/summary"), "/api/summary");
 }
 
-/// The built-in configuration monitor is fed by Hora alone: it has no push
-/// token, so a push to it is refused like a wrong token.
+/// The built-in monitors are fed by Hora alone: they have no push token, so
+/// a push to one is refused like a wrong token.
 #[tokio::test]
-async fn the_config_monitor_cannot_be_pushed_from_outside() {
-    // Loaded leniently, as the daemon does, so the built-in monitor exists.
+async fn the_builtin_monitors_cannot_be_pushed_from_outside() {
+    // Loaded leniently, as the daemon does, so the built-in monitors exist.
     let config = Arc::new(hora_core::config::parse_lenient("[page]\n[server]\n").unwrap());
-    let id = hora_core::config::CONFIG_MONITOR_ID;
-    assert!(config.find_monitor(id).is_some());
+    let ids = [
+        hora_core::config::CONFIG_MONITOR_ID,
+        hora_core::config::SELF_MONITOR_ID,
+    ];
+    assert!(ids.iter().all(|id| config.find_monitor(id).is_some()));
     let store = hora_core::db::Store::in_memory().await;
     let client = hora_core::http::client(None).unwrap();
     let notifier = hora_core::notifications::shared(&config, &client);
@@ -650,13 +653,15 @@ async fn the_config_monitor_cannot_be_pushed_from_outside() {
         Arc::new(AtomicU64::new(fresh_tick())),
         notifier,
     ));
-    for request in [
-        push(&format!("/api/push/{id}?status=up")),
-        push_with(&format!("/api/push/{id}"), "x-push-token", ""),
-    ] {
-        let res = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    for id in ids {
+        for request in [
+            push(&format!("/api/push/{id}?status=up")),
+            push_with(&format!("/api/push/{id}"), "x-push-token", ""),
+        ] {
+            let res = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+        let recorded = hora_core::db::recent_checks(&store, id, 10).await.unwrap();
+        assert!(recorded.is_empty());
     }
-    let recorded = hora_core::db::recent_checks(&store, id, 10).await.unwrap();
-    assert!(recorded.is_empty());
 }

@@ -73,9 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the first failure; it recovers with the first
   load without issues. Hora alone feeds it: it takes no push, and no monitor
   or peer `listen_id` may use the id. The optional `[config_monitor]`
-  section sets its `name`, `group` and `notify` (default: every channel).
-  It is private unless `public = true`: a visitor of the status page does
-  not see it, and its alerts go out either way.
+  section sets its `name`, `group`, `notify` (default: every channel) and
+  `repeat_alert_secs` (default: `[alerts]`, 0 = none). It is private
+  unless `public = true`: a visitor of the status page does not see it,
+  and its alerts go out either way.
+- **A built-in `hora-self` monitor.** Every minute it looks for what the
+  dead-man heartbeat cannot see because the node as a whole still works: a
+  monitor that has not checked for three of its periods, a monitor or
+  peer-watch task restarted within the last hour, a stopped alert
+  coalescer, and checks skipped for lack of file descriptors or memory (one
+  failing channel of several stays the channel watchdog's to report). It is down with every finding named and alerts like any
+  monitor. Like `hora-config` it takes no push, reserves its id and is
+  private unless `public = true`; the optional `[self_monitor]` section
+  takes the same keys as `[config_monitor]`.
+
 - **MQTT monitors** (`kind = "mqtt"`): the latest message on a topic, read
   from one connection per `[[brokers]]` entry (`mqtt://` or `mqtts://`,
   credentials in `username` / `password`), shared by every monitor that
@@ -126,6 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   live reload follows the same rules; an entry edited into an invalid state
   stops, no older version of it is kept. If no channel or no monitor is
   left, the external heartbeat is withheld.
+- **The external heartbeat is also withheld while the alert coalescer has
+  stopped**: no down or recovered alert can be delivered until a restart.
 - **A file that cannot be loaded at all no longer ends the process at
   startup** (a TOML syntax error, an invalid global section, an unreadable
   file): Hora answers every request with `503`, logs the reason, and reads

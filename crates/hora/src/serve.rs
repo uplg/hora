@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 /// Run the monitor: load config, open the database, start the supervisor and
 /// background tasks, and serve the status page until a shutdown signal.
+#[allow(clippy::too_many_lines)] // one background task after another
 pub(crate) async fn serve() -> anyhow::Result<()> {
     let config_path = config::path();
     let Some(initial) = load_initial(&config_path).await else {
@@ -69,6 +70,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
         client.clone(),
         Arc::clone(&handle.notifier),
         Arc::clone(&last_tick),
+        Arc::clone(&handle.self_health),
         shutdown_rx.clone(),
     );
 
@@ -106,6 +108,14 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     let config_task =
         hora_core::config_status::spawn(store.clone(), handle.config.clone(), shutdown_rx.clone());
 
+    // Hora watching itself: stale monitors, stopped tasks, a dead coalescer.
+    let self_task = hora_core::self_check::spawn(
+        store.clone(),
+        handle.config.clone(),
+        Arc::clone(&handle.self_health),
+        shutdown_rx.clone(),
+    );
+
     let prune_task =
         hora_core::maintenance::spawn_pruner(&store, handle.config.clone(), shutdown_rx);
 
@@ -137,6 +147,7 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
             vantage_task,
             updates_task,
             config_task,
+            self_task,
         ],
     );
     serve_until_stopped(

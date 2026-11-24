@@ -272,6 +272,35 @@ pub async fn last_check_time(store: &Store, monitor_id: &str) -> sqlx::Result<Op
         .await
 }
 
+/// [`last_check_time`] of several monitors in one statement: one primary-key
+/// seek per id, without a round trip per monitor through the pool. Monitors
+/// with no check are absent from the result.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn last_check_times(
+    store: &Store,
+    monitor_ids: &[&str],
+) -> sqlx::Result<std::collections::HashMap<String, i64>> {
+    if monitor_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let ids =
+        serde_json::to_string(monitor_ids).map_err(|err| sqlx::Error::Encode(Box::new(err)))?;
+    let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT ids.value, (SELECT time FROM checks WHERE monitor_id = ids.value \
+         ORDER BY time DESC LIMIT 1) FROM json_each(?) AS ids",
+    )
+    .bind(ids)
+    .fetch_all(store.sqlx())
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, time)| time.map(|time| (id, time)))
+        .collect())
+}
+
 /// The most recent heartbeat of a push monitor or watched peer: an explicit
 /// push of any status (an `up`, a `degraded`, or a `down` carrying the job's
 /// own message), never a recorded miss.
