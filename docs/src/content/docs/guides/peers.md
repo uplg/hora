@@ -44,11 +44,14 @@ it looks for:
   deadline, and monitors added within that time excepted;
 - a monitor or peer-watch task the supervisor restarted within the last
   hour;
-- a channel at `alerts.channel_fail_threshold` failures in a row, even while
-  others still deliver;
 - a stopped alert coalescer;
 - checks skipped for lack of file descriptors or memory (what `/healthz`
   reports as `probes_ok: false`).
+
+A channel that keeps failing while others deliver is the
+[channel watchdog](../alerting/#channel-watchdog)'s to report, not this
+monitor's. A look that comes late itself (the host was suspended, the clock
+was set) blames no monitor: each gets the grace of a new one.
 
 While anything is found it is down with every finding in its message and
 alerts like any monitor; it recovers by itself. Its state is recorded when

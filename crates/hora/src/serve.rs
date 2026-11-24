@@ -108,11 +108,10 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
     let config_task =
         hora_core::config_status::spawn(store.clone(), handle.config.clone(), shutdown_rx.clone());
 
-    // Hora watching itself: stale monitors, stopped tasks, failing channels.
+    // Hora watching itself: stale monitors, stopped tasks, a dead coalescer.
     let self_task = hora_core::self_check::spawn(
         store.clone(),
         handle.config.clone(),
-        handle.notifier.clone(),
         Arc::clone(&handle.self_health),
         shutdown_rx.clone(),
     );

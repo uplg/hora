@@ -3,14 +3,17 @@
 //! The dead-man heartbeat catches a dead process, a wedged scheduler, a
 //! broken database, checks skipped for lack of resources and a node whose
 //! every channel fails. What it cannot see is subtler: one monitor that
-//! silently stopped checking, a task the supervisor keeps restarting, one
-//! channel of several that keeps failing. Every minute this task looks for
-//! those and reports them through the self-check monitor (down while any is
-//! present), so they alert like an outage.
+//! silently stopped checking, a task the supervisor keeps restarting. Every
+//! minute this task looks for those and reports them through the self-check
+//! monitor (down while any is present), so they alert like an outage.
+//!
+//! One channel of several that keeps failing is not among them: the channel
+//! watchdog already tells the other channels, and a channel's failures only
+//! end with its next delivery - a finding here would stay long after the
+//! channel was fixed, until something else had to be sent through it.
 //!
 //! It reuses what the rest of Hora already knows instead of measuring again:
-//! the channels' own failure counters (the ones the heartbeat reads), the
-//! supervisor's reaped tasks and its view of the alert coalescer, the
+//! the supervisor's reaped tasks and its view of the alert coalescer, the
 //! probes' resource-exhaustion note behind `/healthz`'s `probes_ok`, and the
 //! newest stored check of each monitor - one primary-key seek per monitor,
 //! all in one statement.
@@ -30,7 +33,6 @@ use tracing::warn;
 
 use crate::config::{Config, MonitorKind, SELF_MONITOR_ID};
 use crate::db::{self, Store};
-use crate::notifications::Notifiers;
 use crate::status::CheckStatus;
 
 /// How often the self-check looks.
@@ -45,6 +47,16 @@ const MAX_DEATHS: usize = 100;
 const STALE_PERIODS: u64 = 3;
 /// Slack on top, for probe timeouts and scheduling jitter.
 const STALE_SLACK_SECS: u64 = 60;
+/// A look this long after the previous one came late itself.
+const LATE_SECS: i64 = 180;
+
+/// Whether the self-check missed its own looks between `previous` and `now`:
+/// the host was suspended, the process stopped, or the clock was set (back
+/// as well). The monitors' tasks waited with it, so what it would call stale
+/// is only as late as itself.
+fn slept(previous: Option<i64>, now: i64) -> bool {
+    previous.is_some_and(|at| !(0..=LATE_SECS).contains(&(now - at)))
+}
 
 /// What the supervisor tells the self-check (and the heartbeat reads).
 #[derive(Debug, Default)]
@@ -97,13 +109,6 @@ impl SelfHealth {
     }
 }
 
-/// One channel's delivery state, as the self-check judges it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelState {
-    pub(crate) name: String,
-    pub(crate) consecutive_failures: u32,
-}
-
 /// What the self-check sees at one look; [`findings`] judges it.
 #[derive(Debug, Default)]
 pub(crate) struct Observed {
@@ -111,7 +116,6 @@ pub(crate) struct Observed {
     pub(crate) last_checks: HashMap<String, i64>,
     /// When each monitor was first seen in the config (the grace of a new one).
     pub(crate) first_seen: HashMap<String, i64>,
-    pub(crate) channels: Vec<ChannelState>,
     /// Tasks that died within the window.
     pub(crate) deaths: Vec<String>,
     pub(crate) coalescer_dead: bool,
@@ -139,15 +143,6 @@ pub(crate) fn findings(config: &Config, seen: &Observed, now: i64) -> Vec<String
         found.push(
             "checks are being skipped: this host is out of file descriptors or memory".to_owned(),
         );
-    }
-    let threshold = config.alerts.channel_fail_threshold.max(1);
-    for channel in &seen.channels {
-        if channel.consecutive_failures >= threshold {
-            found.push(format!(
-                "channel {} failed {} deliveries in a row",
-                channel.name, channel.consecutive_failures
-            ));
-        }
     }
     for task in &seen.deaths {
         found.push(format!(
@@ -182,7 +177,7 @@ pub fn state(found: &[String]) -> (CheckStatus, String) {
     if found.is_empty() {
         return (
             CheckStatus::Up,
-            "all monitors checking, channels delivering".to_owned(),
+            "all monitors checking, no task restarted".to_owned(),
         );
     }
     let message = format!(
@@ -201,17 +196,24 @@ pub fn state(found: &[String]) -> (CheckStatus, String) {
 pub fn spawn(
     store: Store,
     config: watch::Receiver<Arc<Config>>,
-    notifier: Notifiers,
     health: Arc<SelfHealth>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut first_seen: HashMap<String, i64> = HashMap::new();
         let mut recorded: Option<(CheckStatus, String, i64)> = None;
+        let mut looked: Option<i64> = None;
         loop {
             let snapshot = config.borrow().clone();
             let now = jiff::Timestamp::now().as_second();
-            let seen = observe(&store, &snapshot, &notifier, &health, &mut first_seen, now).await;
+            // Late itself: every monitor gets the grace of a new one again,
+            // instead of an alert for each on waking up.
+            if slept(looked.replace(now), now) {
+                for seen in first_seen.values_mut() {
+                    *seen = now;
+                }
+            }
+            let seen = observe(&store, &snapshot, &health, &mut first_seen, now).await;
             let (status, message) = state(&findings(&snapshot, &seen, now));
             let due = recorded.as_ref().is_none_or(|(was, said, at)| {
                 *was != status || *said != message || now - at >= REFRESH_SECS
@@ -235,7 +237,6 @@ pub fn spawn(
 async fn observe(
     store: &Store,
     config: &Config,
-    notifier: &Notifiers,
     health: &SelfHealth,
     first_seen: &mut HashMap<String, i64>,
     now: i64,
@@ -259,19 +260,9 @@ async fn observe(
             ids.iter().map(|id| ((*id).to_owned(), now)).collect()
         }
     };
-    let channels = notifier
-        .load()
-        .health_snapshot()
-        .into_iter()
-        .map(|entry| ChannelState {
-            name: entry.name,
-            consecutive_failures: entry.health.consecutive_failures,
-        })
-        .collect();
     Observed {
         last_checks,
         first_seen: first_seen.clone(),
-        channels,
         deaths: health.recent_deaths(now),
         coalescer_dead: health.cannot_deliver(),
         probes_starved: crate::probe::local::recent(now),
@@ -321,11 +312,7 @@ mod tests {
 
     #[test]
     fn a_healthy_node_has_no_findings() {
-        let mut observed = seen(&[("web", NOW - 30)], NOW - 3600);
-        observed.channels = vec![ChannelState {
-            name: "push".to_owned(),
-            consecutive_failures: 0,
-        }];
+        let observed = seen(&[("web", NOW - 30)], NOW - 3600);
         let found = findings(&config(), &observed, NOW);
         assert_eq!(found, Vec::<String>::new());
         assert_eq!(state(&found).0, CheckStatus::Up);
@@ -357,36 +344,40 @@ mod tests {
     }
 
     #[test]
-    fn failing_channels_stopped_tasks_starved_probes_and_a_dead_coalescer_are_reported() {
+    fn stopped_tasks_starved_probes_and_a_dead_coalescer_are_reported() {
         let mut observed = seen(&[("web", NOW - 30)], NOW - 3600);
-        observed.channels = vec![
-            ChannelState {
-                name: "ok".to_owned(),
-                consecutive_failures: 2,
-            },
-            ChannelState {
-                name: "pager".to_owned(),
-                consecutive_failures: 3,
-            },
-        ];
         observed.deaths = vec!["monitor web".to_owned()];
         observed.coalescer_dead = true;
         observed.probes_starved = true;
         let found = findings(&config(), &observed, NOW);
-        assert_eq!(found.len(), 4, "{found:?}");
+        assert_eq!(found.len(), 3, "{found:?}");
         assert!(found[0].contains("coalescer"));
         assert!(found[1].contains("out of file descriptors or memory"));
-        assert_eq!(found[2], "channel pager failed 3 deliveries in a row");
         assert_eq!(
-            found[3],
+            found[2],
             "monitor web task stopped within the last hour (restarted)"
         );
         let (status, message) = state(&found);
         assert_eq!(status, CheckStatus::Down);
         assert!(
-            message.starts_with("4 self-check finding(s): "),
+            message.starts_with("3 self-check finding(s): "),
             "{message}"
         );
+    }
+
+    /// A look that comes late itself - the host was suspended, the clock
+    /// was set - blames nobody: every monitor waited with it.
+    #[test]
+    fn a_self_check_that_slept_gives_every_monitor_its_grace_again() {
+        assert!(!slept(None, NOW), "the first look");
+        assert!(!slept(Some(NOW - 60), NOW), "on time");
+        assert!(!slept(Some(NOW - LATE_SECS), NOW));
+        assert!(slept(Some(NOW - LATE_SECS - 1), NOW), "hours of suspend");
+        assert!(slept(Some(NOW + 5), NOW), "the clock went back");
+        // What the look after a night's suspend sees: checks hours old, and
+        // a grace that starts now.
+        let asleep = seen(&[("web", NOW - 8 * 3600)], NOW);
+        assert_eq!(findings(&config(), &asleep, NOW), Vec::<String>::new());
     }
 
     #[test]
@@ -412,12 +403,10 @@ mod tests {
         db::insert_push(&store, "job", CheckStatus::Up, None, None)
             .await
             .unwrap();
-        let client = reqwest::Client::new();
-        let notifier = crate::notifications::shared(&config, &client);
         let health = SelfHealth::default();
         let mut first_seen = HashMap::new();
         let now = jiff::Timestamp::now().as_second();
-        let seen = observe(&store, &config, &notifier, &health, &mut first_seen, now).await;
+        let seen = observe(&store, &config, &health, &mut first_seen, now).await;
         assert_eq!(seen.last_checks.len(), 1, "push monitors are not looked up");
         assert!(seen.last_checks["web"] >= now - 5);
         assert_eq!(seen.first_seen.len(), config.monitors.len());
@@ -434,13 +423,11 @@ mod spawn_tests {
     async fn the_self_check_records_its_state() {
         let store = Store::in_memory().await;
         let config = Arc::new(crate::config::parse_lenient("[page]\n[server]\n").unwrap());
-        let client = reqwest::Client::new();
-        let notifier = crate::notifications::shared(&config, &client);
         let health = Arc::new(SelfHealth::default());
         health.coalescer_died();
         let (_tx, rx) = watch::channel(config);
         let (stop, stopped) = watch::channel(false);
-        let task = spawn(store.clone(), rx, notifier, health, stopped);
+        let task = spawn(store.clone(), rx, health, stopped);
         let beat = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(beat) = db::last_heartbeat(&store, SELF_MONITOR_ID).await.unwrap() {

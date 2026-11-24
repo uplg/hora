@@ -80,10 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A built-in `hora-self` monitor.** Every minute it looks for what the
   dead-man heartbeat cannot see because the node as a whole still works: a
   monitor that has not checked for three of its periods, a monitor or
-  peer-watch task restarted within the last hour, a channel at
-  `channel_fail_threshold` failures in a row while others still deliver, a
-  stopped alert coalescer, and checks skipped for lack of file descriptors
-  or memory. It is down with every finding named and alerts like any
+  peer-watch task restarted within the last hour, a stopped alert
+  coalescer, and checks skipped for lack of file descriptors or memory (one
+  failing channel of several stays the channel watchdog's to report). It is down with every finding named and alerts like any
   monitor. Like `hora-config` it takes no push, reserves its id and is
   private unless `public = true`; the optional `[self_monitor]` section
   takes the same keys as `[config_monitor]`.
