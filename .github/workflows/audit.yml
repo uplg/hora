@@ -40,7 +40,7 @@ jobs:
       # from source (~3min) on every run - 98% of the daily job for a 3s scan.
       # A cache is the wrong tool here: the daily cron would keep a "latest"
       # binary warm forever, and the advisory DB must stay fresh anyway.
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-audit
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0

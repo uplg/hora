@@ -133,6 +133,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration keeps running, as before, and `hora-config` says so.
 - **`hora check` names every faulty entry**, not just the first, and still
   fails while there is one.
+- **Dependencies at their latest.** `notify` 9.0 (file notifications),
+  `croner` 5.0 (push `schedule`, `[digest]` and maintenance crons: existing
+  schedules load unchanged), `nix` 0.32, `jiff` 1.0.2, `toml` 1.2.2,
+  `regex` 1.13.2, `anyhow` 1.0.105, and the lock file refreshed
+  (`rustls-webpki` 0.103.17 among others). `notify` 9 brings `xxhash-rust`,
+  under the Boost Software License, now on the allowed list.
+  With `notify` 9 Hora asks for changes only, no longer for every open and
+  close in the config's directory: a read of the database next to the
+  config, or of the config itself, wakes nothing.
+- **Docs site**: `astro` 7.4.13, `@astrojs/starlight` 0.43.1.
 
 ## [0.12.3] - 2026-11-23
 
