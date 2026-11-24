@@ -19,6 +19,9 @@ allow = [
     "CDLA-Permissive-2.0",
     "Unicode-3.0",
     "Zlib",
+    # Boost Software License (permissive; not the Business Source License,
+    # which is BUSL): xxhash-rust, through notify 9.
+    "BSL-1.0",
 ]
 confidence-threshold = 0.9
 
