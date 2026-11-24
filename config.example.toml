@@ -256,6 +256,7 @@ default_retention_days = 90
 # group = "Watchdog"         # status-page group
 # notify = ["ops-telegram"]  # default: every channel
 # public = true              # default: false - on the operator's view only
+# repeat_alert_secs = 86400  # "still down" reminders; default: [alerts], 0 = none
 
 # --- Scheduled maintenance ------------------------------------------------
 # Alerts are muted for the affected monitors during the window (checks still
