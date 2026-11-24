@@ -4,6 +4,36 @@ Version-specific notes when moving between Hora releases. The general
 procedure (pull the new image, recreate the container, history lives on the
 `hora-data` volume) is in the [upgrading guide](https://uplg.github.io/hora/upgrading/).
 
+## 0.12.3 → 0.13.0
+
+No migration. Every new config key is optional, and a config that loads on
+0.12.3 loads the same on 0.13.0. What changes without a key being set:
+
+- **The daemon no longer exits on a config it cannot load.** A faulty
+  monitor, channel or maintenance window is left out and the rest runs; a
+  file that cannot be read at all (TOML syntax, an invalid `[server]`)
+  leaves Hora answering `503` and reading it again every 5 s. If a deploy
+  counted on the process exiting, run `hora check` (or `hora check --strict`)
+  before it instead: its verdict is as strict as before.
+- **A reload with a faulty entry applies the rest**, and stops that entry
+  until it is fixed. Before, the whole reload was refused and the previous
+  configuration kept running.
+- **Two built-in monitors, `hora-config` and `hora-self`**, alert through
+  every channel when the configuration has issues or part of Hora is
+  broken. They are private (the operator's view only); `[config_monitor]`
+  and `[self_monitor]` route, rename or show them. The ids `hora-config` and
+  `hora-self` are reserved: a monitor or a peer's `listen_id` of that name
+  is now refused.
+- **A push path is logged as `/api/push/[redacted]`** unless it ends in a
+  known monitor or peer id.
+- **A healthy push monitor is judged when a heartbeat comes and at its
+  deadline**, no longer every minute: a missed heartbeat is down on the
+  second its interval runs out.
+
+As always, add the new keys (`kind = "mqtt"`, `jq`, `repeat_alert_secs`,
+`ignore_tls`, ...) only once the new version runs: 0.12.3 refuses a key it
+does not know.
+
 ## 0.12.2 → 0.12.3
 
 No migration and no new config key. Pull the new image and recreate the

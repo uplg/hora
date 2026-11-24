@@ -20,9 +20,6 @@ records what actually shipped.
   monitor on it down within seconds, and each is a message today: 280
   monitors, 280 notifications. Grouped by host, by group or by burst into
   one ("37 services down on frank"), with the list a tap away.
-- **"Still down" reminders** - a confirmed outage says so again after N
-  minutes, until it ends or someone acknowledges it. The first half of
-  escalation, useful on its own.
 - **Start and finish heartbeats** - a job pings when it starts
   (`?event=start`) and when it ends: a run that never finishes is caught,
   and how long each run took is on the monitor's page.
@@ -41,7 +38,8 @@ records what actually shipped.
 - **Escalation & acknowledgement** - if an alert is not acknowledged within
   N minutes, notify the next channel; ack via a signed link in the
   notification. The biggest item on the list; it builds on the "still
-  down" reminders above and is more natural once severity routing exists.
+  down" reminders (`repeat_alert_secs`, since 0.13) and is more natural
+  once severity routing exists.
 - **`conf.d/` config splitting** - forty monitors in one file doesn't scale
   to a team; splitting plays well with config-as-code in git, and
   `hora peers diff` already verifies the mesh stays aligned.

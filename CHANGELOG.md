@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-24
+
+MQTT monitors, jq assertions, "still down" reminders, recurring maintenance
+windows, and a daemon that keeps running on a config with a faulty entry
+and says so through two built-in monitors. No migration. Read the
+[upgrade notes](UPGRADES.md) first: the daemon no longer exits on a config
+it cannot load, and two monitors of its own now alert through your channels.
+
 ### Added
 
 - **`[server] summary_idle_refresh_secs`**: how long the status summary
@@ -2135,7 +2143,8 @@ Initial release.
   amd64/arm64), with GitHub Actions for CI (fmt, clippy, tests, cargo-deny) and
   publishing to GHCR.
 
-[Unreleased]: https://github.com/uplg/hora/compare/v0.12.3...HEAD
+[Unreleased]: https://github.com/uplg/hora/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/uplg/hora/compare/v0.12.3...v0.13.0
 [0.12.3]: https://github.com/uplg/hora/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/uplg/hora/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/uplg/hora/compare/v0.12.0...v0.12.1
