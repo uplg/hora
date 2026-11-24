@@ -686,12 +686,13 @@ mod tests {
     }
 
     /// The peer heartbeats, announcing its reboot: a window under way that
-    /// lasts `secs` more seconds. Then its watch starts.
+    /// lasts `secs` more seconds. Then its watch starts. Also returns the
+    /// second (unix) the window ends at.
     async fn watch_through_a_window(
         store: &Store,
         config: &Config,
         secs: i64,
-    ) -> (JoinHandle<()>, watch::Sender<bool>) {
+    ) -> (JoinHandle<()>, watch::Sender<bool>, i64) {
         let now = jiff::Timestamp::now().as_second();
         db::insert_push(
             store,
@@ -730,7 +731,7 @@ mod tests {
             AlertCell::default(),
             shutdown_rx,
         );
-        (task, shutdown_tx)
+        (task, shutdown_tx, now + secs)
     }
 
     /// The peer said it would be down for a few seconds and is still silent
@@ -740,25 +741,36 @@ mod tests {
         let (hook, posts) = crate::testing::webhook_sink().await;
         let config = watching_config(&hook);
         let store = Store::in_memory().await;
-        let (task, _shutdown) = watch_through_a_window(&store, &config, 4).await;
+        let (task, _shutdown, ends_at) = watch_through_a_window(&store, &config, 4).await;
 
-        // It has gone silent, and the watch sees it - and says nothing.
-        tokio::time::sleep(Duration::from_millis(3200)).await;
-        assert_eq!(crate::testing::events(&posts), Vec::<String>::new());
-        let checks = db::recent_checks(&store, "frank-in", 10).await.unwrap();
-        assert!(
-            checks
-                .iter()
-                .any(|check| check.status == crate::status::CheckStatus::Down),
-            "the missed heartbeats are recorded: {checks:?}"
-        );
-
-        // The window is over and the peer is not back: the alert goes out.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        // It has gone silent, and the watch sees it - and says nothing until
+        // the window is over. Timed against the window itself: a sleep meant
+        // to end inside it runs past its end on a loaded machine.
+        let mut missed_in_window = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(14);
         while crate::testing::events(&posts).is_empty() && tokio::time::Instant::now() < deadline {
+            if !missed_in_window && jiff::Timestamp::now().as_second() < ends_at {
+                let checks = db::recent_checks(&store, "frank-in", 10).await.unwrap();
+                missed_in_window = checks
+                    .iter()
+                    .any(|check| check.status == crate::status::CheckStatus::Down);
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        let announced_at = jiff::Timestamp::now().as_second();
+        assert!(
+            missed_in_window,
+            "the missed heartbeats are recorded while the window lasts"
+        );
+
+        // The window is over and the peer is not back: the alert went out,
+        // and not a second before.
         assert_eq!(crate::testing::events(&posts), ["down"]);
+        assert!(
+            announced_at >= ends_at,
+            "announced {} s before the window ended",
+            ends_at - announced_at
+        );
         assert_eq!(posts.lock().unwrap()[0]["monitor"], "Frank");
 
         // And when it comes back, so does its recovery.
@@ -787,7 +799,7 @@ mod tests {
         let (hook, posts) = crate::testing::webhook_sink().await;
         let config = watching_config(&hook);
         let store = Store::in_memory().await;
-        let (task, _shutdown) = watch_through_a_window(&store, &config, 4).await;
+        let (task, _shutdown, _ends_at) = watch_through_a_window(&store, &config, 4).await;
 
         // Silent for a while inside the window...
         tokio::time::sleep(Duration::from_millis(2500)).await;
