@@ -206,9 +206,12 @@ type ErrorPage = (
 
 /// While waiting for a configuration that loads: 503 on every
 /// path (so `/healthz` and the container health check fail visibly), bound
-/// where the daemon will listen (`HORA_BIND`, else its default).
+/// where the daemon will listen (`HORA_BIND` unless empty, else its default).
 async fn serve_config_error() -> Option<ErrorPage> {
-    let bind = std::env::var("HORA_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
+    let bind = std::env::var("HORA_BIND")
+        .ok()
+        .filter(|bind| !bind.is_empty())
+        .unwrap_or_else(|| "127.0.0.1:8787".to_owned());
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(listener) => listener,
         Err(err) => {

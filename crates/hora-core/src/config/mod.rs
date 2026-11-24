@@ -767,7 +767,11 @@ fn read_error(err: toml::de::Error) -> anyhow::Error {
 /// Infrastructure overrides honoured by the Docker image; secrets come from the
 /// config (optionally via `${VAR}`), not from fixed variables.
 fn apply_env_overrides(config: &mut Config) {
-    if let Ok(bind) = std::env::var("HORA_BIND") {
+    // Empty = unset: a container template that leaves the field blank.
+    if let Some(bind) = std::env::var("HORA_BIND")
+        .ok()
+        .filter(|bind| !bind.is_empty())
+    {
         config.server.bind = bind;
     }
     if let Ok(path) = std::env::var("HORA_DATABASE_PATH") {
